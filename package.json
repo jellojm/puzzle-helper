@@ -4,7 +4,7 @@
   "private": true,
   "description": "iPhone web app that catalogs jigsaw pieces on a table and finds matches.",
   "scripts": {
-    "test": "node test/run-tests.js",
+    "test": "node test/run-tests.js && node test/live-sections.js && node test/unit-area.js && node test/seg-regression.js",
     "test:quick": "node test/run-tests.js --quick",
     "serve": "node tools/serve.js",
     "serve:https": "node tools/serve.js --https",

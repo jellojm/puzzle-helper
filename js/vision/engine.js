@@ -474,7 +474,22 @@
     // the app runs (test/seg-regression.js).
     liveSegOpts(info, extra) {
       const unitArea = this.opts.stableUnit === false ? null : this.unitLive || null;
-      return this.segOpts(Object.assign({ bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25, unitArea }, extra));
+      const o = { bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25, unitArea };
+      // WP2: on still frames also use the pieces' outlines (lightness edges),
+      // closed into rings and filled. That recovers pale pieces whose print
+      // matches the table. Moving frames stay colour-only (blur makes edges
+      // one-sided). The ring-closing kernel scales with piece size.
+      if (info && info.still !== false && this.opts.boundary !== false) {
+        const odd = (v) => (v % 2 ? v : v + 1);
+        o.boundary = 'fill';
+        o.boundaryT = 10;
+        // Measured on the owner's white-table frames: close 3 beat 5/7/9 at
+        // piece areas ~1000-2000 px² (bigger kernels fuse neighbours). Only
+        // grow it for much larger pieces (very close-up / high Scan detail).
+        o.boundaryClose = unitArea ? PH.clamp(odd(Math.round(0.07 * Math.sqrt(unitArea))), 3, 7) : 3;
+        o.openK = this.opts.boundaryOpenK === undefined ? 0 : this.opts.boundaryOpenK; // the 3x3 open sheared tabs
+      }
+      return this.segOpts(Object.assign(o, extra));
     }
 
     /**
