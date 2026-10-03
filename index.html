@@ -18,6 +18,11 @@
   <main id="app" hidden>
     <video id="video" playsinline muted autoplay></video>
     <canvas id="overlay"></canvas>
+    <canvas id="tableMap" hidden aria-label="Table map: drag to pan, pinch to zoom, twist to rotate, tap a piece"></canvas>
+    <div id="mapCtrls" hidden>
+      <button id="mapFitBtn" aria-label="Fit the whole table">Fit</button>
+      <button id="mapRotBtn" aria-label="Rotate 90 degrees">↻ 90°</button>
+    </div>
 
     <header id="topbar">
       <span id="trackDot" class="dot" title="Tracking"></span>
@@ -47,7 +52,7 @@
       <button data-filter="unplaced">Unplaced</button>
       <button data-filter="unread">Unread</button>
       <button id="pairsBtn">Matches</button>
-      <button id="mapBtn">Map</button>
+      <button id="mapBtn">Box picture</button>
     </div>
 
     <div id="matchBar" hidden>
@@ -141,7 +146,8 @@
           <li><b>Matches</b> searches the whole catalog for pairs that fit, with no box picture needed; use ‹ › to step through them.</li>
           <li><b>Check the matches:</b> try each suggested pair and tap <b>Fits</b> or <b>No</b> (in Matches or in a piece's panel). The app keeps score — More shows how often it was right — and Send report shares the answers so the matching can be tuned. A quick way: separate pieces you have already fitted together, scan them, then judge the suggestions.</li>
           <li>A piece is catalogued only after the camera has seen it clearly a few frames in a row, and its shape counts as <b>confirmed</b> once a second, later view agrees. Matches between confirmed shapes can turn gold; a dashed frame or "?" means a shape read only once.</li>
-          <li><b>Map</b> hides the box picture when it's in the way.</li>
+          <li><b>Box picture</b> (in Find) hides or shows the small box picture when it's in the way.</li>
+          <li><b>Map</b> turns the camera off and shows the scanned pieces from above, as their own pictures, so several people can work from one screen. Drag to move, pinch to zoom, twist (or ↻ 90°) to turn it toward you, tap a piece for its matches. The finders and Matches work here too. Pieces moved since scanning: switch to Scan and sweep that area again.</li>
         </ul>
       </details>
     </section>
@@ -149,6 +155,7 @@
     <nav id="toolbar">
       <button data-mode="scan" class="active"><span class="ico">◎</span>Scan</button>
       <button data-mode="find"><span class="ico">⌖</span>Find</button>
+      <button data-mode="map"><span class="ico">▦</span>Map</button>
       <button id="edgesBtn" aria-pressed="false"><span class="ico">⬚</span>Border</button>
       <button id="boxBtn"><span class="ico">▣</span>Box</button>
       <button id="menuBtn"><span class="ico">≡</span>More</button>
@@ -162,6 +169,7 @@
       <p>Point your phone at puzzle pieces spread on a table. It catalogs every piece as you sweep, shows where each one goes on the box picture, and highlights pieces that fit together.</p>
       <button id="startBtn" class="primary">Start camera</button>
       <p id="startStatus" class="muted small"></p>
+      <p id="appVersion" class="muted small"></p>
       <p class="muted small">Works best with a plain cloth under the pieces. Everything runs on your phone; nothing is uploaded.</p>
       <p class="small"><a href="#" id="videoTest">Test with a video file instead</a></p>
       <input id="videoInput" type="file" accept="video/*" hidden>

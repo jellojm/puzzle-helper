@@ -242,6 +242,8 @@ const handlers = {
       pairs: r.pairs.slice(0, 60).map((p) => Object.assign({}, p, { A: brief(p.a), B: brief(p.b) })) });
   },
   showPair(msg) { engine.selectPair(msg.a, msg.b); },
+  // Table view: every catalogued piece with its position, read placement and picture.
+  mapData() { post({ type: 'mapData', data: engine.mapData() }); },
   // Fold duplicate scan groups together and drop entries that never read as pieces.
   async tidy() {
     const r = engine.tidy();

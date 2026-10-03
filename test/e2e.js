@@ -211,6 +211,33 @@ function writePng(file, mat) {
       const opened = await page.waitForSelector('#findPanel:not([hidden])', { timeout: 8000 }).then(() => true).catch(() => false);
       check('tapping a piece works with tilt correction', opened, opened ? await page.textContent('#selTitle') : 'panel did not open');
     } else check('tapping a piece works with tilt correction', false, 'no shaped piece visible');
+
+    // Table view (Map mode): camera off, pieces drawn from above, same tools.
+    await page.click('#closeFind').catch(() => {});
+    await page.click('#toolbar [data-mode="map"]');
+    await page.waitForFunction(() => window.__phMapState && window.__phMapState().pieces > 0, null, { timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(400);
+    const ms = await page.evaluate(() => window.__phMapState());
+    check('Map: camera off, scanned pieces drawn as pictures', !ms.hidden && !ms.active && ms.drawn > 5, `${ms.drawn} of ${ms.pieces} drawn`);
+    await page.screenshot({ path: path.join(OUT, 'e2e-map.png') });
+    const sz = ms.size || [];
+    check('Map: every picture drawn at one piece size', sz.length > 5 && sz[0] > 0.75 && sz[sz.length - 1] < 1.3, sz.length ? `${sz[0]} - ${sz[sz.length - 1]} (median ${sz[sz.length >> 1]})` : 'none');
+    const mp = await page.evaluate(() => window.__phMapPick());
+    if (mp) {
+      await page.mouse.click(mp[0], mp[1]);
+      const opened = await page.waitForFunction(() => !document.getElementById('findPanel').hidden && /Piece #/.test(document.getElementById('selTitle').textContent), null, { timeout: 5000 }).then(() => true).catch(() => false);
+      check('Map: tapping a piece opens its matches', opened, opened ? await page.textContent('#selTitle') : `tapped #${mp[2]}, panel did not open`);
+      await page.click('#closeFind').catch(() => {});
+    } else check('Map: tapping a piece opens its matches', false, 'no drawn piece on screen');
+    await page.click('#edgesBtn');
+    await page.waitForTimeout(400);
+    const stillMap = await page.evaluate(() => !document.getElementById('tableMap').hidden && document.getElementById('edgesBtn').getAttribute('aria-pressed') === 'true');
+    check('Map: Border lights up on the map without leaving it', stillMap);
+    await page.click('#edgesBtn');
+    await page.click('#toolbar [data-mode="scan"]');
+    await page.waitForTimeout(1500);
+    const back = await page.evaluate(() => window.__phMapState());
+    check('Scan again: camera back on, map hidden', back.hidden && back.active, `hidden ${back.hidden}, camera ${back.active}`);
     check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   } finally {
     await browser.close();

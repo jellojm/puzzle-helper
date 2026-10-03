@@ -1,9 +1,13 @@
 // Page controller: camera, frame pump to the vision worker, overlay, UI.
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
+import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.10.0';
+const APP_VERSION = '0.10.1';
 const $ = (id) => document.getElementById(id);
+// Version on the start screen (and under More), so it's clear which build the phone is running.
+document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
+if (document.readyState !== 'loading') { const v = document.getElementById('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; }
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
 
 // Things under the top bar sit below its real height (it wraps on long messages).
@@ -127,7 +131,8 @@ worker.onmessage = (e) => {
     case 'box': setBox(m.box); toast(`Box picture ready: ${m.box.cols} × ${m.box.rows} grid.`); break;
     case 'taught': showTaught(m.count); break;
     case 'boxCorners': if (m.corners) boxSetup.setCorners(m.corners); break;
-    case 'selected': showFind(m.desc); break;
+    case 'selected': showFind(m.desc); mapShowSelection(m.desc); break;
+    case 'mapData': tableView.setData(m.data); mapApplyFilter(); break;
     case 'region': S.region = m.cells; toast(m.count ? `${m.count} catalogued pieces belong in that area.` : 'No catalogued pieces placed in that area yet.'); drawMinimap(); break;
     case 'filter': {
       const label = { corner: 'corner pieces', border: 'edge pieces', edges: 'border pieces (corners and edges)', unplaced: 'pieces not placed on the box', unread: 'pieces whose shape is unread' }[m.kind];
@@ -194,7 +199,7 @@ async function ensureCamera() {
 // open, the app in the background, or the phone left sitting still. The camera
 // is released outright (not just paused) so the recording indicator goes out.
 function scanningWanted() {
-  return S.running && !document.hidden && !S.pickerOpen && !S.idle &&
+  return S.running && !document.hidden && !S.pickerOpen && !S.idle && S.mode !== 'map' &&
     $('menu').hidden && $('boxModal').hidden && $('start').hidden;
 }
 // Last real camera view, kept when the camera is switched off (menu, idle)
@@ -508,8 +513,16 @@ function setMode(mode) {
   S.mode = mode;
   document.querySelectorAll('#toolbar [data-mode]').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
   $('modeHint').textContent = S.ready ? modeHint(mode) : $('modeHint').textContent;
-  $('findBar').hidden = mode !== 'find';
-  document.body.classList.toggle('findbar', mode === 'find');
+  const finding = mode === 'find' || mode === 'map';
+  $('findBar').hidden = !finding;
+  document.body.classList.toggle('findbar', finding);
+  // Map (Table view): camera off, the scanned pieces drawn from above.
+  const map = mode === 'map';
+  $('tableMap').hidden = !map; $('mapCtrls').hidden = !map;
+  overlay.hidden = map;
+  if (map) { closeFind(); W.post({ type: 'mapData' }); }
+  applyMapVisibility();
+  applyPower();
   if (mode === 'scan') {
     closeFind(); closeMatches(); clearFilter();
     W.post({ type: 'clearHighlights' });
@@ -520,7 +533,7 @@ function setMode(mode) {
 document.querySelectorAll('#toolbar [data-mode]').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
 
 function modeHint(mode) {
-  return mode === 'scan' ? 'Sweep slowly over the pieces' : 'Tap a piece, or pick a group below';
+  return mode === 'scan' ? 'Sweep slowly over the pieces' : mode === 'map' ? 'Table map — camera off. Tap a piece for its matches' : 'Tap a piece, or pick a group below';
 }
 
 function updateStats(c, tracking) {
@@ -779,9 +792,50 @@ function showSection(desc) {
   rows.append(row);
 }
 
+// ---------- Table view (Map mode) ----------
+const tableView = new TableView($('tableMap'), {
+  onTap: (id) => { if (id) W.post({ type: 'select', id }); else closeFind(); },
+});
+$('mapFitBtn').onclick = () => tableView.fit();
+$('mapRotBtn').onclick = () => tableView.rotate90();
+// The finder chips / Border light pieces up on the map from its own data.
+function mapApplyFilter() {
+  if (S.mode !== 'map') return;
+  tableView.setHighlights({ roles: S.filter ? tableView.filterRoles(S.filter) : new Map(), lines: [] });
+}
+// A selected piece on the map: white ring, its likely partners gold/silver,
+// dashed lines to them.
+function mapShowSelection(desc) {
+  if (S.mode !== 'map' || !desc || !desc.piece) return;
+  const roles = new Map([[desc.piece.id, 'sel']]), lines = [];
+  for (const e of desc.edges || []) {
+    (e.matches || []).slice(0, 3).forEach((m, i) => {
+      const gold = i === 0 && m.prob >= 0.5 && (m.loopOk || (desc.piece.confirmed && m.confirmed));
+      if (!roles.has(m.id)) roles.set(m.id, gold ? 'gold' : 'silver');
+      lines.push([desc.piece.id, m.id, gold ? '#ffcc00' : 'rgba(201,206,214,0.8)']);
+    });
+  }
+  for (const p of desc.partners || []) { roles.set(p.id, 'gold'); lines.push([desc.piece.id, p.id, '#c084fc']); }
+  tableView.setHighlights({ roles, lines });
+}
+window.__phMapPick = () => { // test hook: screen point of a drawn piece on the map
+  const c = $('tableMap').getBoundingClientRect();
+  for (const p of tableView.pieces) { if (!p.sprite) continue; const s = tableView.screenOf(p.id); if (s && s[0] > 30 && s[1] > 80 && s[0] < c.width - 30 && s[1] < c.height - 160) return [s[0] + c.left, s[1] + c.top, p.id]; }
+  return null;
+};
+window.__phMapState = () => { // test hook; size = drawn side / one piece, per drawn piece (sorted)
+  const size = tableView.pieces.filter((p) => p.sprite && p.corners).map((p) => {
+    const T = p.corners.map((c) => [p.rd.a * c[0] - p.rd.b * c[1], p.rd.b * c[0] + p.rd.a * c[1]]);
+    let side = 0; for (let k = 0; k < 4; k++) side += Math.hypot(T[(k + 1) % 4][0] - T[k][0], T[(k + 1) % 4][1] - T[k][1]) / 4;
+    return +(side / tableView.unit).toFixed(2);
+  }).sort((x, y) => x - y);
+  return { pieces: tableView.pieces.length, drawn: size.length, hidden: $('tableMap').hidden, active: S.active, size };
+};
+
 function closeFind() {
   $('findPanel').hidden = true;
   if (S.desc) { S.desc = null; W.post({ type: 'select', id: null }); }
+  if (S.mode === 'map') mapApplyFilter();
   drawMinimap();
 }
 $('closeFind').onclick = closeFind;
@@ -807,6 +861,7 @@ function setFilter(kind) {
   $('findBar').querySelectorAll('[data-filter]').forEach((b) => b.classList.toggle('on', b.dataset.filter === next));
   showBorderBtn();
   if (next) { closeFind(); closeMatches(); }
+  if (S.mode === 'map') mapApplyFilter();
   W.post({ type: 'filter', kind: next });
 }
 $('findBar').querySelectorAll('[data-filter]').forEach((b) => (b.onclick = () => setFilter(b.dataset.filter)));
@@ -838,6 +893,10 @@ function showMatches() {
   $('matchPrev').disabled = S.pairIdx === 0;
   $('matchNext').disabled = S.pairIdx >= S.pairs.length - 1;
   W.post({ type: 'showPair', a: p.a, b: p.b });
+  if (S.mode === 'map') {
+    tableView.setHighlights({ roles: new Map([[p.a, 'pairA'], [p.b, 'pairB']]), lines: [[p.a, p.b, '#ffcc00']] });
+    tableView.zoomTo([p.a, p.b]);
+  }
   S.needDraw = true;
 }
 function stepMatch(n) { S.pairIdx += n; showMatches(); }
@@ -865,11 +924,11 @@ function closeMatches() {
 // The box picture is useful but it covers a third of the view; let it go away.
 $('mapBtn').onclick = () => { S.mapHidden = !S.mapHidden; saveLocal(); applyMapVisibility(); };
 function applyMapVisibility() {
-  const show = !!S.box && !S.mapHidden;
+  const show = !!S.box && !S.mapHidden && S.mode !== 'map';
   minimap.hidden = !show;
   $('mapBtn').disabled = !S.box;
-  $('mapBtn').classList.toggle('on', show);
-  $('mapBtn').textContent = S.box ? (show ? 'Hide map' : 'Show map') : 'Map';
+  $('mapBtn').classList.toggle('on', !!S.box && !S.mapHidden);
+  $('mapBtn').textContent = S.box ? (S.mapHidden ? 'Show box' : 'Hide box') : 'Box picture';
   if (show) drawMinimap();
 }
 
@@ -975,7 +1034,7 @@ $('snapBtn').onclick = () => { endTeaching(); $('menu').hidden = true; S.snapTil
 // from any mode. Tap again to turn it off.
 $('edgesBtn').onclick = () => {
   endTeaching();
-  if (S.mode !== 'find') setMode('find');
+  if (S.mode === 'scan') setMode('find');
   setFilter('edges');
 };
 $('snapInput').onchange = async (e) => {

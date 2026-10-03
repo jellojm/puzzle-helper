@@ -59,6 +59,36 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
   const c = good.counts();
   check('a steady sweep catalogues the pieces, once each', c.pieces >= n * 0.85 && c.pieces <= n, `${c.pieces} of ${n}`);
 
+  // v0.10.0 deadlock (owner's 200-piece session: 0 pieces in 3 minutes): a
+  // section (merged blob) catalogued in the very first steady frame made the
+  // engine wait to re-find a map that had no real anchors, and provisional
+  // pieces expired meanwhile. Start the sweep right over an assembled block.
+  {
+    const blocks = [{ r0: 2, c0: 1, rows: 3, cols: 3 }];
+    const inBlock = (q) => blocks.some((b) => q.r >= b.r0 && q.r < b.r0 + b.rows && q.c >= b.c0 && q.c < b.c0 + b.cols);
+    const loose = P.pieces.map((q, i) => i).filter((i) => !inBlock(P.pieces[i]));
+    const sc = S.scatter(cv, P, { scale: 2.2, seed: 21, subset: loose, blocks });
+    const bl = sc.blocks[0];
+    const bx = bl.x, by = bl.y; // the block's centre on the synthetic table
+    const zoom = 1.5, vw = FW / zoom, vh = FH / zoom, stops = [];
+    for (let k = 0; k < 3; k++) stops.push([Math.min(Math.max(bx, vw / 2), sc.TW - vw / 2) + k * 6, Math.min(Math.max(by, vh / 2), sc.TH - vh / 2)]);
+    for (let y = vh / 2; y <= sc.TH - vh / 2 + 1; y += vh * 0.45) for (let x = vw / 2; x <= sc.TW - vw / 2 + 1; x += vw * 0.3) for (let k = 0; k < 3; k++) stops.push([x + k * 6, y]);
+    const eng = new PH.Engine();
+    // The state the phone reached after its first frames: a section (here a
+    // towel fold / touching pair stand-in) already on the map, no loose pieces.
+    const sec = eng.newPiece({ fp: { hist: new Float32Array(PH.HIST_BINS), L: 0, a: 128, b: 128, sdL: 0 } }, [50000, 50000], eng.nextIsland++, 5000);
+    sec.kind = 'section';
+    let tracked = 0;
+    for (const [x, y] of stops) {
+      const fr = S.cameraFrame(cv, sc.table, x, y, 0, zoom, FW, FH);
+      const o = eng.processFrame(S.matSource(cv, fr), { still: true });
+      if (o.tracking) tracked++;
+      fr.delete();
+    }
+    const cc = eng.counts();
+    check('a section in the first frame does not stall cataloguing', cc.pieces >= loose.length * 0.8, `${cc.pieces} of ${loose.length} loose pieces, ${cc.sections} section(s), tracking ${Math.round(100 * tracked / stops.length)}% of frames`);
+  }
+
   // Camera distance from the real piece size: 25 mm pieces, 100 px side in a
   // 1920-wide frame with a 66 degree lens -> f = 960/tan(33deg) = 1478 px ->
   // distance = 1478 * 25 / 100 = 370 mm.

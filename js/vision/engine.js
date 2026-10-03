@@ -193,7 +193,7 @@
         const r = PH.simRansac(pairs, unitT * 1.0, 100, this.rnd);
         if (!r || r.inliers.length < 3) continue;
         for (const p of this.pieces.values()) {
-          if (p.island === ib && p.pos) { p.pos = PH.simApply(r.T, p.pos[0], p.pos[1]); p.island = ia; this.touch(p); }
+          if (p.island === ib && p.pos) { this.moveWithGroup(p, r.T); p.island = ia; this.touch(p); }
         }
         if (this.island === ib) { this.island = ia; if (this.pose) this.pose = composeSim(r.T, this.pose); }
         joinedIslands++;
@@ -302,6 +302,7 @@
           pr.p.pos = [pr.p.pos[0] * 0.9 + q[0] * 0.1, pr.p.pos[1] * 0.9 + q[1] * 0.1];
         } else if (pr.d.tracked && pr.d.linkSim > 0.7) {
           pr.p.pos = PH.simApply(T, pr.src[0], pr.src[1]);
+          this.markMoved(pr.p);
           this.touch(pr.p);
         } else {
           pr.d.id = null;
@@ -313,7 +314,7 @@
         const r2 = PH.simRansac(g.map((pr) => ({ src: pr.p.pos, dst: PH.simApply(T, pr.src[0], pr.src[1]) })), unitT * 0.5, 40, this.rnd);
         if (!r2 || r2.inliers.length < Math.min(3, g.length)) continue;
         for (const p of this.pieces.values()) {
-          if (p.island === isl && p.pos) { p.pos = PH.simApply(r2.T, p.pos[0], p.pos[1]); p.island = main.isl; this.touch(p); }
+          if (p.island === isl && p.pos) { this.moveWithGroup(p, r2.T); p.island = main.isl; this.touch(p); }
         }
       }
       return true;
@@ -429,7 +430,7 @@
         if (g.length < 3) continue;
         const r = PH.simRansac(g, unitT * 0.5, 100, this.rnd);
         if (!r || r.inliers.length < 3) continue;
-        for (const p of this.pieces.values()) if (p.island === isl && p.pos) { p.pos = PH.simApply(r.T, p.pos[0], p.pos[1]); p.island = this.island; this.touch(p); }
+        for (const p of this.pieces.values()) if (p.island === isl && p.pos) { this.moveWithGroup(p, r.T); p.island = this.island; this.touch(p); }
         for (const k of r.inliers) if (!g[k].d.id) g[k].d.id = g[k].p.id;
         merged++;
       }
@@ -499,7 +500,14 @@
       }
       if (!ok) {
         this.lost++;
-        const anyPlaced = [...this.pieces.values()].some((p) => p.pos);
+        // Is there a map worth waiting for? Only with >= 3 located loose
+        // pieces: sections can't anchor a pose. (v0.10.0 counted any located
+        // entry, so one early section - a towel fold, two touching pieces -
+        // made the engine wait to re-find a map it never had; provisional
+        // pieces expired meanwhile and nothing was ever catalogued.)
+        let anchors = 0;
+        for (const p of this.pieces.values()) if (p.pos && p.kind !== 'section' && ++anchors >= 3) break;
+        const anyPlaced = anchors >= 3;
         const goodDets = dets.filter((d) => !d.border && !d.merged).length;
         // Color fingerprints fail under changed light or zoom; outlines don't.
         // Try the (slower) shape match before giving up, but only on a steady
@@ -742,6 +750,74 @@
       return true;
     }
 
+    /** Table view: remember how the view a piece's shape was read in maps
+     *  onto the table map - a similarity from source pixels to table units -
+     *  and where the piece stood then. The map draws the piece's picture
+     *  (thumbnail + outline, in source pixels) through it: right position,
+     *  angle and size. Later small position refinements are a translation.
+     *  `pic` (thumbnail + corners, optionally its own edge outlines) is the
+     *  picture of THIS read when it is not the stored shape's own - the map
+     *  must draw the picture that goes with the placement (same view, same
+     *  pixel scale); null = the stored shape's picture. */
+    notePlacement(p, pic) {
+      const T = this.pose, F = this.frameCtx;
+      if (!T || !p.pos || !F) return;
+      const s = F.scale;
+      p.rd = { a: T.a * s, b: T.b * s, tx: T.tx, ty: T.ty, pos0: p.pos.slice() };
+      p.pic = pic || null;
+    }
+    /** Move a piece with its whole scan group (islands being joined): its
+     *  position and its read placement both go through T. */
+    moveWithGroup(p, T) {
+      p.pos = PH.simApply(T, p.pos[0], p.pos[1]);
+      const r = p.rd;
+      if (r) {
+        p.rd = { a: T.a * r.a - T.b * r.b, b: T.b * r.a + T.a * r.b,
+          tx: T.a * r.tx - T.b * r.ty + T.tx, ty: T.b * r.tx + T.a * r.ty + T.ty,
+          pos0: PH.simApply(T, r.pos0[0], r.pos0[1]), stale: r.stale };
+      }
+    }
+    /** A piece that physically moved: the map keeps drawing its picture
+     *  (following its new position) but its angle is out of date until the
+     *  next live read places it again. */
+    markMoved(p) { if (p.rd) p.rd.stale = true; }
+    /** Everything the Table view needs, for every catalogued entry. */
+    mapData() {
+      const doubt = this.cornerDoubts();
+      const out = [];
+      for (const p of this.pieces.values()) {
+        if (!p.pos) continue;
+        const f = edgeFlags(p);
+        const t1 = p.t1, pic = p.rd && p.pic;
+        out.push({
+          id: p.id, kind: p.kind || 'piece', pos: p.pos, island: p.island, rd: p.rd || null, missing: !!p.missing,
+          area: p.area, shaped: !!t1, placed: !!(p.t2 && p.t2.conf >= 0.35), confirmed: shapeConfirmed(p),
+          border: f.border && !f.corner, corner: f.corner && !doubt.has(p.id),
+          thumb: pic ? pic.thumb : t1 ? t1.thumb : null, corners: pic ? pic.corners : t1 ? t1.corners : null,
+          sigs: pic && pic.sigs ? pic.sigs : t1 ? t1.edges.map((e) => e.sig) : null,
+          sec: p.kind === 'section' && p.sec && p.sec.cells ? p.sec.cells.length : 0,
+        });
+      }
+      const unit = this.unitTable() || 30;
+      // Drawn size: a read whose view was distorted (a wrong tilt reading
+      // straightens the far side up to ~2x) would draw its piece too big or
+      // too small. Pieces of one puzzle are all about one size, so a picture
+      // more than ~15% off the typical size is drawn at the typical size,
+      // centred where it was and at its own angle.
+      const side = (c) => { let s = 0; for (let k = 0; k < 4; k++) s += Math.hypot(c[(k + 1) % 4][0] - c[k][0], c[(k + 1) % 4][1] - c[k][1]) / 4; return s; };
+      const drawn = out.filter((q) => q.rd && q.corners && q.kind !== 'section');
+      const ratio = drawn.map((q) => Math.hypot(q.rd.a, q.rd.b) * side(q.corners) / unit);
+      const typ = PH.median(ratio);
+      drawn.forEach((q, i) => {
+        if (!(typ > 0) || Math.abs(Math.log(ratio[i] / typ)) < 0.15) return;
+        const r = q.rd, k = typ / ratio[i], a = r.a * k, b = r.b * k;
+        const cx = q.corners.reduce((s, c) => s + c[0], 0) / 4, cy = q.corners.reduce((s, c) => s + c[1], 0) / 4;
+        const mx = r.a * cx - r.b * cy + r.tx, my = r.b * cx + r.a * cy + r.ty; // where its centre was drawn
+        q.rd = { a, b, tx: mx - (a * cx - b * cy), ty: my - (b * cx + a * cy), pos0: r.pos0, stale: r.stale };
+      });
+      return { pieces: out, unit };
+    }
+
     /** Why detection `d` is not good enough to become a new piece (null = OK).
      *  'moving' blurred frame, 'far' too few pixels per piece to read its shape,
      *  'size' not one piece's area (fragment or clump), 'shape' not piece-shaped. */
@@ -905,6 +981,8 @@
           // An assembled section (or a clump of touching pieces): catalogued
           // separately and located on the box picture as a whole.
           if (!this.frameCtx.still) continue;
+          // Sections go through the same "seen twice in a row" rule as pieces.
+          if (this.frameCtx.live && !this.promote(d)) continue;
           const p = this.newPiece(d, q, this.island, d.area * s * s);
           p.kind = 'section';
           d.id = p.id; claimed.add(p.id);
@@ -916,7 +994,7 @@
         const moved = this.findMoved(d, s, claimed);
         if (moved === 'defer') continue; // out of time this frame; decide next frame
         if (moved) {
-          moved.pos = q; moved.island = this.island; moved.miss = 0; moved.missing = false; d.id = moved.id; claimed.add(moved.id); this.touch(moved);
+          moved.pos = q; moved.island = this.island; moved.miss = 0; moved.missing = false; this.markMoved(moved); d.id = moved.id; claimed.add(moved.id); this.touch(moved);
           continue;
         }
         // Only good shots make new pieces: steady, close enough to read, piece-
@@ -1028,7 +1106,9 @@
             // re-read it from a later view (not the next few frames: those are
             // the same view); after that only from a much closer one.
             const confirmed = (p.t1.nObs || 1) >= 2;
-            if (confirmed && sidePx < p.t1.meanSide * 1.4) continue;
+            // ... and a piece without a map placement gets one more read, so
+            // the Table view can draw its picture (same budget cap).
+            if (confirmed && p.rd && !p.rd.stale && sidePx < p.t1.meanSide * 1.4) continue;
             if (!confirmed && this.fNo - (p.t1Frame || 0) < 8) continue;
             pri = confirmed ? 2 : 1;
           }
@@ -1061,18 +1141,28 @@
             const m = PH.samePiece(t1, old);
             if (m.ok) { // two views agree: the shape is confirmed (averaged)
               if ((old.nObs || 1) < 8) PH.fuseShapes(old, t1, m.r);
+              // No map placement yet (moved, or catalogued before v0.10.1):
+              // place it from this read, with this read's picture - the stored
+              // one may come from another view (e.g. a photo, at a different
+              // pixel scale). Corners re-ordered to the stored edges' order.
+              if (!j.p.rd || j.p.rd.stale) this.notePlacement(j.p, { thumb: t1.thumb, corners: [0, 1, 2, 3].map((k) => t1.corners[(k - m.r + 4) % 4]) });
               this.touch(j.p); this.version++; n1++;
               continue;
             }
             // They disagree: keep the better-quality read.
             j.p.conflicts = (j.p.conflicts || 0) + 1;
             const qn = t1.quality ? t1.quality.q : 0, qo = old.quality ? old.quality.q : 0;
-            if (qn <= qo * 1.15) { n1++; continue; }
+            if (qn <= qo * 1.15) {
+              // the stored shape stays; the map still needs this view's picture
+              if (!j.p.rd || j.p.rd.stale) this.notePlacement(j.p, { thumb: t1.thumb, corners: t1.corners, sigs: t1.edges.map((e) => e.sig) });
+              n1++; continue;
+            }
             this.uncalibrate(old);
           }
           j.p.t1 = t1;
           j.p.t1Frame = this.fNo;
           j.p.t1Fail = 0;
+          this.notePlacement(j.p);
           j.p.t2 = null;
           this.calibrate(t1);
           this.touch(j.p);
@@ -1555,7 +1645,7 @@
 
     // ---------- persistence ----------
     exportPiece(p) {
-      return { id: p.id, kind: p.kind, sec: p.sec, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created };
+      return { id: p.id, kind: p.kind, sec: p.sec, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created, rd: p.rd || null, pic: p.pic || null, missing: !!p.missing };
     }
     importState(state) {
       this.reset();

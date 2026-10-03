@@ -9,7 +9,8 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
 - **Find:** tap a piece to see its spot on the box and its best partners for each edge, with a percentage likelihood. A partner marked **2×2 ✓** is confirmed by a closed 2×2 block: the app found two more pieces that fit both this piece and the partner. These confirmed matches were right about 94% of the time in testing. Matching pieces glow on the table (gold = best). Pieces off-screen get an arrow pointing toward them.
   - **Corners / Edges:** light up every corner piece (orange) or edge piece (teal) on the table, with counts. **Unplaced** and **Unread** light up pieces not yet found on the box, or whose shape hasn't been read.
   - **Matches:** search the whole catalog for pairs that fit, with no box picture needed, and step through them with ‹ ›. Tap **Fits** or **No** on each: the app keeps an answer key and shows its running accuracy under **More**.
-  - **Map:** hide or show the box picture.
+  - **Box picture:** hide or show the small box picture when it's in the way.
+- **Map:** turns the camera off and shows every scanned piece from above, as its own picture at its place and angle on the table — so several people can work from one phone or iPad lying on the table. Drag to move, pinch to zoom, twist (or **↻ 90°**) to turn it toward you, **Fit** to see everything. Tap a piece for its matches (lines to its partners); Border, the finders and Matches work here too. Separate scan areas are shown side by side. Pieces moved since scanning: switch to Scan and sweep that area again.
 - **Area search:** tap the small box picture to enlarge it, then drag across a region (e.g. sky). Every piece from that area lights up. Tap the enlarged picture to shrink it again.
 
 Everything runs on the phone. Nothing is uploaded, and the catalog is saved on the phone (IndexedDB).
@@ -92,6 +93,7 @@ node test/leak-check.js      # the live pipeline doesn't leak OpenCV (WebAssembl
 node test/dupes.js           # pieces that drop out of detection aren't catalogued twice
 node test/quality-gate.js    # blurred, distant or one-off views never become pieces
 node test/answer-key.js      # Fits/No answers are logged with what was claimed; accuracy stats
+node test/table-view.js      # Map: each piece's picture at its place, angle and size; groups, fit, tap
 node test/speed.js           # per-stage timing (VISION=<dir> runs another copy of js/vision to compare)
 ```
 
