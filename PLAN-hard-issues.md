@@ -20,7 +20,28 @@ pale-printed pieces (see `reports/*-frame.jpg`).
 | WP1 | **Done** (828a415) | Running `unitLive` + mass-mode own estimate (≥ 3 blobs, else null). Fragments are never catalogued as new pieces. `test/unit-area.js`: unit within 7%, no duplicate entries |
 | WP2 | **Done** (5f7aeaf) | Boundary fill on still frames, open off. good/frag: white-1 20/8 → 31/2, white-2 21/10 → 35/1, close-1 14/8 → 13/4, close-2 9/4 → 7/2 |
 | WP3–WP7, WP9 | Open | — |
+| **Next (from reports)** | Open | 1) black report frame, 2) tilt-border streaks, 3) lighting-robust background (flatten illumination; taught colours compared on flattened lightness), 4) tilt-path slowdown |
 | **New** | Open | **Lamp shadows on the table**: on both close-ups, the shadowed table area becomes one big foreground blob and swallows the pieces in it. Likely fix: flatten illumination (local background lightness from a large-scale closing/blur of L) before the colour distance |
+
+**Phone reports 13:36–13:42 (v0.6.0, before WP1/WP2 shipped)** — replay any report with
+`node test/report-replay.js reports/<report>.json --draw` (same taught colours, tilt, Scan detail):
+- Speed is fine: 6–7 fps, `total` 44 ms median without tilt correction. **With tilt correction**
+  `seg` is 108–115 ms: `seg_dist` 38–40 ms and `seg_thresh` 16–17 ms vs ~1 ms untilted, though the
+  image is the same size (346–385×640). Not reproducible in node (38 ms total). Suspect GC from the
+  per-frame warp allocations in `PH.rectifiedSource` — reuse buffers (WP5).
+- **Taught background goes stale when the light changes.** The two taught colours are both the
+  *shadowed* board (L 110–117); in the 13:42 report the lit board is L≈203, so the board itself is
+  "foreground" (only 22% of the frame classed as background) → one huge blob → 0 pieces found among
+  ~35 visible. In 13:36 the lit half fails the same way (published: 2 good; with WP1/WP2: 9, all on
+  the shadow side).
+- **Lamp shadows** on every frame (see NEW above): the dominant-colour model and the taught table
+  both treat the shadowed vs lit board as different colours.
+- Consequence: few detections → tracking lost (5% of frames in 13:42) → 16 → 25 → 35 islands and
+  344 pieces + 25 sections for a 300-piece box.
+- **Report frame is black** when the camera was released behind the menu (13:40) — capture the
+  frame before releasing, or keep the last good frame.
+- Tilt-corrected frames have `BORDER_REPLICATE` streaks at the edges that become border blobs —
+  mark out-of-image pixels as background instead.
 
 **Correction to §1.1 / WP2 step 2:** measured on all four frames, close 3 beat 5/7/9
 at unit ~1000–2000 px² (larger kernels fuse neighbours; close 9 also lost pieces
