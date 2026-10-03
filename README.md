@@ -3,7 +3,8 @@
 An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces spread on a table:
 
 - **Scan:** sweep slowly over the table. Each piece gets a catalog entry and a dot, grey → blue (shape read) → green (placed on the box picture). The dots follow the camera between readings, so they stay on the pieces while you move. Gold dashed lines link loose pieces that very likely fit together.
-- **Snap:** take a full-resolution photo to catalog every piece in it at once.
+- **Border:** one tap lights up the whole frame of the puzzle — corner pieces orange, edge pieces teal — with arrows to the nearest ones off screen. Tap again to turn it off.
+- **More → Catalog from a photo:** take a full-resolution photo to catalog every piece in it at once.
 - **Box:** photograph the box picture. The app splits it into the puzzle's grid and works out where each piece belongs.
 - **Find:** tap a piece to see its spot on the box and its best partners for each edge, with a percentage likelihood. A partner marked **2×2 ✓** is confirmed by a closed 2×2 block: the app found two more pieces that fit both this piece and the partner. These confirmed matches were right about 94% of the time in testing. Matching pieces glow on the table (gold = best). Pieces off-screen get an arrow pointing toward them.
   - **Corners / Edges:** light up every corner piece (orange) or edge piece (teal) on the table, with counts. **Unplaced** and **Unread** light up pieces not yet found on the box, or whose shape hasn't been read.
@@ -52,13 +53,13 @@ Open that address on the iPhone. Safari shows a certificate warning once: tap *S
 - Hold the phone flat, 30–40 cm up, and pause briefly over each area. Shapes are only read while the phone is steady. Holding it at an angle to avoid glare is fine (the app straightens the view), but closer is better: far-away pieces become too small to read.
 - If the dot at the top turns red ("lost my place"), hold still over pieces you've already scanned. The app finds its position again from them.
 - If the piece count goes past the puzzle's size, the same pieces were catalogued twice after tracking was lost. **More → Tidy up the catalog** folds the duplicates back together.
-- **More → Scan detail** trades sensitivity for speed and battery; **More → Send report** saves the camera view, the box picture and diagnostic data (share it to Files/OneDrive) when something looks wrong.
+- **More → Scan detail** trades sensitivity for speed and battery; **More → Send report** saves the camera view, the box picture and diagnostic data (share it to Files/OneDrive) when something looks wrong. The data covers speed per stage for the whole session, how smooth the screen was, the motion tracker's cost, the vision engine's state and settings — `python tools/report-summary.py` prints it.
 
 ## How it works (short)
 
 | Step | When | What |
 |---|---|---|
-| Segmentation | every frame (live: 640 px long side) | background chosen from candidates (dominant colour, taught colours, box palette) by which one yields pieces; lamp shadows evened out; on steady frames, piece outlines closed with an edge channel so pale pieces aren't lost against a white board |
+| Segmentation | every frame (live: 640 px long side) | background chosen from candidates (dominant colour, taught colours, box palette) by which one yields pieces; lamp shadows evened out; on steady frames, piece outlines closed with an edge channel so pale pieces aren't lost against a white board. All full-frame pixel work runs in OpenCV (WebAssembly): the same JavaScript loops ran 2 ms in one phone session and 80 ms in another |
 | Motion | every other display frame (~1 ms, page side) | a 96 px thumbnail matched against the last analysed frame; moves the dots between readings and tells a blurred sweep from a steady view |
 | Fingerprint | every piece, every frame (<1 ms) | color histogram + mean color; tracks pieces between frames |
 | Table map | every frame | known pieces are used as landmarks to fit the camera position (RANSAC similarity). Moved pieces are noticed and updated; separate scan areas merge when seen together. |
@@ -86,6 +87,7 @@ node test/flow-overlay.js    # dots follow the camera: tracker + screen mapping 
 node test/flow-lab.js        # motion tracker accuracy and cost on synthetic shifts
 node test/worker-reset.js    # New puzzle / Clear everything forget taught table colours
 node test/seg-regression.js  # segmentation on real white-table frames doesn't regress
+node test/leak-check.js      # the live pipeline doesn't leak OpenCV (WebAssembly) memory
 ```
 
 Working from real data (the phone's **Send report** files in `reports/`):

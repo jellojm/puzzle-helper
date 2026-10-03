@@ -54,6 +54,20 @@ const confident = steps.filter((s) => s.conf >= 0.3).length;
 const moving = steps.filter((s) => Math.hypot(s.dx, s.dy) > 0.5).length;
 console.log(`steps: ${steps.length}, confident ${confident}, moving ${moving}; per call ${(ms / n).toFixed(2)} ms`);
 console.log('first 40 steps (dx,dy,conf):', steps.slice(0, 40).map((s) => `${s.dx.toFixed(1)},${s.dy.toFixed(1)},${s.conf.toFixed(2)}`).join(' | '));
+// The tracker as the app runs it: keyframe = the frame handed to analysis
+// (every 4th step here, ~analysis rate vs ~30 Hz tracking), predicted search
+// first, full search only when that isn't sure.
+const T = new PH.FlowTracker(w, h);
+let tms = 0;
+for (let i = 0; i < grays.length; i++) {
+  const t0 = process.hrtime.bigint();
+  T.push(grays[i]);
+  tms += Number(process.hrtime.bigint() - t0) / 1e6;
+  if (i % 4 === 0) T.mark();
+}
+const fullOnly = (() => { const t0 = process.hrtime.bigint(); for (let i = 1; i < grays.length; i++) PH.flowShift(grays[i - 1], grays[i], w, h, { range: T.range }); return Number(process.hrtime.bigint() - t0) / 1e6 / (grays.length - 1); })();
+console.log(`tracker: ${(tms / grays.length).toFixed(2)} ms per push (full search alone ${fullOnly.toFixed(2)} ms); predicted ${T.predicted}, full search ${T.fullSearch}, low-confidence ${T.lowConf}, re-keys ${T.rekeys}`);
+check('predicted search handles most steps', T.predicted / Math.max(1, T.steps) > 0.7, `${T.predicted}/${T.steps}`);
 check('two single steps add up to the double step', tested > 0 && bad / tested < 0.15, `${bad}/${tested} triplets off by >1 thumbnail px (worst ${worst.toFixed(2)})`);
 check('tracker is confident over most of the video', confident / steps.length > 0.6, `${confident}/${steps.length}`);
 check('cheap per call', ms / n < 3, `${(ms / n).toFixed(2)} ms`);

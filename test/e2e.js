@@ -164,13 +164,32 @@ function writePng(file, mat) {
     await page.click('#teachClear');
     await page.click('#teachDone');
     check('teach background learns a tapped color', /1 spot/.test(taught), taught);
+    // Border (toolbar): corners + edge pieces in one tap, off on the second.
+    await page.click('#closeFind').catch(() => {});
+    await page.click('#edgesBtn');
+    await page.waitForTimeout(800);
+    const borderOn = await page.evaluate(() => ({ pressed: document.getElementById('edgesBtn').getAttribute('aria-pressed'), toast: document.getElementById('toast').textContent }));
+    await page.click('#edgesBtn');
+    await page.waitForTimeout(300);
+    const borderOff = await page.evaluate(() => document.getElementById('edgesBtn').getAttribute('aria-pressed'));
+    check('Border button lights up corners + edges and toggles off', borderOn.pressed === 'true' && /border pieces/.test(borderOn.toast) && borderOff === 'false', `${borderOn.toast} | off: ${borderOff}`);
+    check('Snap is off the toolbar (kept under More)', await page.evaluate(() => !document.querySelector('#toolbar #snapBtn') && !!document.querySelector('#menu #snapBtn')));
+
     // Send report: in a desktop browser the files are downloaded.
     await page.click('#menuBtn');
     const dls = [];
-    page.on('download', (d) => dls.push(d.suggestedFilename()));
+    let reportJson = null;
+    page.on('download', async (d) => {
+      dls.push(d.suggestedFilename());
+      if (d.suggestedFilename().endsWith('.json')) { try { reportJson = JSON.parse(fs.readFileSync(await d.path(), 'utf8')); } catch (_) { /* checked below */ } }
+    });
     await page.click('#reportBtn');
     await page.waitForTimeout(4000);
     check('send report produces frame + analyzed view + data files', dls.some((n) => n.endsWith('.json')) && dls.some((n) => n.endsWith('frame.jpg')) && dls.some((n) => n.endsWith('analyzed.jpg')), dls.join(', '));
+    const want = ['mainThread', 'stats', 'settings', 'device', 'flow'], wantW = ['engine', 'catalog', 'session'];
+    const missing = reportJson ? want.filter((k) => !reportJson[k]).concat(wantW.filter((k) => !(reportJson.worker || {})[k])) : ['(no JSON)'];
+    check('report carries the diagnostic blocks', !missing.length,
+      missing.length ? 'missing ' + missing.join(', ') : `session ${JSON.stringify(reportJson.worker.session).slice(0, 120)}… | wasm ${reportJson.worker.engine.wasmHeapMB} MB | lag in history: ${reportJson.history.some((r) => r.lag != null)}`);
     // Phone tilted ~35°: feed gravity readings, then tap a piece through the
     // corrected mapping (outline -> screen -> tap -> back to the piece).
     await page.evaluate(() => {

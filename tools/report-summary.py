@@ -15,7 +15,7 @@ for f in sys.argv[1:]:
           '| tilt', deg, '(corrected)' if lf.get('rect') else '')
     b = w.get('box') or {}
     c = w.get('counts') or {}
-    print('  box', b.get('cols'), 'x', b.get('rows'), '=', c.get('expected'), '| counts', {k: c.get(k) for k in ('pieces','sections','shaped','placed','located','border','corner','cornerDoubt','islands')})
+    print('  box', b.get('cols'), 'x', b.get('rows'), '=', c.get('expected'), '| counts', {k: c.get(k) for k in ('pieces','sections','shaped','placed','located','border','corner','cornerUnplaced','cornerDoubt','islands')})
     o = w.get('opts') or {}
     print('  settings procW', o.get('procW'), 'minDE', o.get('minDE'), '| taught', len(w.get('taught') or []), '| bg', lf.get('bg') and {k: round(v) for k, v in lf['bg'].items() if k in 'Lab'})
     if h:
@@ -32,4 +32,24 @@ for f in sys.argv[1:]:
     pcs = [p for p in (w.get('pieces') or []) if p.get('code')]
     cs = [p for p in pcs if is_corner(p['code'])]
     if cs: print('  corner-shaped', len(cs), '->', [(p['id'], p['code'], p.get('island'), p.get('box') and (p['box']['col'], p['box']['row'])) for p in cs][:12])
+    # Diagnostics added in v0.9.1 (absent in older reports).
+    fl = d.get('flow') or {}
+    if fl.get('steps') is not None:
+        print('  tracker', {k: fl.get(k) for k in ('every', 'msPerStep', 'readMs', 'matchMs', 'maxMs', 'steps', 'predicted', 'fullSearch', 'lowConf', 'resumes')})
+    mt = d.get('mainThread')
+    if mt: print('  main thread (display-frame gaps ms)', mt)
+    sts = d.get('stats')
+    if sts: print('  session', {k: v for k, v in sts.items() if k != 'started'})
+    if d.get('settings'): print('  settings', d['settings'])
+    if d.get('device'): print('  device', d['device'])
+    es = w.get('engine')
+    if es: print('  engine', {k: v for k, v in es.items() if k != 'cornerDoubts'}, '| corner doubts', len(es.get('cornerDoubts') or []))
+    cat = w.get('catalog')
+    if cat: print('  catalog', cat)
+    ss = w.get('session')
+    if ss:
+        top = sorted(ss.get('stages', {}).items(), key=lambda kv: -kv[1]['mean'])[:8]
+        print('  whole session', {k: ss.get(k) for k in ('minutes', 'frames', 'totalP50', 'totalP90', 'totalP99')}, '| slowest stages (mean/max)', [(k, v['mean'], v['max']) for k, v in top])
+    if h and any(r.get('lag') is not None for r in h):
+        print('  send->result lag ms median', st.median([r['lag'] for r in h if r.get('lag') is not None]), '| worker queue wait median', st.median([r.get('wait', 0) for r in h]))
     print('  errors', (d.get('errors') or [])[-3:] or None)

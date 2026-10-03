@@ -70,7 +70,7 @@
       return p;
     }
     counts() {
-      let shaped = 0, placed = 0, located = 0, sections = 0, pieces = 0, border = 0, corner = 0, cornerDoubt = 0;
+      let shaped = 0, placed = 0, located = 0, sections = 0, pieces = 0, border = 0, cornerShaped = 0, cornerDoubt = 0;
       const islands = new Set();
       const doubt = this.cornerDoubts();
       for (const p of this.pieces.values()) {
@@ -80,12 +80,19 @@
         if (p.t2 && p.t2.conf >= 0.35) placed++;
         if (p.pos) { located++; islands.add(p.island); }
         const f = edgeFlags(p);
-        if (f.corner) { if (doubt.has(p.id)) cornerDoubt++; else corner++; } else if (f.border) border++;
+        if (f.corner) { if (doubt.has(p.id)) cornerDoubt++; else cornerShaped++; } else if (f.border) border++;
       }
       // `islands` is how many disconnected scan groups the table map is in.
       // More than a few means tracking keeps breaking and the same physical
       // pieces are being catalogued more than once.
-      return { pieces, sections, shaped, placed, located, border, corner, cornerDoubt, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
+      // With a box picture a puzzle has exactly 4 corners: `corner` counts the
+      // corner spots that have a confidently placed winner (<= 4), and corner-
+      // shaped pieces not confidently placed yet are `cornerUnplaced` (they are
+      // still lit by the Corners/Border finders — they need finding). Before,
+      // every undoubted corner shape was counted: 6 corners on a 15x20 box.
+      const corner = this.box ? doubt.winners.size : cornerShaped;
+      const cornerUnplaced = this.box ? cornerShaped - doubt.winners.size : 0;
+      return { pieces, sections, shaped, placed, located, border, corner, cornerUnplaced, cornerDoubt, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
     }
 
     /**
@@ -95,8 +102,12 @@
      * the rest are doubtful (a duplicate that couldn't be merged, or a piece
      * whose straight edges were misread). Returns the set of doubtful ids.
      */
+    // Corner-shaped pieces to doubt (a better piece holds that corner spot, or
+    // placed mid-edge). The returned Set also carries `.winners`: the ids that
+    // hold a corner spot.
     cornerDoubts() {
       const doubt = new Set();
+      doubt.winners = new Set();
       if (!this.box) return doubt;
       const { cols, rows } = this.box;
       const isCornerCell = (c, r) => (c === 0 || c === cols - 1) && (r === 0 || r === rows - 1);
@@ -112,6 +123,7 @@
         else if (score > cur.score) { doubt.add(cur.p.id); best.set(key, { p, score }); }
         else doubt.add(p.id);
       }
+      for (const { p } of best.values()) doubt.winners.add(p.id);
       return doubt;
     }
 
@@ -1140,7 +1152,9 @@
     }
     /** Highlight a whole class of pieces at once, with no box picture needed.
      *  'border' = at least one straight edge, 'corner' = two straight edges
-     *  meeting, 'unplaced' = shape read but not found on the box picture,
+     *  meeting, 'edges' = both of those (the toolbar's Edges button: the whole
+     *  frame of the puzzle, corners and edge pieces in their own colours),
+     *  'unplaced' = shape read but not found on the box picture,
      *  'unread' = seen but its shape hasn't been read yet. */
     setFilter(kind) {
       this.filter = kind || null;
@@ -1152,11 +1166,12 @@
     filterIds() {
       if (!this.filter) return [];
       const out = [];
-      const doubt = this.filter === 'corner' ? this.cornerDoubts() : null;
+      const doubt = this.filter === 'corner' || this.filter === 'edges' ? this.cornerDoubts() : null;
       for (const p of this.pieces.values()) {
         if (p.kind === 'section') continue;
         const f = edgeFlags(p);
         const hit = this.filter === 'corner' ? f.corner && !doubt.has(p.id)
+          : this.filter === 'edges' ? (f.corner && !doubt.has(p.id)) || (f.border && !f.corner)
           : this.filter === 'border' ? f.border && !f.corner
             : this.filter === 'unplaced' ? !!p.t1 && !(p.t2 && p.t2.conf >= 0.35)
               : this.filter === 'unread' ? !p.t1
@@ -1329,17 +1344,18 @@
         // A class filter can match hundreds of pieces. Everything in view is
         // outlined, but only the nearest few off-screen ones get an arrow,
         // otherwise the edges of the screen fill up with clutter.
-        const role = this.filter === 'corner' ? 'corner' : this.filter === 'border' ? 'border' : 'find';
+        const fixed = this.filter === 'corner' ? 'corner' : this.filter === 'border' ? 'border' : 'find';
+        const role = (id) => this.filter !== 'edges' ? fixed : edgeFlags(this.pieces.get(id)).corner ? 'corner' : 'border';
         const off = [];
         for (const id of this.filterIds()) {
-          if (byId.has(id)) { locate(id, role); continue; }
+          if (byId.has(id)) { locate(id, role(id)); continue; }
           const p = this.pieces.get(id);
           if (p && p.pos && inv && p.island === this.island) off.push(p);
         }
         if (off.length) {
           const c = PH.simApply(this.pose, proc.w / 2, proc.h / 2);
           off.sort((x, y) => Math.hypot(x.pos[0] - c[0], x.pos[1] - c[1]) - Math.hypot(y.pos[0] - c[0], y.pos[1] - c[1]));
-          for (const p of off.slice(0, 6)) locate(p.id, role);
+          for (const p of off.slice(0, 6)) locate(p.id, role(p.id));
         }
       }
       // Auto-flag: mutual best matches among visible pieces.

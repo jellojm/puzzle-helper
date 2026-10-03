@@ -98,6 +98,9 @@ body.findbar.matchbar #minimap { bottom: calc(var(--safe-b) + 262px); }
 #toolbar button .ico { font-size: 22px; line-height: 1; }
 #toolbar button.active { color: var(--text); }
 #toolbar button.active .ico { color: var(--accent); }
+/* Border toggle (not a mode): lit in the corner-piece orange while on. */
+#toolbar button.on { color: var(--text); }
+#toolbar button.on .ico { color: #ff8c3a; }
 
 .sheet { position: absolute; left: 0; right: 0; bottom: 0; max-height: 62vh; overflow-y: auto;
   background: var(--panel); border-radius: 16px 16px 0 0; padding: 12px 14px calc(var(--safe-b) + 14px);

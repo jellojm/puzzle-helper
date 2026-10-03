@@ -86,6 +86,7 @@
       <p id="countWarn" class="warn-note small" hidden></p>
       <p id="compatNote" class="warn-note small" hidden></p>
       <div class="menu-actions">
+        <button id="snapBtn">Catalog from a photo</button>
         <button id="tidyBtn">Tidy up the catalog</button>
       </div>
       <p class="muted small">Folds scan groups back together when the same piece was catalogued twice after losing tracking, and drops blobs that never read as pieces.</p>
@@ -103,7 +104,7 @@
         <input id="detail" type="range" min="480" max="1120" step="80" value="640">
         <span id="detailVal">640</span>
       </label>
-      <p class="muted small">Lower is faster and much easier on the battery. Raise it only if small pieces are being missed — it does not affect photo (Snap) quality.</p>
+      <p class="muted small">Lower is faster and much easier on the battery. Raise it only if small pieces are being missed — it does not affect photo quality.</p>
       <label class="row"><input id="outlineToggle" type="checkbox"> Draw full piece outlines (slower)</label>
       <label class="row"><input id="followToggle" type="checkbox" checked> Marks follow the camera between readings</label>
       <p class="muted small">Off by default: pieces are marked with a dot, which keeps the overlay smooth.</p>
@@ -118,7 +119,7 @@
       <div class="menu-actions">
         <button id="reportBtn">Send report (frame + data)</button>
       </div>
-      <p class="muted small">Saves the current camera view, your last Snap photo and diagnostic data. Choose "Save to Files" → OneDrive → Puzzle Helper → reports to get it to the PC.</p>
+      <p class="muted small">Saves the current camera view, the box picture, your last catalogued photo and diagnostic data. Choose "Save to Files" → OneDrive → Puzzle Helper → reports to get it to the PC.</p>
       <div class="menu-actions">
         <button id="newPuzzle">New puzzle (keep box picture)</button>
         <button id="clearAll" class="danger">Clear everything</button>
@@ -130,7 +131,8 @@
           <li>Pieces face up, not touching.</li>
           <li>Light: a lamp off to one side, low over the table, makes every piece cast a thin shadow, which helps separate pieces from a cloth of similar color. Avoid a strong light directly overhead that bleaches the print.</li>
           <li>Hold the phone flat, 30–40 cm above the table, and sweep slowly. Pause a moment over each area; outlines turn blue then green as pieces are read.</li>
-          <li><b>Snap</b> takes a full-resolution photo and catalogs every piece in it at once.</li>
+          <li><b>Border</b> (toolbar) lights up the whole frame of the puzzle at once — corners orange, edge pieces teal. Tap it again to turn it off.</li>
+          <li><b>Catalog from a photo</b> (below) takes a full-resolution photo and catalogs every piece in it at once.</li>
           <li>Tap a piece to see where it goes on the box and which pieces fit it. Gold = best match.</li>
           <li>Drag across the box picture to light up every piece from that area.</li>
           <li>In <b>Find</b>, tap <b>Corners</b> or <b>Edges</b> to light up every border piece on the table — orange for corners, teal for edges. Arrows point to the ones just off screen.</li>
@@ -143,7 +145,7 @@
     <nav id="toolbar">
       <button data-mode="scan" class="active"><span class="ico">◎</span>Scan</button>
       <button data-mode="find"><span class="ico">⌖</span>Find</button>
-      <button id="snapBtn"><span class="ico">◉</span>Snap</button>
+      <button id="edgesBtn" aria-pressed="false"><span class="ico">⬚</span>Border</button>
       <button id="boxBtn"><span class="ico">▣</span>Box</button>
       <button id="menuBtn"><span class="ico">≡</span>More</button>
     </nav>

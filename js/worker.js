@@ -93,6 +93,29 @@ function scheduleSave() {
 
 // ---------- messaging ----------
 function post(msg, transfer) { self.postMessage(msg, transfer || []); }
+
+// Whole-session timing totals for reports (the page keeps only the last few
+// minutes of per-frame history): count / mean / max per stage, plus the
+// recent `total`s for percentiles.
+const session = { started: Date.now(), frames: 0, stats: {}, totals: [] };
+function noteTimings(t) {
+  session.frames++;
+  for (const k in t) {
+    const v = t[k];
+    if (typeof v !== 'number' || !isFinite(v)) continue;
+    const s = session.stats[k] || (session.stats[k] = { n: 0, sum: 0, max: 0 });
+    s.n++; s.sum += v; if (v > s.max) s.max = v;
+  }
+  session.totals.push(t.total || 0);
+  if (session.totals.length > 600) session.totals.shift();
+}
+function sessionSummary() {
+  const q = (arr, p) => { if (!arr.length) return null; const a = arr.slice().sort((x, y) => x - y); return Math.round(a[Math.min(a.length - 1, Math.floor(a.length * p))]); };
+  const stages = {};
+  for (const k in session.stats) { const s = session.stats[k]; stages[k] = { n: s.n, mean: +(s.sum / s.n).toFixed(1), max: Math.round(s.max) }; }
+  return { minutes: +((Date.now() - session.started) / 60000).toFixed(1), frames: session.frames,
+    totalP50: q(session.totals, 0.5), totalP90: q(session.totals, 0.9), totalP99: q(session.totals, 0.99), stages };
+}
 function boxInfo() {
   const b = engine.box;
   if (!b) return null;
@@ -138,11 +161,16 @@ const handlers = {
   frame(msg) {
     const src = bitmapSource(msg.bitmap);
     const g0 = performance.now();
+    // How long the frame waited between the page sending it and this handler
+    // starting (message transfer + anything queued ahead of it), on one clock.
+    const waitMs = msg.sentAt ? Math.max(0, performance.timeOrigin + g0 - msg.sentAt) : null;
     const out = engine.processFrame(src, { still: msg.still, tilt: msg.tilt });
     out.timings.workerTotal = performance.now() - g0;
+    if (waitMs !== null) out.timings.wait = waitMs;
     msg.bitmap.close();
     out.type = 'frame';
     out.frameW = src.w; out.frameH = src.h;
+    noteTimings(out.timings);
     post(out);
     scheduleSave();
   },
@@ -250,11 +278,38 @@ const handlers = {
       meanSide: p.t1 ? Math.round(p.t1.meanSide) : null, t1Fail: p.t1Fail || 0,
       box: p.t2 && p.t2.cands.length ? { col: p.t2.cands[0].col, row: p.t2.cands[0].row, conf: +p.t2.conf.toFixed(2) } : null,
       wrong: p.wrong, joined: p.joined,
+      rot: p.t2 && p.t2.cands.length ? p.t2.cands[0].rot : undefined,
+      seenSecAgo: p.lastSeen ? Math.round((Date.now() - p.lastSeen) / 1000) : null,
+      color: p.fp ? [p.fp.L, p.fp.a, p.fp.b].map((v) => Math.round(v)) : null,
     }));
+    // Engine state that explains behaviour but isn't in any frame result.
+    const bm = engine.bgModel;
+    const doubt = engine.cornerDoubts ? engine.cornerDoubts() : new Set();
+    const engineState = {
+      frameNo: engine.fNo || 0, lostFrames: engine.lost, island: engine.island, nextIsland: engine.nextIsland,
+      poseScale: engine.pose ? +Math.hypot(engine.pose.a, engine.pose.b).toFixed(3) : null,
+      unitLive: engine.unitLive ? Math.round(engine.unitLive) : null, unitTable: engine.unitTable ? Math.round(engine.unitTable() || 0) : null,
+      bgModel: bm ? { kind: bm.kind, bg: bm.bg ? [bm.bg.L, bm.bg.a, bm.bg.b].map((v) => Math.round(v)) : undefined, n: bm.list ? bm.list.length : undefined } : null,
+      bgModelChosenAtFrame: engine.bgModelAt || null, bgEvaluating: !!engine.bgEval, poorStreak: engine.poorStreak || 0,
+      catalogVersion: engine.version, matchCache: engine.matchCache ? engine.matchCache.size : null, unsaved: engine.dirty ? engine.dirty.size : null,
+      // WebAssembly heap: grows without bound if OpenCV Mats leak.
+      wasmHeapMB: PH.cv && PH.cv.HEAP8 ? +(PH.cv.HEAP8.buffer.byteLength / 1048576).toFixed(1) : null,
+      cornerDoubts: [...doubt],
+    };
+    // Catalog shape at a glance (the full list is below).
+    const all = [...engine.pieces.values()];
+    const ages = all.filter((p) => p.lastSeen).map((p) => (Date.now() - p.lastSeen) / 1000).sort((a, b) => a - b);
+    const catalog = {
+      entries: all.length, withShape: all.filter((p) => p.t1).length, sectionsFailed: all.filter((p) => p.kind === 'section' && p.sec && p.sec.failed).length,
+      neverShaped: all.filter((p) => !p.t1 && p.kind !== 'section').length, shapeFailing: all.filter((p) => !p.t1 && (p.t1Fail || 0) >= 3).length,
+      lastSeenSecMedian: ages.length ? Math.round(ages[ages.length >> 1]) : null,
+      perIsland: all.reduce((m, p) => { m[p.island] = (m[p.island] || 0) + 1; return m; }, {}),
+      placedConfHist: all.filter((p) => p.t2 && p.t2.cands.length).reduce((h, p) => { const b = Math.min(9, Math.floor(p.t2.conf * 10)); h[b] = (h[b] || 0) + 1; return h; }, {}),
+    };
     post({ type: 'report', analyzed, boxImg, data: {
       opts: engine.opts, taught: engine.taught, counts: engine.counts(), bg: engine.bg, thresh: engine.thresh,
       box: engine.box ? { cols: engine.box.cols, rows: engine.box.rows, white: engine.box.white } : null,
-      island: engine.island, tracking: !!engine.pose, pieces,
+      island: engine.island, tracking: !!engine.pose, engine: engineState, catalog, session: sessionSummary(), pieces,
       cvInfo: PH.cv && PH.cv.getBuildInformation ? String(PH.cv.getBuildInformation()).slice(0, 3000) : null,
     } });
   },

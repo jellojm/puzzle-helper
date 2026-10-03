@@ -55,15 +55,40 @@
     opts = opts || {};
     const range = opts.range || Math.max(4, Math.round(w / 8));
     const step = opts.step || 2;
-    // Coarse: every 2nd shift on a stride-2 grid, then fine around the best.
-    let best = { dx: 0, dy: 0, c: sad(prev, cur, w, h, 0, 0, step) };
-    let sum = 0, cnt = 0;
-    for (let dy = -range; dy <= range; dy += 2) for (let dx = -range; dx <= range; dx += 2) {
-      const c = sad(prev, cur, w, h, dx, dy, step);
-      sum += c; cnt++;
-      if (c < best.c) best = { dx, dy, c };
+    let best;
+    if (opts.predict) {
+      // Predicted motion (content moved TO, like the return value): search
+      // only a small window around it, every shift, pixel stride 2. A hand
+      // sweep is smooth, so this finds it ~3x cheaper than the full search;
+      // the caller falls back to a full search when this one isn't sure.
+      const rad = opts.radius || 4;
+      const cx = Math.round(-opts.predict[0]), cy = Math.round(-opts.predict[1]);
+      best = { dx: cx, dy: cy, c: Infinity };
+      for (let dy = cy - rad; dy <= cy + rad; dy++) for (let dx = cx - rad; dx <= cx + rad; dx++) {
+        if (Math.abs(dx) > range || Math.abs(dy) > range) continue;
+        const c = sad(prev, cur, w, h, dx, dy, step);
+        if (c < best.c) best = { dx, dy, c };
+      }
+      // Best on the window's rim: the motion may lie outside it.
+      best.rim = Math.abs(best.dx - cx) >= rad || Math.abs(best.dy - cy) >= rad;
+    } else {
+      // Full search: every 2nd shift on a stride-2 pixel grid.
+      best = { dx: 0, dy: 0, c: sad(prev, cur, w, h, 0, 0, step) };
+      for (let dy = -range; dy <= range; dy += 2) for (let dx = -range; dx <= range; dx += 2) {
+        const c = sad(prev, cur, w, h, dx, dy, step);
+        if (c < best.c) best = { dx, dy, c };
+      }
     }
-    const typical = cnt ? sum / cnt : 0; // mean cost of a (mostly wrong) shift
+    // "Typical wrong shift" cost: 8 shifts half the range away from the best.
+    // A fixed probe set, so confidence means the same in both search modes.
+    const off = Math.max(2, Math.round(range / 2));
+    let sum = 0, cnt = 0;
+    for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+      const c = sad(prev, cur, w, h, best.dx + ox * off, best.dy + oy * off, step);
+      if (Number.isFinite(c)) { sum += c; cnt++; }
+    }
+    const typical = cnt ? sum / cnt : 0;
+    const rim = !!best.rim;
     for (let dy = best.dy - 1; dy <= best.dy + 1; dy++) for (let dx = best.dx - 1; dx <= best.dx + 1; dx++) {
       const c = sad(prev, cur, w, h, dx, dy, 1);
       if (c < best.c) best = { dx, dy, c };
@@ -75,7 +100,7 @@
     // Coarse costs were on a stride-2 pixel grid, the refined best on every
     // pixel; both are per-pixel means, so they compare. A best shift at the edge
     // of the range means the true motion was probably beyond it.
-    const atEdge = Math.abs(best.dx) >= range || Math.abs(best.dy) >= range;
+    const atEdge = rim || Math.abs(best.dx) >= range || Math.abs(best.dy) >= range;
     const conf = typical > 1e-6 && !atEdge ? Math.max(0, Math.min(1, 1 - best.c / typical)) : 0;
     // The search found where prev's content came from relative to cur; report
     // it as where the content MOVED TO (prev -> cur), which is what the page
@@ -109,14 +134,19 @@
       this.ref = null; this.refTotal = [0, 0];
       this.prev = null;
       this.speed = 0; this.steps = 0; this.lowConf = 0; this.rekeys = 0;
+      this.lastStep = [0, 0]; this.predicted = 0; this.fullSearch = 0;
     }
-    reset() { this.ref = this.prev = null; this.speed = 0; }
+    reset() { this.ref = this.prev = null; this.speed = 0; this.lastStep = [0, 0]; }
     mark() { if (this.prev) { this.ref = this.prev; this.refTotal = this.total.slice(); } }
     push(cur) {
       if (!this.ref) { this.ref = this.prev = cur; this.refTotal = this.total.slice(); return { moved: false, conf: 0 }; }
       this.steps++;
       const before = this.total.slice();
-      let r = PH.flowShift(this.ref, cur, this.w, this.h, { range: this.range });
+      // Predict keyframe -> cur from keyframe -> prev plus the last step's motion.
+      const pred = [this.total[0] - this.refTotal[0] + this.lastStep[0], this.total[1] - this.refTotal[1] + this.lastStep[1]];
+      let r = PH.flowShift(this.ref, cur, this.w, this.h, { range: this.range, predict: pred });
+      if (r.conf >= this.minConf) this.predicted++;
+      else { r = PH.flowShift(this.ref, cur, this.w, this.h, { range: this.range }); this.fullSearch++; }
       let ok = r.conf >= this.minConf;
       if (ok) {
         this.total = [this.refTotal[0] + r.dx, this.refTotal[1] + r.dy];
@@ -128,7 +158,8 @@
         if (ok) { this.total = [this.total[0] + r.dx, this.total[1] + r.dy]; this.ref = cur; this.refTotal = this.total.slice(); this.rekeys++; }
         else this.lowConf++;
       }
-      const m = Math.hypot(this.total[0] - before[0], this.total[1] - before[1]);
+      this.lastStep = [this.total[0] - before[0], this.total[1] - before[1]];
+      const m = Math.hypot(this.lastStep[0], this.lastStep[1]);
       this.speed = this.speed * 0.6 + m * 0.4;
       this.prev = cur;
       return { moved: m > 0.05, conf: r.conf };

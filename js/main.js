@@ -2,7 +2,7 @@
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 
-const APP_VERSION = '0.9.0';
+const APP_VERSION = '0.9.1';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
 
@@ -57,6 +57,11 @@ const MAX_GAP = 600;     // ~1.7 frames/s when nothing at all is changing
 window.addEventListener('error', (e) => logError('page: ' + e.message));
 window.addEventListener('unhandledrejection', (e) => logError('promise: ' + (e.reason && e.reason.message || e.reason)));
 function logError(msg) { S.errors.push({ t: new Date().toISOString(), msg: String(msg) }); if (S.errors.length > 50) S.errors.shift(); }
+// Session counters and main-thread health, for "Send report".
+const STATS = { started: new Date().toISOString(), framesSent: 0, results: 0, cameraOpens: 0, cameraReleases: 0, idlePauses: 0,
+  hidden: 0, wakeLocks: 0, reports: 0, filters: {}, drawMs: 0, drawMax: 0 };
+const RAF_GAPS = new Float32Array(300); let rafGapN = 0, rafPrev = 0;
+const bump = (k) => { STATS[k] = (STATS[k] || 0) + 1; };
 
 // ---------- worker ----------
 const worker = new Worker('js/worker.js');
@@ -85,8 +90,11 @@ worker.onmessage = (e) => {
       m.flowBase = S.flowAtSend;
       S.last = m;
       S.busy = false;
-      S.history.push({ t: Math.round(now), grab: Math.round(S.grabMs || 0), ...Object.fromEntries(Object.entries(m.timings).map(([k, v]) => [k, Math.round(v)])), dets: m.dets.length, tracking: m.tracking, island: m.island, still: S.lastStill });
-      if (S.history.length > 60) S.history.shift();
+      bump('results');
+      // lag = send -> result on the page (grab + transfer + queue + analysis + reply).
+      S.history.push({ t: Math.round(now), grab: Math.round(S.grabMs || 0), lag: S.sentAt ? Math.round(now - S.sentAt) : null, ...Object.fromEntries(Object.entries(m.timings).map(([k, v]) => [k, Math.round(v)])),
+        dets: m.dets.length, tracking: m.tracking, island: m.island, still: S.lastStill, tilt: m.rect ? Math.round(m.rect.tilt) : 0, proc: [m.procW, m.procH], flowEvery: S.flow ? S.flow.every : null });
+      if (S.history.length > 240) S.history.shift();
       // Did this frame change anything? If not, ease off the frame pump.
       const c = m.counts, pc = S.prevCounts;
       const changed = !pc || c.pieces !== pc.pieces || c.shaped !== pc.shaped || c.placed !== pc.placed || c.sections !== pc.sections;
@@ -121,7 +129,7 @@ worker.onmessage = (e) => {
     case 'selected': showFind(m.desc); break;
     case 'region': S.region = m.cells; toast(m.count ? `${m.count} catalogued pieces belong in that area.` : 'No catalogued pieces placed in that area yet.'); drawMinimap(); break;
     case 'filter': {
-      const label = { corner: 'corner pieces', border: 'edge pieces', unplaced: 'pieces not placed on the box', unread: 'pieces whose shape is unread' }[m.kind];
+      const label = { corner: 'corner pieces', border: 'edge pieces', edges: 'border pieces (corners and edges)', unplaced: 'pieces not placed on the box', unread: 'pieces whose shape is unread' }[m.kind];
       if (m.kind) toast(m.count ? `${m.count} ${label} highlighted. Arrows point to the nearest ones off screen.` : `No ${label} found yet — read more shapes first.`, 3500);
       S.needDraw = true;
       break;
@@ -156,6 +164,7 @@ function setStatus(t) {
 
 // ---------- camera / video ----------
 async function openCamera() {
+  bump('cameraOpens');
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
     video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -195,6 +204,7 @@ function keepLastFrame() {
   try { c.getContext('2d').drawImage(video, 0, 0); S.lastFrameAt = Date.now(); } catch (_) { /* not ready */ }
 }
 function releaseCamera() {
+  bump('cameraReleases');
   keepLastFrame();
   const st = video.srcObject;
   if (st) for (const t of st.getTracks()) t.stop();
@@ -230,6 +240,7 @@ async function acquireWakeLock() {
   if (!navigator.wakeLock || S.wakeLock) return;
   try {
     S.wakeLock = await navigator.wakeLock.request('screen');
+    bump('wakeLocks');
     S.wakeLock.addEventListener('release', () => { S.wakeLock = null; });
   } catch (_) { /* not supported, or denied while hidden */ }
 }
@@ -259,6 +270,7 @@ document.addEventListener('click', (e) => {
 const pickerDone = () => { S.pickerOpen = false; noteActivity(); applyPower(); setTimeout(ensureCamera, 300); };
 ['snapInput', 'boxInput'].forEach((id) => { $(id).addEventListener('change', pickerDone); $(id).addEventListener('cancel', pickerDone); });
 document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { bump('hidden'); rafPrev = 0; }
   applyPower(); // backgrounded: drop the camera and the loop straight away
   if (!document.hidden) setTimeout(pickerDone, 800);
 });
@@ -348,14 +360,37 @@ function trackStep() {
   if (!F || F.w !== w || F.h !== h) {
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
-    F = S.flow = { w, h, c, g: c.getContext('2d', { willReadFrequently: true }), T: new PH.FlowTracker(w, h), ms: 0, scale: vw / w };
+    F = S.flow = { w, h, c, g: c.getContext('2d', { willReadFrequently: true }), T: new PH.FlowTracker(w, h), ms: 0, readMs: 0, matchMs: 0, maxMs: 0, every: 2, scale: vw / w };
     if (S.last) S.last.flowBase = null; // old reference frame belonged to another tracker
   }
+  // Resuming after a pause (no dots to move for a while): the last thumbnail
+  // is stale, so start over rather than match across the gap.
   const t0 = performance.now();
+  if (F.lastAt && t0 - F.lastAt > 500) { F.T.reset(); if (S.last) S.last.flowBase = null; F.resumes = (F.resumes || 0) + 1; }
+  F.lastAt = t0;
+  // Timed in two parts for the report: getting the thumbnail out of the video
+  // (a GPU read-back on iOS) and matching it.
   F.g.drawImage(video, 0, 0, w, h);
-  const r = F.T.push(PH.flowGray(F.g.getImageData(0, 0, w, h).data, w, h));
-  F.ms = F.ms * 0.9 + (performance.now() - t0) * 0.1;
+  const g = PH.flowGray(F.g.getImageData(0, 0, w, h).data, w, h);
+  const t1 = performance.now();
+  const r = F.T.push(g);
+  const t2 = performance.now();
+  F.readMs = F.readMs * 0.9 + (t1 - t0) * 0.1;
+  F.matchMs = F.matchMs * 0.9 + (t2 - t1) * 0.1;
+  F.ms = F.ms * 0.9 + (t2 - t0) * 0.1;
+  F.maxMs = Math.max(F.maxMs, t2 - t0);
+  // Self-limiting: a step may use ~half a display frame on average. The
+  // phone measured 21-54 ms a step in v0.9.0 (0.7 ms in node), which at
+  // every other frame would have eaten the whole main thread.
+  F.every = Math.max(2, Math.min(12, Math.ceil(F.ms / 8)));
   return r.moved;
+}
+// Only worth tracking when there are dots to move, or when the tracker is
+// the stillness signal (no motion sensor).
+function trackingNeeded() {
+  if (!S.follow) return false;
+  if (!S.hasMotion) return true;
+  return !!(S.last && S.last.dets && S.last.dets.length);
 }
 // Camera-frame pixels the image has moved since result `res` was grabbed.
 function shiftSince(res) {
@@ -397,12 +432,14 @@ async function sendFrame() {
   S.grabMs = performance.now() - g0;
   // Sample the tracker at the grab, so the marks' reference point matches the
   // frame the worker is about to analyse.
-  if (S.follow) trackStep();
+  if (trackingNeeded()) trackStep();
   if (S.flow) S.flow.T.mark(); // this frame becomes the tracker's keyframe
   S.flowAtSend = S.flow ? S.flow.T.total.slice() : null;
   S.lastStill = isStill();
   S.lastTilt = currentTilt();
-  W.post({ type: 'frame', bitmap: bmp, still: S.lastStill, tilt: S.lastTilt }, [bmp]);
+  S.sentAt = performance.now() - S.grabMs; // the page-side send->result lag starts at the grab
+  bump('framesSent');
+  W.post({ type: 'frame', bitmap: bmp, still: S.lastStill, tilt: S.lastTilt, sentAt: performance.timeOrigin + performance.now() }, [bmp]);
 }
 
 // Frames are only worth sending while something is changing. Each frame that
@@ -419,13 +456,16 @@ function frameGap() {
 function loop() {
   S.rafId = requestAnimationFrame(loop);
   const t = performance.now();
+  // Gaps between display frames: long ones mean the main thread is overloaded.
+  if (rafPrev && t - rafPrev < 1000) RAF_GAPS[rafGapN++ % RAF_GAPS.length] = t - rafPrev;
+  rafPrev = t;
   // Only auto-pause on a device that actually reports motion, so a desktop
   // test run (or a phone with motion permission denied) never stalls.
-  if (S.idleOn && S.hasMotion && t - S.lastActivity > IDLE_MS) { S.idle = true; applyPower(); return; }
+  if (S.idleOn && S.hasMotion && t - S.lastActivity > IDLE_MS) { S.idle = true; bump('idlePauses'); rafPrev = 0; applyPower(); return; }
   // Track camera motion every other display frame (~30 Hz): enough to keep
   // marks on the pieces during a hand sweep, half the cost of every frame.
   S.rafN = (S.rafN || 0) + 1;
-  if (S.follow && S.rafN % 2 === 0) trackStep();
+  if (trackingNeeded() && S.rafN % (S.flow ? S.flow.every : 2) === 0) trackStep();
   const shift = shiftSince(S.last);
   // Redraw only when there is a new result, the camera moved the marks by
   // more than half a pixel, a pulsing highlight (capped at ~20 fps) or
@@ -441,7 +481,10 @@ function loop() {
     if (S.last && video.videoWidth) {
       const M = frameMapping(video, overlay, S.last, shift);
       S.map = M;
+      const d0 = performance.now();
       drawOverlay(ctx, S.last, M, { mode: S.mode, marks: !S.outlines });
+      const dm = performance.now() - d0;
+      STATS.drawMs = STATS.drawMs * 0.9 + dm * 0.1; if (dm > STATS.drawMax) STATS.drawMax = dm;
       S.drawn = S.last;
       S.drawnShift = sh;
     }
@@ -488,6 +531,7 @@ function updateStats(c, tracking) {
   else if (S.ready && $('modeHint').textContent.startsWith('Tilt the phone')) $('modeHint').textContent = modeHint(S.mode);
   $('menuStats').textContent = `${c.pieces} pieces catalogued, ${c.shaped} shapes read, ${c.placed} placed on the box, ${c.located} on the table map`
     + (c.islands > 1 ? `, in ${c.islands} scan groups.` : '.')
+    + (S.box ? ` Corners found: ${c.corner} of 4${c.cornerUnplaced ? ` (+${c.cornerUnplaced} corner-shaped piece${c.cornerUnplaced > 1 ? 's' : ''} not placed on the box yet)` : ''}.` : '')
     + (c.cornerDoubt ? ` ${c.cornerDoubt} more piece${c.cornerDoubt > 1 ? 's look' : ' looks'} like a corner but a better one already holds that corner (duplicate or misread) — Tidy up merges duplicates.` : '');
   // The catalog can't honestly hold more pieces than the puzzle has. When it
   // does, tracking broke and the same pieces were catalogued twice.
@@ -500,7 +544,8 @@ function updateStats(c, tracking) {
   }
   // Chip counts, so you know whether it's worth tapping.
   const chip = (k, n, label) => { const b = $('findBar').querySelector(`[data-filter=${k}]`); b.textContent = n ? `${label} (${n})` : label; b.disabled = !n; };
-  chip('corner', c.corner, 'Corners');
+  // The chip counts what lighting it up will show: corners placed + candidates.
+  chip('corner', c.corner + (c.cornerUnplaced || 0), 'Corners');
   chip('border', c.border, 'Edges');
   chip('unplaced', Math.max(0, c.shaped - c.placed), 'Unplaced');
   chip('unread', Math.max(0, c.pieces - c.shaped), 'Unread');
@@ -721,12 +766,20 @@ $('closeFind').onclick = closeFind;
 function clearFilter() {
   S.filter = null;
   $('findBar').querySelectorAll('[data-filter]').forEach((b) => b.classList.remove('on'));
+  showBorderBtn();
+}
+function showBorderBtn() {
+  const on = S.filter === 'edges';
+  $('edgesBtn').classList.toggle('on', on);
+  $('edgesBtn').setAttribute('aria-pressed', on ? 'true' : 'false');
 }
 function setFilter(kind) {
   const next = S.filter === kind ? null : kind;
   clearFilter();
   S.filter = next;
+  if (next) STATS.filters[next] = (STATS.filters[next] || 0) + 1; // which finders actually get used
   $('findBar').querySelectorAll('[data-filter]').forEach((b) => b.classList.toggle('on', b.dataset.filter === next));
+  showBorderBtn();
   if (next) { closeFind(); closeMatches(); }
   W.post({ type: 'filter', kind: next });
 }
@@ -880,7 +933,16 @@ minimap.addEventListener('pointerup', () => {
 });
 
 // ---------- snap / box / menu ----------
-$('snapBtn').onclick = () => { endTeaching(); S.snapTilt = currentTilt(); $('snapInput').click(); };
+// Photo cataloguing lives under More now (the owner wasn't using it from the
+// toolbar); the toolbar slot went to Border.
+$('snapBtn').onclick = () => { endTeaching(); $('menu').hidden = true; S.snapTilt = currentTilt(); $('snapInput').click(); };
+// Border: the whole frame of the puzzle — corners and edge pieces — in one tap,
+// from any mode. Tap again to turn it off.
+$('edgesBtn').onclick = () => {
+  endTeaching();
+  if (S.mode !== 'find') setMode('find');
+  setFilter('edges');
+};
 $('snapInput').onchange = async (e) => {
   const f = e.target.files[0];
   e.target.value = '';
@@ -998,6 +1060,21 @@ $('reportBtn').onclick = () => {
   // Give the stream a moment so the report still carries a live camera frame.
   setTimeout(() => W.post({ type: 'report' }), 900);
 };
+function rafSummary() {
+  const n = Math.min(rafGapN, RAF_GAPS.length);
+  if (!n) return null;
+  const a = Array.from(RAF_GAPS.subarray(0, n)).sort((x, y) => x - y);
+  const q = (p) => +a[Math.min(n - 1, Math.floor(n * p))].toFixed(1);
+  return { samples: n, gapP50: q(0.5), gapP95: q(0.95), gapMax: +a[n - 1].toFixed(1), over50ms: a.filter((v) => v > 50).length };
+}
+async function deviceInfo() {
+  const d = { cores: navigator.hardwareConcurrency || null, memoryGB: navigator.deviceMemory || null, lang: navigator.language,
+    standalone: !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches) || !!navigator.standalone,
+    online: navigator.onLine, motionSensor: !!S.hasMotion, wakeLockApi: !!navigator.wakeLock, offscreenCanvas: typeof OffscreenCanvas !== 'undefined',
+    swControlled: !!(navigator.serviceWorker && navigator.serviceWorker.controller) };
+  try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); d.storageMB = +((e.usage || 0) / 1048576).toFixed(1); d.quotaMB = Math.round((e.quota || 0) / 1048576); } } catch (_) { /* not available */ }
+  return d;
+}
 async function finishReport(workerData, analyzed, boxImg) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const files = [];
@@ -1017,16 +1094,28 @@ async function finishReport(workerData, analyzed, boxImg) {
   if (analyzed) files.push(new File([analyzed], `puzzle-report-${stamp}-analyzed.jpg`, { type: 'image/jpeg' }));
   if (boxImg) files.push(new File([boxImg], `puzzle-report-${stamp}-box.jpg`, { type: 'image/jpeg' }));
   if (S.lastSnapFile) files.push(new File([S.lastSnapFile], `puzzle-report-${stamp}-snap.jpg`, { type: S.lastSnapFile.type || 'image/jpeg' }));
+  bump('reports');
   const data = {
     app: APP_VERSION, time: new Date().toISOString(), userAgent: navigator.userAgent,
     screen: { w: screen.width, h: screen.height, dpr: devicePixelRatio, viewW: innerWidth, viewH: innerHeight },
-    video: { w: video.videoWidth, h: video.videoHeight, settings: S.track && S.track.getSettings ? S.track.getSettings() : null },
+    video: { w: video.videoWidth, h: video.videoHeight, settings: S.track && S.track.getSettings ? S.track.getSettings() : null,
+      // What the camera could do (focus/exposure/zoom ranges, torch), for tuning.
+      capabilities: (() => { try { return S.track && S.track.getCapabilities ? S.track.getCapabilities() : null; } catch (_) { return null; } })(),
+      readyState: video.readyState, live: !!video.srcObject },
     mode: S.mode, fps: S.fps, motion: S.motion, gravity: S.gravity, tilt: S.lastTilt, tiltOn: S.tiltOn, fov: S.fov,
     power: { active: S.active, idle: S.idle, idleOn: S.idleOn, calm: S.calm, gap: Math.round(frameGap()), wakeLock: !!S.wakeLock },
     // Camera-motion tracker health: how often it was sure of a step, its cost
     // on this phone, and the recent motion level it uses for stillness.
     flow: S.flow ? { on: S.follow, thumb: [S.flow.w, S.flow.h], steps: S.flow.T.steps, lowConf: S.flow.T.lowConf, rekeys: S.flow.T.rekeys,
-      msPerStep: +S.flow.ms.toFixed(2), speed: +S.flow.T.speed.toFixed(3), total: S.flow.T.total.map((v) => +v.toFixed(1)) } : { on: S.follow },
+      predicted: S.flow.T.predicted, fullSearch: S.flow.T.fullSearch, resumes: S.flow.resumes || 0, every: S.flow.every,
+      msPerStep: +S.flow.ms.toFixed(2), readMs: +S.flow.readMs.toFixed(2), matchMs: +S.flow.matchMs.toFixed(2), maxMs: +S.flow.maxMs.toFixed(1),
+      speed: +S.flow.T.speed.toFixed(3), total: S.flow.T.total.map((v) => +v.toFixed(1)) } : { on: S.follow },
+    // Main thread: display-frame gaps (ms) and overlay drawing cost.
+    mainThread: rafSummary(),
+    stats: Object.assign({}, STATS, { drawMs: +STATS.drawMs.toFixed(2), drawMax: +STATS.drawMax.toFixed(1) }),
+    settings: { procW: S.procW, outlines: S.outlines, follow: S.follow, idleOn: S.idleOn, tiltOn: S.tiltOn, fov: S.fov, mapHidden: S.mapHidden,
+      debug: S.debug, sens: +$('sens').value, taught: S.taughtN || 0 },
+    device: await deviceInfo(),
     ui: { filter: S.filter, mapHidden: S.mapHidden, pairs: S.pairs.length, pairsDone: !!S.pairsDone },
     orientation: (screen.orientation && screen.orientation.angle) || window.orientation || 0,
     history: S.history, errors: S.errors,
