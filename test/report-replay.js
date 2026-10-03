@@ -53,7 +53,7 @@ const { robustUnit, classify } = require('./seg-metrics');
   const w = rep.worker || {};
   const tilt = rep.tilt && rep.tiltOn ? rep.tilt : null;
   console.log(`${path.basename(jf)}  tilt ${tilt ? PH.tiltDeg(tilt.down).toFixed(1) + '°' : 'off'}  taught ${(w.taught || []).length}  procW ${w.opts && w.opts.procW}`);
-  for (const [label, opts] of [['published (0.6.0)', { boundary: false, stableUnit: false }], ['current', {}]]) {
+  for (const [label, opts] of [['published (0.6.0)', { boundary: false, stableUnit: false, autoBg: false }], ['current', {}]]) {
     const eng = new PH.Engine(Object.assign({ procW: (w.opts && w.opts.procW) || 640, minDE: (w.opts && w.opts.minDE) || 8 }, opts));
     eng.taught = (w.taught || []).slice();
     let out;
@@ -62,6 +62,7 @@ const { robustUnit, classify } = require('./seg-metrics');
     const proc = eng.lastProc;
     const seg = PH.segment(proc, eng.liveSegOpts({ still: true }));
     const k = classify(seg.dets, robustUnit(seg.dets));
+    if (eng.bgTried) console.log('    background candidates:', JSON.stringify(eng.bgTried), '-> chose', JSON.stringify(eng.bgModel && { kind: eng.bgModel.kind, bg: eng.bgModel.bg && [eng.bgModel.bg.L, eng.bgModel.bg.a, eng.bgModel.bg.b].map(Math.round), list: eng.bgModel.list && eng.bgModel.list.map((c) => [c.L, c.a, c.b].map(Math.round)) }));
     console.log(`  ${label.padEnd(18)} dets ${String(out.dets.length).padStart(3)} | good ${k.good} frag ${k.frag} merged ${k.merged} border ${k.border} | tracking ${out.tracking} | ${out.timings.total.toFixed(0)} ms`);
     if (process.argv.includes('--draw')) {
       const m = new cv.Mat(proc.h, proc.w, cv.CV_8UC4); m.data.set(proc.data);

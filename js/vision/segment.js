@@ -90,6 +90,45 @@
     return { lab: out, ref, spread: (hi - lo) / hi };
   };
 
+  /** The k most common colours in the frame (coarse Lab bins, neighbours of
+   *  an already-picked bin are skipped), as {L,a,b,frac}. Background
+   *  candidates: on a dense pile the most common colour can be the pieces. */
+  PH.colorModes = function (lab, w, h, valid, k) {
+    const counts = new Uint32Array(8 * 32 * 32), sums = new Float64Array(8 * 32 * 32 * 3);
+    let n = 0;
+    for (let y = 0; y < h; y += 3) for (let x = 0; x < w; x += 3) {
+      if (valid && !valid[y * w + x]) continue;
+      const i = (y * w + x) * 3, b = ((lab[i] >> 5) << 10) | ((lab[i + 1] >> 3) << 5) | (lab[i + 2] >> 3);
+      counts[b]++; sums[3 * b] += lab[i]; sums[3 * b + 1] += lab[i + 1]; sums[3 * b + 2] += lab[i + 2]; n++;
+    }
+    const order = [...counts.keys()].filter((b) => counts[b]).sort((x, y) => counts[y] - counts[x]);
+    const picked = [];
+    for (const b of order) {
+      if (picked.length >= k) break;
+      const L = b >> 10, A = (b >> 5) & 31, B = b & 31;
+      if (picked.some((p) => Math.abs(p.Lb - L) <= 1 && Math.abs(p.Ab - A) <= 1 && Math.abs(p.Bb - B) <= 1)) continue;
+      picked.push({ Lb: L, Ab: A, Bb: B, L: sums[3 * b] / counts[b], a: sums[3 * b + 1] / counts[b], b: sums[3 * b + 2] / counts[b], frac: counts[b] / n });
+    }
+    return picked.map((p) => ({ L: p.L, a: p.a, b: p.b, frac: p.frac }));
+  };
+
+  /** Piece area estimated from a pile's distance transform (85th percentile
+   *  of its local maxima ~ 0.42 x side). null if there are too few peaks. */
+  PH.pileUnit = function (mask) {
+    const cv = PH.cv;
+    const dt = new cv.Mat(), dil = new cv.Mat();
+    cv.distanceTransform(mask, dt, cv.DIST_L2, 5);
+    const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
+    cv.dilate(dt, dil, k);
+    const peaks = [], a = dt.data32F, b = dil.data32F;
+    for (let p = 0; p < a.length; p++) if (a[p] >= 3 && a[p] >= b[p] - 1e-6) peaks.push(a[p]);
+    [dt, dil, k].forEach((m) => m.delete());
+    if (peaks.length < 10) return null;
+    peaks.sort((x, y) => x - y);
+    const side = peaks[Math.floor(peaks.length * 0.85)] / 0.42;
+    return side * side * 1.1;
+  };
+
   // Mass-weighted mode of log2(area), quarter-octave bins: the size that most
   // of the piece-like *area* belongs to.
   PH.massMode = function (areas) {
@@ -190,7 +229,11 @@
     // Pixels outside the real camera image (tilt correction): alpha 0.
     let valid = null;
     if (img.invalid) { valid = new Uint8Array(w * h); for (let p = 0; p < w * h; p++) valid[p] = img.data[4 * p + 3] ? 1 : 0; }
-    let est = PH.estimateBackground(lab, w, h, valid);
+    // opts.bgModel (chosen by the engine, see Engine.chooseBackground):
+    //   {kind:'color', bg:{L,a,b}} plain board of that colour
+    //   {kind:'taught'} / {kind:'palette'} colour tables; absent = automatic.
+    const model = opts.bgModel || null;
+    let est = model && model.kind === 'color' ? Object.assign({ frac: 1 }, model.bg) : PH.estimateBackground(lab, w, h, valid);
     mark('bgEst');
     // Taught colours that are all near-neutral and alike are just "the board"
     // (e.g. its lit and shadowed parts): handle it as a plain board, which
@@ -198,24 +241,38 @@
     const taught = opts.taught || [];
     const taughtPlain = taught.length > 0 && taught.every((t) => Math.hypot(t.a - 128, t.b - 128) < 22) &&
       taught.every((t) => taught.every((u) => Math.hypot(t.a - u.a, t.b - u.b) < 12));
-    const taughtActive = taught.length > 0 && !taughtPlain;
+    // {kind:'colors', list:[...]}: a mixed table (glass + wood + tile ...) =
+    // several background colours, handled like taught colours.
+    if (model && model.kind === 'colors') opts = Object.assign({}, opts, { taught: model.list });
+    const taughtActive = model ? model.kind === 'taught' || model.kind === 'colors' : taught.length > 0 && !taughtPlain;
     // Shadow-evened lightness for the plain-board model (colour fingerprints
     // and taught/palette tables keep using the real colours).
     let labS = lab, flat = null;
-    if (opts.flatten !== false) {
+    if (opts.flatten !== false && !(model && model.kind !== 'color')) {
       flat = PH.flattenLight(lab, w, h, valid, opts.unitArea, est.L);
-      if (flat) { labS = flat.lab; est = PH.estimateBackground(labS, w, h, valid); }
+      if (flat) {
+        labS = flat.lab;
+        if (model) {
+          // the chosen board colour, re-measured in the shadow-evened image
+          let sL = 0, sa = 0, sb = 0, m = 0;
+          for (let p = 0, i = 0; p < w * h; p += 5, i += 15) {
+            if (valid && !valid[p]) continue;
+            if (Math.abs(lab[i + 1] - est.a) < 8 && Math.abs(lab[i + 2] - est.b) < 8 && Math.abs(lab[i] - est.L) < 40) { sL += labS[i]; sa += labS[i + 1]; sb += labS[i + 2]; m++; }
+          }
+          if (m > 50) est = { L: sL / m, a: sa / m, b: sb / m, frac: 1 };
+        } else est = PH.estimateBackground(labS, w, h, valid);
+      }
     }
     mark('flatten');
     // A plain cloth (one dominant color that isn't a puzzle color) is handled
     // more precisely by the distance model; the palette table is for mixed
     // tables. (Non-plain) taught colours win.
-    let plainCloth = est.frac >= 0.2 && !taughtActive &&
+    let plainCloth = model ? model.kind === 'color' : est.frac >= 0.2 && !taughtActive &&
       (!opts.palette || opts.palette[PH.coarseBin(est.L | 0, est.a | 0, est.b | 0)] * 8 < est.frac);
     let lut = plainCloth ? null : PH.buildBgLut(lab, w * h, taughtActive ? opts : Object.assign({}, opts, { taught: null }));
     // Stale taught colours (the light changed since they were tapped): if they
     // explain under a fifth of the frame, use the plain-board model this frame.
-    if (lut && taughtActive) {
+    if (lut && taughtActive && !model) {
       let bgc = 0, m = 0;
       for (let p = 0, i = 0; p < w * h; p += 7, i += 21) { if (valid && !valid[p]) continue; m++; if (lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], lut.corr)]) bgc++; }
       if (bgc < m * 0.2 && est.frac >= 0.2) { lut = null; plainCloth = true; }
@@ -296,10 +353,23 @@
         cv.rectangle(inv, new cv.Point(0, 0), new cv.Point(w - 1, h - 1), new cv.Scalar(255), 1);
         const ff = cv.Mat.zeros(h + 2, w + 2, cv.CV_8UC1);
         cv.floodFill(inv, ff, new cv.Point(0, 0), new cv.Scalar(0), new cv.Rect(), new cv.Scalar(0), new cv.Scalar(0), 4);
-        // Add interiors and the rings themselves.
-        cv.bitwise_or(mask, inv, mask);
-        cv.bitwise_or(mask, mag, mask);
-        [kb, inv, ff].forEach((m) => m.delete());
+        // Add interiors and the rings themselves - unless the scene is too
+        // busy (dense piles, print, reflections): then the rings close up
+        // everywhere and the "pieces" swallow the table. Guard: if filling
+        // more than roughly doubles the foreground, keep the colour mask.
+        const before = cv.countNonZero(mask);
+        const filled = new cv.Mat();
+        cv.bitwise_or(mask, inv, filled);
+        cv.bitwise_or(filled, mag, filled);
+        const after = cv.countNonZero(filled);
+        // Judge by how much of the remaining table the fill claims: on a plain
+        // board it adds the pale pieces (a small share); on a busy scene it
+        // swallows a large share of the "table".
+        const claimed = (after - before) / Math.max(1, w * h - before);
+        if (T) T.boundaryClaim = claimed;
+        if (claimed <= 0.3) filled.copyTo(mask);
+        else if (T) T.boundaryRejected = 1;
+        [kb, inv, ff, filled].forEach((m) => m.delete());
       } else {
         cv.bitwise_or(mask, mag, mask);
       }
@@ -338,12 +408,19 @@
     // but small, so they carry little mass and can't drag it down. Needs at
     // least 3 such blobs; otherwise there is no estimate (null), never a
     // median of everything (that once picked up a 578k px background blob).
-    const like = blobs.filter((b) => b.solidity > 0.6 && b.area < maxArea && PH.pieceScore(b.cnt.data32S, b.area) > PH.MIN_CORNER_SCORE).map((b) => b.area);
+    // (one piece is never more than ~12% of the view; bigger "piece-shaped"
+    // blobs are piles or assembled sections and must not set the size)
+    const like = blobs.filter((b) => b.solidity > 0.6 && b.area < Math.min(maxArea, w * h * 0.12) && PH.pieceScore(b.cnt.data32S, b.area) > PH.MIN_CORNER_SCORE).map((b) => b.area);
     const unitOwn = like.length >= 3 ? PH.massMode(like) : null;
     if (PH.DEBUG_SEG) console.log('piece-like', like.map(Math.round).sort((a, b) => a - b).join(','), 'own', unitOwn);
     // A caller-supplied unit (live scanning keeps one across frames) wins.
     // null = unknown: nothing gets split (and the engine calls nothing merged).
-    const unitA = opts.unitArea || unitOwn;
+    // Dense pile (pieces touching, no isolated ones to learn the size from):
+    // read the size off the pile itself - its distance-transform peaks sit at
+    // piece centres, ~0.42 x piece side from the nearest table pixel.
+    const bigBlob = blobs.some((b) => b.area > w * h * 0.05);
+    const unitPile = !opts.unitArea && !unitOwn && bigBlob ? PH.pileUnit(mask) : null;
+    const unitA = opts.unitArea || unitOwn || unitPile;
     if (PH.DEBUG_SEG) console.log('blobs', blobs.length, 'solid', blobs.filter((b) => b.solidity > 0.75).map((b) => Math.round(b.area)).sort((a, b) => a - b).join(','), 'unitA', unitA);
     mark('blobStats');
 
@@ -356,7 +433,10 @@
     const splitEnd = opts.splitBudgetMs === undefined ? Infinity : now() + opts.splitBudgetMs;
     blobs.sort((a, b) => a.area - b.area);
     for (const b of blobs) {
-      if (opts.split !== false && unitA && b.area > 1.8 * unitA && b.area < splitMax && now() < splitEnd) {
+      // Clusters of a few pieces always; whole piles too unless the caller
+      // turned that off (time-limited on live frames by splitBudgetMs).
+      const pile = b.area >= splitMax;
+      if (opts.split !== false && unitA && b.area > 1.8 * unitA && (!pile || opts.splitPiles !== false) && now() < splitEnd) {
         if (!labMat) { labMat = new cv.Mat(h, w, cv.CV_8UC3); labMat.data.set(lab); }
         const pieces = PH.splitBlob(b.cnt, labMat, unitA, w, h);
         if (pieces) { b.cnt.delete(); for (const p of pieces) parts.push({ cnt: p, split: true }); continue; }

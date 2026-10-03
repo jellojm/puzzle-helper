@@ -441,12 +441,26 @@
       // seg_* numbers) so a phone report shows where the time actually goes.
       const segT = {};
       if (this.unitLiveW !== proc.w) { this.unitLive = null; this.unitLiveW = proc.w; } // Scan detail changed
+      // Pick (or re-check) the background model: at the start, every ~90
+      // frames, and when detections have collapsed for a while.
+      this.fNo = (this.fNo || 0) + 1;
+      if (this.opts.autoBg !== false && info.still !== false) {
+        const due = !this.bgModelAt || this.fNo - this.bgModelAt > 90 || (this.poorStreak || 0) >= 6;
+        if (this.bgEval || due) {
+          if (!this.bgEval) { this.bgModelAt = this.fNo; this.poorStreak = 0; }
+          // First frame with no model at all: decide right away; later
+          // re-checks run one candidate per frame in the background.
+          if (!this.bgModel && !this.bgEval) { const b = this.chooseBackground(proc); this.bgModel = b ? b.c : null; }
+          else this.stepBgChoice(proc);
+        }
+      }
       const seg = PH.segment(proc, this.liveSegOpts(info, { timings: segT }));
       this.bg = seg.bg; this.thresh = seg.thresh;
       this.updateUnitLive(seg);
       this.lastSegUnit = seg.unitArea; // the unit actually used this frame (for tests/reports)
       const t1 = now();
       const dets = this.classify(seg.dets, seg.unitArea);
+      this.poorStreak = dets.filter((d) => !d.border).length < 3 ? (this.poorStreak || 0) + 1 : 0;
       const unitF = this.unitFrame(dets);
       this.link(dets, unitF);
       // Set before the pose work so the shape-based fallback below can read
@@ -531,7 +545,10 @@
       source = this.straighten(source, info).source;
       const saved = { pose: this.pose, island: this.island, tracks: this.tracks, lost: this.lost };
       const proc = source.getProc(this.opts.snapProcW);
-      const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.5 }));
+      // A photo may show a different table: pick its background model from scratch.
+      const snapBest = this.opts.autoBg !== false ? this.chooseBackground(proc) : null;
+      const snapModel = snapBest ? snapBest.c : null;
+      const seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel } : { bg: this.bg, bgSmooth: 0.5 }));
       if (!this.bg) this.bg = seg.bg;
       this.frameCtx = { source, scale: proc.scale, bg: seg.bg, thresh: seg.thresh, lut: seg.lut, unitArea: seg.unitArea, still: true, deadline: Infinity };
       const dets = this.classify(seg.dets, seg.unitArea);
@@ -597,7 +614,9 @@
     // the app runs (test/seg-regression.js).
     liveSegOpts(info, extra) {
       const unitArea = this.opts.stableUnit === false ? null : this.unitLive || null;
-      const o = { bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25, unitArea };
+      // still frames may spend more on splitting piles of touching pieces
+      const o = { bg: this.bg, bgSmooth: 0.3, splitBudgetMs: info && info.still !== false ? 40 : 25, unitArea };
+      if (this.bgModel) { o.bgModel = this.bgModel; if (this.bgModel.kind === 'color') delete o.bg; }
       // WP2: on still frames also use the pieces' outlines (lightness edges),
       // closed into rings and filled. That recovers pale pieces whose print
       // matches the table. Moving frames stay colour-only (blur makes edges
@@ -613,6 +632,86 @@
         o.openK = this.opts.boundaryOpenK === undefined ? 0 : this.opts.boundaryOpenK; // the 3x3 open sheared tabs
       }
       return this.segOpts(Object.assign(o, extra));
+    }
+
+    /**
+     * Which background model fits this table? Candidates: the 4 most common
+     * colours (on a dense pile the most common one can be the *pieces*), the
+     * taught colours, and the box-picture palette. Each is tried on this
+     * frame; the one that yields the most piece-shaped blobs wins. That
+     * needs no assumptions about which colour is the board.
+     */
+    bgCandidates(proc) {
+      const lab = PH.rgbaToLab(proc.data, proc.w, proc.h);
+      const valid = proc.invalid ? Uint8Array.from({ length: proc.w * proc.h }, (_, p) => (proc.data[4 * p + 3] ? 1 : 0)) : null;
+      const modes = PH.colorModes(lab, proc.w, proc.h, valid, 4).filter((m) => m.frac > 0.03);
+      const cands = modes.map((bg) => ({ kind: 'color', bg }));
+      // mixed tables: pairs of the 3 most common colours as a two-colour background
+      const top = modes.slice(0, 3);
+      for (let i = 0; i < top.length; i++) for (let j = i + 1; j < top.length; j++) cands.push({ kind: 'colors', list: [top[i], top[j]] });
+      if (this.taught && this.taught.length) {
+        cands.push({ kind: 'taught' });
+        const t = this.taught, k = t.length;
+        cands.push({ kind: 'color', bg: { L: t.reduce((s, x) => s + x.L, 0) / k, a: t.reduce((s, x) => s + x.a, 0) / k, b: t.reduce((s, x) => s + x.b, 0) / k } });
+      }
+      if (this.box && this.box.palette) cands.push({ kind: 'palette' });
+      return cands;
+    }
+    // How many piece-shaped blobs does this background model produce here?
+    scoreBg(proc, c, extra) {
+      const seg = PH.segment(proc, this.segOpts(Object.assign({ bgModel: c, splitBudgetMs: 40, unitArea: this.unitLive || null }, extra)));
+      let area = 0;
+      const like = [];
+      for (const d of seg.dets) {
+        area += d.area;
+        if (!d.border && PH.pieceScore(d.pts, d.area) > PH.MIN_CORNER_SCORE) like.push(d.area);
+      }
+      // Real pieces share one size; scraps of print (from a wrong model that
+      // calls the pieces' own colour "table") don't. Count only piece-shaped
+      // blobs within 0.5-2x their common size.
+      const mid = like.length ? PH.median(like) : 0;
+      const good = like.filter((a) => a > mid * 0.5 && a < mid * 2).length;
+      // a model that calls most of the frame "foreground" is wrong even if
+      // a few blobs happen to look like pieces
+      const fg = area / (proc.w * proc.h);
+      return { c, good, fg: +fg.toFixed(2), score: good * (fg > 0.75 ? 0.3 : 1) };
+    }
+    /**
+     * Which background model fits this table? Candidates: the 4 most common
+     * colours (on a dense pile the most common one can be the *pieces*),
+     * pairs of colours (mixed tables), the taught colours and the box
+     * palette. Each is tried; the one yielding the most piece-shaped blobs
+     * wins - no assumption about which colour is the board. All at once
+     * (photos); live scanning spreads it over frames (stepBgChoice).
+     */
+    chooseBackground(proc, extra) {
+      const tried = this.bgCandidates(proc).map((c) => this.scoreBg(proc, c, extra));
+      return this.pickBg(tried);
+    }
+    pickBg(tried) {
+      const r3 = (c) => c && [c.L, c.a, c.b].map(Math.round);
+      this.bgTried = tried.map((t) => ({ kind: t.c.kind, bg: r3(t.c.bg) || (t.c.list && t.c.list.map(r3)), good: t.good, fg: t.fg }));
+      let best = null;
+      for (const t of tried) if (!best || t.score > best.score) best = t;
+      return best && best.good >= 2 ? best : null;
+    }
+    // Live: one candidate per still frame; when all are scored, switch only if
+    // clearly better than the current model (no flip-flopping).
+    stepBgChoice(proc) {
+      if (!this.bgEval) {
+        const cands = this.bgCandidates(proc);
+        // the current model is re-scored too, so the comparison is fair
+        if (this.bgModel) cands.unshift(this.bgModel);
+        this.bgEval = { cands, i: 0, tried: [] };
+      }
+      const E = this.bgEval;
+      E.tried.push(this.scoreBg(proc, E.cands[E.i++]));
+      if (E.i < E.cands.length) return false;
+      this.bgEval = null;
+      const best = this.pickBg(E.tried);
+      const cur = this.bgModel && E.tried.find((t) => t.c === this.bgModel);
+      if (best && (!cur || best.c === cur.c || best.score > cur.score * 1.2)) this.bgModel = best.c;
+      return true;
     }
 
     /**

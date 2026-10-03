@@ -5,56 +5,9 @@ work. Every claim below was measured in this repo on 2026-10-03; the tools used
 are checked in, so re-measure before and after each change.
 
 Target device: **iPhone XR (A12, 2018, 3 GB)** running **Chrome on iOS**
-(WKWebView: same engine as Safari). Confirmed by the owner and the reports
-(2026-10-03): Add to Home Screen works, the screen stays awake, and motion
-sensors work (reports carry `gravity`/`tilt`; iOS 18.7). Table: white board, warm lamp,
+(WKWebView: same engine as Safari, but no Wake Lock API, no Add-to-Home-Screen,
+and motion-sensor permission is usually off). Table: white board, warm lamp,
 pale-printed pieces (see `reports/*-frame.jpg`).
-
----
-
-## Status (2026-10-03)
-
-| WP | State | Result |
-|---|---|---|
-| WP8 | **Done** (828a415) | `test/seg-regression.js` on white-1/2, white-close-1/2 (video frames 2 and 881); `--baseline` reproduces the old numbers; in `npm test` |
-| WP1 | **Done** (828a415) | Running `unitLive` + mass-mode own estimate (≥ 3 blobs, else null). Fragments are never catalogued as new pieces. `test/unit-area.js`: unit within 7%, no duplicate entries |
-| WP2 | **Done** (5f7aeaf) | Boundary fill on still frames, open off. good/frag: white-1 20/8 → 31/2, white-2 21/10 → 35/1, close-1 14/8 → 13/4, close-2 9/4 → 7/2 |
-| WP3–WP7, WP9 | Open | — |
-| Report fixes | **Done** (v0.7.0) | Black report frame (last view kept when the camera is released); tilt-border streaks marked out-of-image (alpha 0) and ignored |
-| Lighting | **Done** (v0.7.0) | `PH.flattenLight` evens shadows (board surface by closing/opening/median at ~1/120 scale, ratio correction; skipped when light is even). Near-neutral, alike taught colours = plain board; stale taught colours (< 20% of frame) fall back per frame. Per-crop board lightness from the crop border in `analyzePiece`. Replays: 13:36 2 → 25 good, 13:42 0 → 29 good; close-2 9 → 14 |
-| UI (owner) | **Done** (v0.7.0) | Tap the enlarged box picture to shrink it; Find buttons wrap (all reachable); top message wraps; banner/debug placed below the top bar's real height |
-| Corners / duplicates | **Done** (v0.7.1) | One piece per box spot: `cornerDoubts()` keeps the most confident corner per corner spot (others doubtful, not counted/filtered); `dedupeByCell()` merges same-spot duplicates by shape+print, joins islands linked by >= 3 pairs, then merges same-position look-alikes (live: 3 ms every 20 frames; Tidy: all). `test/dedupe.js`: 96 entries / 2 islands / 8 corner-shaped -> 48 / 1 / 4. Partly covers WP7 |
-| Dense piles / mixed table | **Done** (v0.8.0) | Reports 14:27-14:29 (chickens 1000-pc, glass table, dense piles): 0 detections because plain-board taught colours made the app call the white *pieces* the board. Now `chooseBackground()` scores candidates (4 common colours, pairs of the top 3, taught, palette) by size-consistent piece-shaped blobs; live re-checks run one candidate per still frame and switch only if 20% better. `PH.pileUnit` (distance-transform peaks) sizes pieces in piles with no isolated ones; whole piles may be split; one piece never sets the size if > 12% of the view; boundary fill skipped when it would claim > 30% of the remaining table. 14:28 0 -> 23 detections with tracking; white-board frames unchanged |
-| Far/steep views | Note | 14:29 (33 deg, far): pieces ~8 px after straightening - too small; hold the phone closer |
-| Tilted report 13:40 | Checked | Straightened image replayed: 27 -> 76 good pieces with v0.7 segmentation |
-| Tilt slowdown on phone | Open | `seg_dist`/`seg_thresh` 15–40x slower only with tilt correction; suspect allocation/GC in `rectifiedSource` — WP5 |
-| **New** | Open | **Lamp shadows on the table**: on both close-ups, the shadowed table area becomes one big foreground blob and swallows the pieces in it. Likely fix: flatten illumination (local background lightness from a large-scale closing/blur of L) before the colour distance |
-
-**Phone reports 13:36–13:42 (v0.6.0, before WP1/WP2 shipped)** — replay any report with
-`node test/report-replay.js reports/<report>.json --draw` (same taught colours, tilt, Scan detail):
-- Speed is fine: 6–7 fps, `total` 44 ms median without tilt correction. **With tilt correction**
-  `seg` is 108–115 ms: `seg_dist` 38–40 ms and `seg_thresh` 16–17 ms vs ~1 ms untilted, though the
-  image is the same size (346–385×640). Not reproducible in node (38 ms total). Suspect GC from the
-  per-frame warp allocations in `PH.rectifiedSource` — reuse buffers (WP5).
-- **Taught background goes stale when the light changes.** The two taught colours are both the
-  *shadowed* board (L 110–117); in the 13:42 report the lit board is L≈203, so the board itself is
-  "foreground" (only 22% of the frame classed as background) → one huge blob → 0 pieces found among
-  ~35 visible. In 13:36 the lit half fails the same way (published: 2 good; with WP1/WP2: 9, all on
-  the shadow side).
-- **Lamp shadows** on every frame (see NEW above): the dominant-colour model and the taught table
-  both treat the shadowed vs lit board as different colours.
-- Consequence: few detections → tracking lost (5% of frames in 13:42) → 16 → 25 → 35 islands and
-  344 pieces + 25 sections for a 300-piece box.
-- **Report frame is black** when the camera was released behind the menu (13:40) — capture the
-  frame before releasing, or keep the last good frame.
-- Tilt-corrected frames have `BORDER_REPLICATE` streaks at the edges that become border blobs —
-  mark out-of-image pixels as background instead.
-
-**Correction to §1.1 / WP2 step 2:** measured on all four frames, close 3 beat 5/7/9
-at unit ~1000–2000 px² (larger kernels fuse neighbours; close 9 also lost pieces
-on the close-up). The engine uses `clamp(odd(0.07·√unit), 3, 7)`, not 0.18·√unit.
-Also: score segmentation against the result's *own* robust unit. The colour-only
-unit under-sizes pale pieces, so complete pieces would look "merged".
 
 ---
 
@@ -194,11 +147,10 @@ Validated:
   call** on a 54×96 thumbnail in node. Expect single-digit ms on the XR.
 - Featureless input reports `conf = 0` rather than a random shift.
 
-The IMU works on the owner's phone (reports carry `gravity` and `tilt`), so
-`isStill()` is live there. It gives rotation, not translation, so the
-thumbnail tracker is still the better source for moving the marks. Its
-per-frame shift is also a useful second stillness signal (AND it with the
-sensor) and a fallback if a user denies motion permission.
+The IMU is *not* a good primary source here: on iOS Chrome the motion
+permission is usually off, and then `isStill()` already returns true always
+(so shapes get read from blurred frames). The tracker's per-frame shift
+magnitude doubles as a sensor-free stillness signal.
 
 ### 1.4 Duplicate cataloguing and the O(dets × catalog) loops
 

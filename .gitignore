@@ -4,3 +4,4 @@ test/_*
 tools/*.pem
 test/fixtures/
 reports/
+.agent-coordination/
