@@ -5,3 +5,5 @@ tools/*.pem
 test/fixtures/
 reports/
 .agent-coordination/
+# OneDrive sync-conflict copies (e.g. NAME-<MACHINE>.md)
+*-BBI-NB-*
