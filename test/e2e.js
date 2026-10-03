@@ -46,7 +46,9 @@ function writePng(file, mat) {
 
   console.log('Generating synthetic sweep…');
   const P = S.makePuzzle(cv, { cols: 8, rows: 6, cs: 48, seed: 3 });
-  const sc = S.scatter(cv, P, { scale: 2.2, seed: 5 });
+  const blocks = [{ r0: 2, c0: 1, rows: 3, cols: 3 }];
+  const subset = P.pieces.map((p, i) => i).filter((i) => !(P.pieces[i].r >= 2 && P.pieces[i].r < 5 && P.pieces[i].c >= 1 && P.pieces[i].c < 4));
+  const sc = S.scatter(cv, P, { scale: 2.2, seed: 5, subset, blocks });
   const FW = 1280, FH = 720, zoom = 1.0;
   const frames = [];
   const xs = [], n = 40;
@@ -90,7 +92,7 @@ function writePng(file, mat) {
     console.log('stats after sweep:', stats1, '\n' + dbg);
     await page.screenshot({ path: path.join(OUT, 'e2e-scan.png') });
     const n1 = parseInt(stats1, 10);
-    check('live camera catalogs pieces', n1 >= 30 && n1 <= 56, `${n1} pieces for 48 on the table (sweep sees part of the table)`);
+    check('live camera catalogs pieces', n1 >= 25 && n1 <= 48, `${n1} pieces for 48 on the table (sweep sees part of the table)`);
 
     // Box picture.
     await page.click('#boxBtn');
@@ -114,7 +116,7 @@ function writePng(file, mat) {
     const stats2 = await page.textContent('#stats');
     console.log('stats after snap + box:', stats2);
     const n2 = parseInt(stats2, 10);
-    check('snap adds the rest without duplicating', n2 >= 46 && n2 <= 52, `${n2} pieces`);
+    check('snap adds the rest without duplicating', n2 >= 37 && n2 <= 42, `${n2} pieces (39 loose + 1 section on the table)`);
     check('pieces placed on the box', /(\d+) placed/.test(stats2) && parseInt(stats2.match(/(\d+) placed/)[1], 10) >= 20, stats2);
 
     // Tap a piece that has a shape model and check the Find panel.
@@ -131,6 +133,20 @@ function writePng(file, mat) {
     } else {
       check('tapping a piece opens its matches', false, 'no shaped piece on screen to tap');
     }
+    // Assembled section: tap it -> section view with its loose neighbors.
+    await page.click('#closeFind').catch(() => {});
+    // the section has to come fully into the (moving) fake camera view
+    const sp = await page.waitForFunction(() => window.__phPick && window.__phPick('section'), null, { timeout: 30000, polling: 200 }).then((h) => h.jsonValue()).catch(async () => {
+      console.log('statuses seen:', await page.evaluate(() => JSON.stringify(window.__phStatuses && window.__phStatuses())));
+      return null;
+    });
+    if (sp || await page.evaluate(() => window.__phSelectStatus('section'))) {
+      if (sp) await page.mouse.click(sp[0], sp[1]);
+      const ok = await page.waitForFunction(() => /Assembled section/.test(document.getElementById('selTitle').textContent), null, { timeout: 8000 }).then(() => true).catch(() => false);
+      const sub = await page.textContent('#selSub');
+      await page.screenshot({ path: path.join(OUT, 'e2e-section.png') });
+      check('tapping an assembled section shows where it goes', ok && /column/.test(sub), sub);
+    } else check('tapping an assembled section shows where it goes', false, 'no located section on screen');
     // Teach background: tap a bare spot, expect it to be learned, then clear.
     await page.click('#closeFind').catch(() => {});
     await page.click('#menuBtn');
@@ -147,7 +163,7 @@ function writePng(file, mat) {
     page.on('download', (d) => dls.push(d.suggestedFilename()));
     await page.click('#reportBtn');
     await page.waitForTimeout(4000);
-    check('send report produces frame + data files', dls.some((n) => n.endsWith('.json')) && dls.some((n) => n.endsWith('frame.jpg')), dls.join(', '));
+    check('send report produces frame + analyzed view + data files', dls.some((n) => n.endsWith('.json')) && dls.some((n) => n.endsWith('frame.jpg')) && dls.some((n) => n.endsWith('analyzed.jpg')), dls.join(', '));
     // Phone tilted ~35°: feed gravity readings, then tap a piece through the
     // corrected mapping (outline -> screen -> tap -> back to the piece).
     await page.evaluate(() => {

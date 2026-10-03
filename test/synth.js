@@ -198,8 +198,56 @@ function scatter(cv, P, opts) {
     gt.push({ r: p.r, c: p.c, code: p.code, x: cx, y: cy, rot });
     [crop, mask, pm, mv, M, pc, pmk].forEach((m) => m.delete());
   });
+  // Assembled blocks (opts.blocks = [{r0, c0, rows, cols}]) in a band below.
+  const blockGt = [];
+  if (opts.blocks && opts.blocks.length) {
+    const bandH = Math.ceil(Math.max(...opts.blocks.map((b) => Math.hypot(b.rows, b.cols))) * P.cs * k * 1.15);
+    const big = new cv.Mat(TH + bandH, TW, cv.CV_8UC4);
+    const bd = big.data;
+    for (let i = 0; i < bd.length; i += 4) { const n = (rnd() - 0.5) * 10; bd[i] = felt[0] + n; bd[i + 1] = felt[1] + n; bd[i + 2] = felt[2] + n; bd[i + 3] = 255; }
+    table.copyTo(big.roi(new cv.Rect(0, 0, TW, TH)));
+    let x = bandH / 2;
+    for (const b of opts.blocks) {
+      const members = P.pieces.filter((p) => p.r >= b.r0 && p.r < b.r0 + b.rows && p.c >= b.c0 && p.c < b.c0 + b.cols);
+      const bx = P.margin + b.c0 * P.cs - ext, by = P.margin + b.r0 * P.cs - ext;
+      const cw = b.cols * P.cs + 2 * ext, chh = b.rows * P.cs + 2 * ext;
+      const crop = P.big.roi(new cv.Rect(bx, by, cw, chh)).clone();
+      const mask = cv.Mat.zeros(chh, cw, cv.CV_8UC1);
+      for (const p of members) {
+        const flat = [];
+        for (const [px, py] of p.poly) flat.push(Math.round(px + P.margin - bx), Math.round(py + P.margin - by));
+        const pm = cv.matFromArray(flat.length / 2, 1, cv.CV_32SC2, flat), mv = new cv.MatVector(); mv.push_back(pm);
+        cv.fillPoly(mask, mv, new cv.Scalar(255), cv.LINE_AA);
+        pm.delete(); mv.delete();
+      }
+      const rot = rnd() * Math.PI * 2;
+      const PS = Math.ceil(Math.hypot(cw, chh) * k * 1.05);
+      const ccx = cw / 2, ccy = chh / 2, cs2 = Math.cos(rot) * k, sn2 = Math.sin(rot) * k;
+      const M = cv.matFromArray(2, 3, cv.CV_64F, [cs2, -sn2, PS / 2 - (cs2 * ccx - sn2 * ccy), sn2, cs2, PS / 2 - (sn2 * ccx + cs2 * ccy)]);
+      const pc = new cv.Mat(), pmk = new cv.Mat();
+      cv.warpAffine(crop, pc, M, new cv.Size(PS, PS), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0));
+      cv.warpAffine(mask, pmk, M, new cv.Size(PS, PS), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0));
+      const ox = Math.round(x - PS / 2), oy = Math.round(TH + bandH / 2 - PS / 2);
+      for (let yy = 0; yy < PS; yy++) for (let xx = 0; xx < PS; xx++) {
+        const a = pmk.data[yy * PS + xx] / 255; if (!a) continue;
+        const tx = ox + xx, ty = oy + yy; if (tx < 0 || ty < 0 || tx >= TW || ty >= TH + bandH) continue;
+        const ti = (ty * TW + tx) * 4, si = (yy * PS + xx) * 4;
+        const gain = opts.gain || 0.93, off = opts.offset || 8, minSep = opts.minSep === undefined ? 70 : opts.minSep;
+        let rr = pc.data[si] * gain + off, gg = pc.data[si + 1] * gain + off, bb = pc.data[si + 2] * gain + off;
+        const dr = rr - felt[0], dg = gg - felt[1], db = bb - felt[2], dd = Math.hypot(dr, dg, db);
+        if (dd < minSep) { const k2 = dd > 1 ? minSep / dd : 0; if (k2) { rr = felt[0] + dr * k2; gg = felt[1] + dg * k2; bb = felt[2] + db * k2; } else rr = felt[0] + minSep; }
+        bd[ti] = bd[ti] * (1 - a) + rr * a; bd[ti + 1] = bd[ti + 1] * (1 - a) + gg * a; bd[ti + 2] = bd[ti + 2] * (1 - a) + bb * a;
+      }
+      blockGt.push({ block: b, cells: members.map((p) => p.r * P.cols + p.c), x, y: TH + bandH / 2 });
+      x += PS * 1.1;
+      [crop, mask, M, pc, pmk].forEach((m) => m.delete());
+    }
+    table.delete();
+    cv.GaussianBlur(big, big, new cv.Size(3, 3), 0);
+    return { table: big, gt, TW, TH: TH + bandH, core, blocks: blockGt };
+  }
   cv.GaussianBlur(table, table, new cv.Size(3, 3), 0);
-  return { table, gt, TW, TH, core };
+  return { table, gt, TW, TH, core, blocks: [] };
 }
 
 // Camera view of the table: similarity warp to a W x H frame.

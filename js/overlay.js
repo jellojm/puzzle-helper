@@ -7,12 +7,14 @@ const STATUS = {
   shaped: { stroke: '#4f9dff', dash: [] },
   placed: { stroke: '#3ddc84', dash: [] },
   merged: { stroke: '#ff9f43', dash: [6, 4] },
+  section: { stroke: '#c084fc', dash: [] },
 };
 const ROLE = {
   sel: { color: '#ffffff', width: 5 },
   gold: { color: '#ffcc00', width: 5 },
   silver: { color: '#c9ced6', width: 3 },
   region: { color: '#ff4fd8', width: 4 },
+  section: { color: '#c084fc', width: 5 },
 };
 
 // Map processing-frame coordinates to CSS pixels of the overlay, matching the

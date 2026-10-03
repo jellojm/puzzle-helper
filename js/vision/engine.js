@@ -59,13 +59,15 @@
       return p;
     }
     counts() {
-      let shaped = 0, placed = 0, located = 0;
+      let shaped = 0, placed = 0, located = 0, sections = 0, pieces = 0;
       for (const p of this.pieces.values()) {
+        if (p.kind === 'section') { sections++; continue; }
+        pieces++;
         if (p.t1) shaped++;
         if (p.t2 && p.t2.conf >= 0.35) placed++;
         if (p.pos) located++;
       }
-      return { pieces: this.pieces.size, shaped, placed, located };
+      return { pieces, sections, shaped, placed, located };
     }
 
     // ---------- tracking ----------
@@ -296,6 +298,7 @@
       const st = this.straighten(source, info);
       source = st.source;
       const proc = source.getProc(this.opts.procW);
+      this.lastProc = proc; // kept for debug reports (what the app actually analyzed)
       const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25 }));
       this.bg = seg.bg; this.thresh = seg.thresh;
       const t1 = now();
@@ -323,7 +326,7 @@
           this.pose = null;
         }
       }
-      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, still: info.still !== false, deadline: t0 + this.opts.budgetMs };
+      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs };
       if (ok) { this.lost = 0; this.assign(dets, unitF, proc); }
       const t2 = now();
       const work = this.runQueue(dets, t0 + this.opts.budgetMs);
@@ -338,12 +341,26 @@
     // A high-resolution photo: catalog everything in it, no time budget.
     processSnap(source, info) {
       const t0 = now();
+      info = info || {};
+      // No sensor tilt with this photo: estimate it from the pieces.
+      let autoTilt = null;
+      if (!info.tilt && this.opts.tiltCorrection !== false && this.opts.autoTilt !== false) {
+        autoTilt = this.estimatePhotoTilt(source);
+        if (autoTilt && autoTilt.tilt >= 8 && autoTilt.gain > 0.05) {
+          // Safety check: use it only if the straightened photo shows at least
+          // as many clean piece outlines as the original (a wrong tilt hurts).
+          const cand = Object.assign({}, info, { tilt: { down: autoTilt.down, fov: info.fov } });
+          const before = this.countPieceLike(source), after = this.countPieceLike(this.straighten(source, cand).source);
+          autoTilt.check = { before, after };
+          if (after >= before) info = cand;
+        }
+      }
       source = this.straighten(source, info).source;
       const saved = { pose: this.pose, island: this.island, tracks: this.tracks, lost: this.lost };
       const proc = source.getProc(this.opts.snapProcW);
       const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.5 }));
       if (!this.bg) this.bg = seg.bg;
-      this.frameCtx = { source, scale: proc.scale, bg: seg.bg, thresh: seg.thresh, lut: seg.lut, still: true, deadline: Infinity };
+      this.frameCtx = { source, scale: proc.scale, bg: seg.bg, thresh: seg.thresh, lut: seg.lut, unitArea: seg.unitArea, still: true, deadline: Infinity };
       const dets = this.classify(seg.dets, seg.unitArea);
       const unitF = this.unitFrame(dets);
       const before = this.pieces.size;
@@ -353,7 +370,7 @@
       for (const d of dets) this.detT1(d);
       // In a still photo every piece gets a full read; anything that doesn't
       // read as a jigsaw piece is not catalogued.
-      for (let i = dets.length - 1; i >= 0; i--) if (!dets[i].t1 && !dets[i].merged && !dets[i].border) dets.splice(i, 1);
+      for (let i = dets.length - 1; i >= 0; i--) if (!dets[i].t1 && !dets[i].merged && !dets[i].border) dets.splice(i, 1); // sections (merged) stay
       // Shape + print only: color fingerprints can't tell look-alike pieces
       // apart (e.g. a puzzle with lots of plain white), so they can't anchor a photo.
       const r = this.relocalizeByShape(dets, unitF);
@@ -372,12 +389,29 @@
         found: dets.filter((d) => d.id).length,
         added: this.pieces.size - before,
         located, mergedIslands: merged,
+        tilt: info.tilt ? Math.round(PH.tiltDeg(info.tilt.down)) : 0, autoTilt: autoTilt && { pitch: autoTilt.pitch, roll: autoTilt.roll, gain: +autoTilt.gain.toFixed(3), check: autoTilt.check },
         // pieces this photo recognized from earlier views (for checking/stitch UI)
         recognized: dets.filter((d) => d.id && known.has(d.id)).map((d) => ({ id: d.id, corners: d.t1 ? d.t1.corners : null, firstCorners: this.pieces.get(d.id).t1 ? this.pieces.get(d.id).t1.corners : null })),
         shaped: work.t1, placed: work.t2,
         ms: now() - t0,
         counts: this.counts(),
       };
+    }
+
+    countPieceLike(source) {
+      const proc = source.getProc(this.opts.procW);
+      const seg = PH.segment(proc, this.segOpts({ splitBudgetMs: 60 }));
+      return seg.dets.filter((d) => !d.border && PH.pieceScore(d.pts, d.area) > PH.MIN_CORNER_SCORE).length;
+    }
+    estimatePhotoTilt(source) {
+      const proc = source.getProc(this.opts.procW);
+      const seg = PH.segment(proc, this.segOpts({ splitBudgetMs: 60 }));
+      const unit = seg.unitArea;
+      // Pick blobs by shape (4 good corners), not size: the small far-away
+      // pieces are exactly the ones that reveal the tilt.
+      const blobs = seg.dets.filter((d) => !d.border && d.area > unit * 0.1 && d.area < unit * 4 && PH.pieceScore(d.pts, d.area) > PH.MIN_CORNER_SCORE)
+        .map((d) => ({ pts: Array.from(d.pts, (v) => v / proc.scale), area: d.area }));
+      return PH.estimateTilt(blobs, source.w, source.h);
     }
 
     // Segmentation options: taught background colors win, then the box palette,
@@ -432,8 +466,9 @@
         let best = null;
         for (const p of this.pieces.values()) {
           if (!p.pos || p.island !== this.island || claimed.has(p.id)) continue;
+          if ((p.kind === 'section') !== !!d.merged) continue;
           const dist = Math.hypot(p.pos[0] - q[0], p.pos[1] - q[1]);
-          if (dist > unitT * 0.55) continue;
+          if (dist > unitT * (d.merged ? 1.2 : 0.55)) continue;
           const sim = PH.fpSimilarity(d.fp, p.fp);
           if (sim < 0.5) continue;
           const c = dist / unitT + (1 - sim);
@@ -462,7 +497,16 @@
         const q = PH.simApply(T, d.cx, d.cy);
         const near = nearest(d, T);
         if (near) { d.id = near.id; claimed.add(near.id); continue; }
-        if (d.border || d.merged) continue;
+        if (d.border) continue;
+        if (d.merged) {
+          // An assembled section (or a clump of touching pieces): catalogued
+          // separately and located on the box picture as a whole.
+          if (!this.frameCtx.still) continue;
+          const p = this.newPiece(d, q, this.island, d.area * s * s);
+          p.kind = 'section';
+          d.id = p.id; claimed.add(p.id);
+          continue;
+        }
         // Before adding a new piece, check whether a known piece was moved here
         // (or went missing earlier). Look-alikes are common (sky!), so a
         // candidate with a shape model must also match by shape.
@@ -495,7 +539,7 @@
     findMoved(d, s, claimed) {
       const cands = [];
       for (const p of this.pieces.values()) {
-        if (claimed.has(p.id)) continue;
+        if (claimed.has(p.id) || p.kind === 'section') continue;
         const sim = PH.fpSimilarity(d.fp, p.fp);
         const ar = (d.area * s * s) / p.area;
         if (sim > 0.75 && ar > 0.7 && ar < 1.4) cands.push({ p, sim });
@@ -581,6 +625,18 @@
           n1++;
         }
       }
+      if (this.box && F.still) {
+        // Sections: one per live frame (they're slower), all of them in a photo.
+        let ns = 0;
+        for (const d of dets) {
+          if (!d.id || !d.merged || d.border) continue;
+          const p = this.pieces.get(d.id);
+          if (!p || p.kind !== 'section' || p.sec) continue;
+          if (deadline !== Infinity && (ns >= 1 || now() > deadline)) break;
+          p.sec = this.placeSectionDet(d) || { failed: true };
+          this.touch(p); this.version++; ns++;
+        }
+      }
       if (this.box) {
         // Visible pieces first, then the backlog.
         const order = [];
@@ -589,7 +645,7 @@
         const done = new Set();
         const cal = this.calibStats();
         for (const p of order) {
-          if (done.has(p.id) || !p.t1 || p.t2) continue;
+          if (done.has(p.id) || !p.t1 || p.t2 || p.kind === 'section') continue;
           done.add(p.id);
           if (n2 >= 2 && now() > deadline) break;
           p.t2 = PH.placePiece(this.box, p.t1, cal) || { cands: [], conf: 0, failed: true };
@@ -598,6 +654,21 @@
         }
       }
       return { t1: n1, t2: n2 };
+    }
+
+    placeSectionDet(d) {
+      const F = this.frameCtx, scale = F.scale, source = F.source;
+      const [bx, by, bw, bh] = d.bbox;
+      const m = Math.max(bw, bh) * 0.05;
+      const x0 = Math.max(0, Math.floor((bx - m) / scale)), y0 = Math.max(0, Math.floor((by - m) / scale));
+      const x1 = Math.min(source.w, Math.ceil((bx + bw + m) / scale)), y1 = Math.min(source.h, Math.ceil((by + bh + m) / scale));
+      // Work at a moderate resolution: the box match runs at ~12 px per piece.
+      let crop = source.getCrop(x0, y0, x1 - x0, y1 - y0);
+      const pts = Array.from(d.pts, (v, i) => v / scale - (i % 2 ? y0 : x0));
+      const sidePx = Math.sqrt(F.unitArea || d.area / 4) / scale / 1.05;
+      try {
+        return PH.placeSection(this.box, crop, pts, sidePx);
+      } catch (e) { return null; }
     }
 
     calibrate(t1, sign) {
@@ -629,19 +700,89 @@
       const c = this.matchCache.get(id);
       if (c && c.version === this.version && (c.loops || !(opts && opts.loops))) return c.res;
       const all = [...this.pieces.values()];
-      const res = PH.findMatches(P, all, { topN: 5, skip: this.skipFn() });
+      const res = PH.findMatches(P, all, { topN: 5, skip: this.skipFn(), nullOdds: (k) => this.nullOdds(P, k).odds });
+      for (const r of res) r.spot = this.nullOdds(P, r.edge).spot;
       if (opts && opts.loops) PH.confirmWithLoops(res, PH.findLoops(P, all, { K: 6, skip: this.skipFn() }));
       for (const r of res) if (P.joined[r.edge]) r.matches = [];
       this.matchCache.set(id, { version: this.version, res, loops: !!(opts && opts.loops) });
       return res;
     }
+    /**
+     * Prior odds that piece P's partner on edge k has NOT been scanned yet.
+     * Partial sets: with 400 of 1000 pieces catalogued, most partners simply
+     * aren't on the table. The box picture sharpens this: if P is placed on
+     * the box, its neighbor's cell is known; when no catalogued piece is
+     * placed there, the partner almost certainly isn't scanned (and `spot`
+     * says where in the picture it comes from).
+     */
+    nullOdds(P, k) {
+      const total = this.box ? this.box.cols * this.box.rows : this.opts.totalPieces || 1000;
+      const cov = PH.clamp(this.pieces.size / total, 0.02, 1);
+      let odds = Math.max(0.2, (1 - cov) / cov);
+      let spot = null;
+      const t2 = P.t2;
+      if (this.box && t2 && t2.cands.length && t2.conf >= 0.4) {
+        const A = t2.cands[0], side = (k + A.rot) % 4;
+        const D = [[0, -1], [1, 0], [0, 1], [-1, 0]][side];
+        const col = A.col + D[0], row = A.row + D[1];
+        if (col < 0 || row < 0 || col >= this.box.cols || row >= this.box.rows) return { odds: 0.01, spot: null };
+        let near = 0;
+        for (const q of this.pieces.values()) {
+          if (q === P || !q.t2 || !q.t2.cands.length || q.t2.conf < 0.3) continue;
+          const c = q.t2.cands[0];
+          if (c.col === col && c.row === row) near++;
+        }
+        odds *= near ? 0.5 : 10; // box placement is right ~86-93% of the time
+        spot = { col, row, scanned: near > 0 };
+      }
+      return { odds: PH.clamp(odds, 0.05, 50), spot };
+    }
+
     select(id) {
       if (!id) { this.selection = null; return null; }
       const P = this.pieces.get(id);
       if (!P) return null;
       this.selection = { id };
       this.region = null;
-      return this.describe(id);
+      return P.kind === 'section' ? this.describeSection(id) : this.describe(id);
+    }
+    // Loose pieces that attach to section S (by box placement).
+    sectionPartners(S) {
+      if (!this.box || !S.sec || !S.sec.cells) return [];
+      const out = [];
+      for (const P of this.pieces.values()) {
+        if (P.kind === 'section') continue;
+        const a = PH.sectionAttach(this.box, S.sec, P);
+        if (a) out.push({ id: P.id, edges: a.edges, conf: a.conf, cell: a.cell });
+      }
+      return out.sort((a, b) => b.conf - a.conf);
+    }
+    // Sections that loose piece P attaches to.
+    attachmentsOf(P) {
+      if (!this.box || !P.t2) return [];
+      const out = [];
+      for (const S of this.pieces.values()) {
+        if (S.kind !== 'section' || !S.sec || !S.sec.cells) continue;
+        const a = PH.sectionAttach(this.box, S.sec, P);
+        if (a) out.push({ section: S.id, edges: a.edges, located: !!S.pos });
+      }
+      return out;
+    }
+    describeSection(id) {
+      const S = this.pieces.get(id);
+      const sec = S.sec;
+      return {
+        section: true,
+        piece: { id: S.id, code: null, thumb: null, t2: null, located: !!S.pos },
+        status: !this.box ? 'Add a box picture to locate this section' : !sec ? 'Hold steady over this section to locate it on the box' :
+          sec.failed ? 'Couldn\'t find this section on the box picture (if it is a clump of loose pieces, spread them apart)' : null,
+        sec: sec && sec.cells ? { cells: sec.cells, open: sec.open, center: sec.center, score: sec.score } : null,
+        partners: sec && sec.cells ? this.sectionPartners(S).map((p) => {
+          const Q = this.pieces.get(p.id);
+          return Object.assign(p, { thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, located: !!Q.pos });
+        }) : [],
+        edges: [],
+      };
     }
     // Everything the UI panel needs about a piece and its candidate partners.
     describe(id) {
@@ -650,8 +791,9 @@
       const brief = (Q) => ({ id: Q.id, code: Q.t1 ? Q.t1.code : null, thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, t2: Q.t2 ? { cands: Q.t2.cands.slice(0, 3), conf: Q.t2.conf } : null, located: !!Q.pos });
       return {
         piece: brief(P),
+        attach: this.attachmentsOf(P),
         status: !P.t1 ? 'Hold steady over this piece to read its shape' : null,
-        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, joined: P.joined[r.edge], loop: r.loop, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
+        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
       };
     }
     selectRegion(c0, r0, c1, r1) {
@@ -682,7 +824,7 @@
       const outDets = dets.map((d) => {
         const p = d.id ? this.pieces.get(d.id) : null;
         let status = 'unknown';
-        if (d.merged) status = 'merged';
+        if (d.merged) status = p && p.kind === 'section' && p.sec && p.sec.cells ? 'section' : 'merged';
         else if (p) status = p.t2 && p.t2.conf >= 0.35 ? 'placed' : p.t1 ? 'shaped' : 'seen';
         if (p) byId.set(p.id, d);
         return { id: d.id, status, cx: d.cx, cy: d.cy, pts: simplify(d.pts, 1.5), border: d.border };
@@ -697,11 +839,18 @@
           hl.push(Object.assign({ id, role, x: f[0], y: f[1], visible: false }, extra));
         }
       };
-      if (this.selection) {
+      if (this.selection && this.pieces.get(this.selection.id) && this.pieces.get(this.selection.id).kind === 'section') {
+        const S = this.pieces.get(this.selection.id);
+        locate(S.id, 'sel');
+        for (const p of this.sectionPartners(S)) locate(p.id, 'gold', { edge: p.edges[0] });
+      } else if (this.selection) {
         const sid = this.selection.id;
         locate(sid, 'sel');
+        const P = this.pieces.get(sid);
+        if (P) for (const a of this.attachmentsOf(P)) locate(a.section, 'section');
         const res = this.matchesFor(sid);
-        if (res) for (const r of res) r.matches.slice(0, 3).forEach((m, i) => locate(m.id, i === 0 ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge }));
+        // Gold only for a likely match; otherwise candidates are just "maybe".
+        if (res) for (const r of res) r.matches.slice(0, 3).forEach((m, i) => locate(m.id, i === 0 && m.prob >= 0.5 ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge }));
       }
       if (this.region) for (const id of this.region.ids) locate(id, 'region');
       // Auto-flag: mutual best matches among visible pieces.
@@ -745,7 +894,7 @@
 
     // ---------- persistence ----------
     exportPiece(p) {
-      return { id: p.id, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created };
+      return { id: p.id, kind: p.kind, sec: p.sec, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created };
     }
     importState(state) {
       this.reset();

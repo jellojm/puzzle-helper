@@ -2,7 +2,7 @@
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 
-const APP_VERSION = '0.4.0';
+const APP_VERSION = '0.5.0';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
 
@@ -61,7 +61,9 @@ worker.onmessage = (e) => {
     case 'snap': {
       S.snapping = false;
       const r = m.result;
-      toast(`Photo: ${r.found} pieces found, ${r.added} new, ${r.shaped} shapes read${r.located ? '' : ' (not yet linked to your table map — sweep over it to connect)'}.`, 4500);
+      S.lastSnapResult = Object.assign({}, r, { recognized: (r.recognized || []).length });
+      const tiltNote = r.tilt ? ` Straightened for ${r.tilt}° tilt${S.snapTilt ? '' : ' (estimated from the photo)'}.` : '';
+      toast(`Photo: ${r.found} pieces found, ${r.added} new, ${r.shaped} shapes read${r.located ? '' : ' (not yet linked to your table map — sweep over it to connect)'}.${tiltNote}`, 5000);
       updateStats(r.counts);
       break;
     }
@@ -70,7 +72,7 @@ worker.onmessage = (e) => {
     case 'boxCorners': if (m.corners) boxSetup.setCorners(m.corners); break;
     case 'selected': showFind(m.desc); break;
     case 'region': S.region = m.cells; toast(m.count ? `${m.count} catalogued pieces belong in that area.` : 'No catalogued pieces placed in that area yet.'); drawMinimap(); break;
-    case 'report': finishReport(m.data); break;
+    case 'report': finishReport(m.data, m.analyzed); break;
     case 'error':
       S.busy = false; S.snapping = false;
       logError(`worker(${m.where}): ${m.message}`);
@@ -239,6 +241,7 @@ function modeHint(mode) {
 function updateStats(c, tracking) {
   if (!c) return;
   const parts = [`${c.pieces} pieces`];
+  if (c.sections) parts.push(`${c.sections} section${c.sections > 1 ? 's' : ''}`);
   if (S.box) parts.push(`${c.placed} placed`);
   const tilt = tiltDegOf(S.lastTilt);
   if (tilt >= 4) parts.push(`${Math.round(tilt)}° tilt`);
@@ -341,6 +344,7 @@ function showFind(desc) {
   if (!desc) { closeFind(); return; }
   $('findPanel').hidden = false;
   $('menu').hidden = true;
+  if (desc.section) { showSection(desc); return; }
   const p = desc.piece;
   drawThumb($('selThumb'), p, null);
   $('selTitle').textContent = `Piece #${p.id}` + (p.code ? ` · ${p.code.split('').map((c) => SIDE[c][0].toUpperCase()).join('')}` : '');
@@ -352,6 +356,16 @@ function showFind(desc) {
   $('selSub').textContent = sub;
   const rows = $('edgeRows');
   rows.innerHTML = '';
+  if (desc.attach && desc.attach.length) {
+    const note = document.createElement('div');
+    note.className = 'edge-row';
+    note.innerHTML = '<h4><span class="sw" style="background:#c084fc"></span> Attaches to an assembled section</h4>';
+    const t = document.createElement('div');
+    t.className = 'empty';
+    t.textContent = desc.attach.map((a) => `Section #${a.section} (edge ${a.edges.map((e) => e + 1).join(' & ')} of this piece touches it)${a.located ? '' : ' — not in view'}`).join('; ') + '. It is outlined in purple.';
+    note.append(t);
+    rows.append(note);
+  }
   desc.edges.forEach((e) => {
     const row = document.createElement('div');
     row.className = 'edge-row';
@@ -366,9 +380,18 @@ function showFind(desc) {
     if (e.type === 'F') list.innerHTML = '<span class="empty">Border edge — nothing attaches here.</span>';
     else if (e.joined) list.innerHTML = '<span class="empty">Marked as joined.</span>';
     else if (!e.matches.length) list.innerHTML = '<span class="empty">No candidates yet — scan more pieces.</span>';
+    const likely = e.matches[0] && e.matches[0].prob >= 0.5;
+    if (e.type !== 'F' && !e.joined && e.pNone >= 0.4) {
+      const note = document.createElement('div');
+      note.className = 'empty';
+      note.textContent = `Partner probably not scanned yet (${Math.round(e.pNone * 100)}%)` +
+        (e.spot && !e.spot.scanned ? ` — look for the piece from column ${e.spot.col + 1}, row ${e.spot.row + 1} of the box picture.` : '.') +
+        (e.matches.length ? ' Possible:' : '');
+      row.append(note);
+    }
     e.matches.slice(0, 4).forEach((m, i) => {
       const c = document.createElement('div');
-      c.className = 'cand ' + (i === 0 ? 'gold' : i < 3 ? 'silver' : '');
+      c.className = 'cand ' + (i === 0 && likely ? 'gold' : i < 3 ? 'silver' : '');
       const cv = document.createElement('canvas');
       cv.width = cv.height = 144;
       drawThumb(cv, m, m.edgeB, EDGE_COLORS[e.edge]);
@@ -395,6 +418,37 @@ function showFind(desc) {
     rows.append(row);
   });
 }
+// An assembled section: where it sits on the box and which scanned loose
+// pieces attach to it (they glow gold on the table).
+function showSection(desc) {
+  const ctx = $('selThumb').getContext('2d');
+  ctx.clearRect(0, 0, 72, 72); ctx.fillStyle = '#c084fc'; ctx.fillRect(8, 8, 56, 56);
+  $('selTitle').textContent = `Assembled section #${desc.piece.id}`;
+  const sec = desc.sec;
+  $('selSub').textContent = desc.status || (sec ? `About ${sec.cells.length} pieces · around column ${Math.round(sec.center[0]) + 1}, row ${Math.round(sec.center[1]) + 1} of the box` : '');
+  const rows = $('edgeRows');
+  rows.innerHTML = '';
+  if (!sec) return;
+  const row = document.createElement('div');
+  row.className = 'edge-row';
+  row.innerHTML = `<h4>${desc.partners.length ? `${desc.partners.length} scanned piece${desc.partners.length > 1 ? 's' : ''} attach to it (gold on the table)` : 'No scanned pieces attach to it yet'}</h4>`;
+  const list = document.createElement('div');
+  list.className = 'cands';
+  desc.partners.slice(0, 12).forEach((m) => {
+    const c = document.createElement('div');
+    c.className = 'cand gold';
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 144;
+    drawThumb(cv, m, m.edges[0], '#c084fc');
+    const label = document.createElement('div');
+    label.textContent = `#${m.id} · col ${m.cell[0] + 1}, row ${m.cell[1] + 1}${m.located ? '' : ' · ?'}`;
+    c.append(cv, label);
+    list.append(c);
+  });
+  row.append(list);
+  rows.append(row);
+}
+
 function closeFind() {
   $('findPanel').hidden = true;
   if (S.desc) { S.desc = null; W.post({ type: 'select', id: null }); }
@@ -432,6 +486,22 @@ function drawMinimap() {
     ctx.fillRect(c0 * cw, r0 * ch, (c1 - c0 + 1) * cw, (r1 - r0 + 1) * ch);
     ctx.strokeStyle = '#ff4fd8'; ctx.lineWidth = 2;
     ctx.strokeRect(c0 * cw, r0 * ch, (c1 - c0 + 1) * cw, (r1 - r0 + 1) * ch);
+  }
+  const secOf = S.desc && S.desc.section ? S.desc.sec : null;
+  if (secOf) {
+    ctx.fillStyle = 'rgba(192,132,252,0.45)';
+    for (const id of secOf.cells) ctx.fillRect((id % b.cols) * cw, Math.floor(id / b.cols) * ch, cw, ch);
+    ctx.setLineDash([3, 2]); ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 1.5;
+    for (const id of secOf.open) ctx.strokeRect((id % b.cols) * cw, Math.floor(id / b.cols) * ch, cw, ch);
+    ctx.setLineDash([]);
+  }
+  if (S.desc && S.desc.edges) {
+    for (const e of S.desc.edges) {
+      if (!e.spot || e.spot.scanned) continue;
+      ctx.setLineDash([3, 2]); ctx.strokeStyle = '#ffb347'; ctx.lineWidth = 2;
+      ctx.strokeRect(e.spot.col * cw, e.spot.row * ch, cw, ch);
+      ctx.setLineDash([]);
+    }
   }
   if (S.desc && S.desc.piece.t2) {
     const cands = S.desc.piece.t2.cands;
@@ -541,7 +611,7 @@ $('reportBtn').onclick = () => {
   toast('Preparing report…', 10000);
   W.post({ type: 'report' });
 };
-async function finishReport(workerData) {
+async function finishReport(workerData, analyzed) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const files = [];
   try {
@@ -553,6 +623,7 @@ async function finishReport(workerData) {
       if (blob) files.push(new File([blob], `puzzle-report-${stamp}-frame.jpg`, { type: 'image/jpeg' }));
     }
   } catch (e) { logError('report frame: ' + e.message); }
+  if (analyzed) files.push(new File([analyzed], `puzzle-report-${stamp}-analyzed.jpg`, { type: 'image/jpeg' }));
   if (S.lastSnapFile) files.push(new File([S.lastSnapFile], `puzzle-report-${stamp}-snap.jpg`, { type: S.lastSnapFile.type || 'image/jpeg' }));
   const data = {
     app: APP_VERSION, time: new Date().toISOString(), userAgent: navigator.userAgent,
@@ -561,7 +632,7 @@ async function finishReport(workerData) {
     mode: S.mode, fps: S.fps, motion: S.motion, gravity: S.gravity, tilt: S.lastTilt, tiltOn: S.tiltOn, fov: S.fov,
     orientation: (screen.orientation && screen.orientation.angle) || window.orientation || 0,
     history: S.history, errors: S.errors,
-    lastFrame: S.last, selected: S.desc, worker: workerData,
+    lastFrame: S.last, lastSnap: S.lastSnapResult || null, snapTilt: S.snapTilt || null, selected: S.desc, worker: workerData,
   };
   files.push(new File([JSON.stringify(data)], `puzzle-report-${stamp}.json`, { type: 'application/json' }));
   $('toast').hidden = true;
@@ -588,16 +659,25 @@ $('videoInput').onchange = (e) => { const f = e.target.files[0]; if (f) startVid
 window.addEventListener('resize', drawMinimap);
 
 // Test hook (used by test/e2e.js): screen point of a visible piece with a shape model.
-window.__phPick = () => {
+window.__phPick = (want) => {
   if (!S.last || !S.map) return null;
   const r = overlay.getBoundingClientRect();
   for (const d of S.last.dets) {
-    if (!d.id || d.border || !(d.status === 'placed' || d.status === 'shaped')) continue;
-    const [x, y] = S.map.toScreen(d.cx, d.cy);
-    if (document.elementFromPoint(x + r.left, y + r.top) === overlay) return [x + r.left, y + r.top];
+    if (!d.id || (d.border && !want) || !(want ? d.status === want : d.status === 'placed' || d.status === 'shaped')) continue;
+    // a point inside the outline that is on screen and not under a panel
+    const cands = [[d.cx, d.cy]];
+    for (let i = 0; i < d.pts.length; i += 2) cands.push([(d.pts[i] * 3 + d.cx) / 4, (d.pts[i + 1] * 3 + d.cy) / 4]);
+    for (const [px, py] of cands) {
+      if (!pointInPoly(px, py, d.pts)) continue;
+      const [x, y] = S.map.toScreen(px, py);
+      if (x > 0 && y > 0 && x < r.width && y < r.height && document.elementFromPoint(x + r.left, y + r.top) === overlay) return [x + r.left, y + r.top];
+    }
   }
   return null;
 };
+
+window.__phSelectStatus = (want) => { const d = S.last && S.last.dets.find((x) => x.id && x.status === want); if (!d) return false; setMode('find'); W.post({ type: 'select', id: d.id }); return true; };
+window.__phStatuses = () => S.last && S.last.dets.map((d) => d.status + (d.border ? '/border' : ''));
 
 // ?video=URL plays a recorded sweep instead of the camera (desktop testing).
 const params = new URLSearchParams(location.search);

@@ -6,7 +6,7 @@
 'use strict';
 
 const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
-const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'engine'];
+const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine'];
 
 let engine = null;
 const recent = []; // recent frame timings
@@ -176,7 +176,16 @@ const handlers = {
   },
   clearHighlights() { engine.selection = null; engine.region = null; },
   // Diagnostic snapshot for "Send report".
-  report() {
+  async report() {
+    // The (straightened) image the vision code analyzed last, as a JPEG.
+    let analyzed = null;
+    if (engine.lastProc && typeof OffscreenCanvas !== 'undefined') {
+      try {
+        const p = engine.lastProc, c = new OffscreenCanvas(p.w, p.h);
+        c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(p.data), p.w, p.h), 0, 0);
+        analyzed = await c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+      } catch (e) { analyzed = null; }
+    }
     const pieces = [...engine.pieces.values()].map((p) => ({
       id: p.id, island: p.island, pos: p.pos && p.pos.map(Math.round), area: Math.round(p.area || 0),
       code: p.t1 ? p.t1.code : null, cornerScore: p.t1 ? +p.t1.cornerScore.toFixed(3) : null, nObs: p.t1 ? p.t1.nObs || 1 : 0,
@@ -184,7 +193,7 @@ const handlers = {
       box: p.t2 && p.t2.cands.length ? { col: p.t2.cands[0].col, row: p.t2.cands[0].row, conf: +p.t2.conf.toFixed(2) } : null,
       wrong: p.wrong, joined: p.joined,
     }));
-    post({ type: 'report', data: {
+    post({ type: 'report', analyzed, data: {
       opts: engine.opts, taught: engine.taught, counts: engine.counts(), bg: engine.bg, thresh: engine.thresh,
       box: engine.box ? { cols: engine.box.cols, rows: engine.box.rows, white: engine.box.white } : null,
       island: engine.island, tracking: !!engine.pose, pieces,

@@ -90,6 +90,66 @@
     return { H, Hinv: inv3(H), w: Math.ceil(x1 - x0), h: Math.ceil(y1 - y0) };
   };
 
+  // Gravity direction for a camera pitched forward by p and rolled by r (degrees).
+  PH.downFromAngles = function (pitchDeg, rollDeg) {
+    const p = (pitchDeg * Math.PI) / 180, r = (rollDeg * Math.PI) / 180;
+    // Rc = Rx(p) * Ry(r); down = third row of Rc
+    return [-Math.sin(r), Math.sin(p) * Math.cos(r), Math.cos(p) * Math.cos(r)];
+  };
+
+  /**
+   * Estimate tilt from the pieces themselves (for photos with no sensor data).
+   * In a correctly straightened view (1) pieces near and far have the same
+   * size and (2) randomly oriented pieces are, on average, not stretched in
+   * any direction. Searches pitch/roll for the most uniform result.
+   * @param blobs [{pts (flat, image px), area}] single-piece-sized outlines
+   */
+  PH.estimateTilt = function (blobs, w, h, fovDeg) {
+    if (blobs.length < 6) return null;
+    const f = PH.focalPx(w, h, fovDeg);
+    const sample = blobs.slice(0, 80).map((b) => {
+      const n = b.pts.length / 2, step = Math.max(1, Math.floor(n / 32)), P = [];
+      for (let i = 0; i < n; i += step) P.push([b.pts[2 * i], b.pts[2 * i + 1]]);
+      return P;
+    });
+    const score = (down) => {
+      const rect = PH.tiltHomography(w, h, f, down, 1e9);
+      if (!rect) return Infinity;
+      let sxx = 0, syy = 0, sxy = 0;
+      const logA = [];
+      for (const P of sample) {
+        const Q = P.map(([x, y]) => PH.applyH(rect.H, x, y));
+        if (Q.some((q) => q[2] <= 0)) return Infinity;
+        let mx = 0, my = 0;
+        for (const q of Q) { mx += q[0]; my += q[1]; }
+        mx /= Q.length; my /= Q.length;
+        let cxx = 0, cyy = 0, cxy = 0;
+        for (const q of Q) { const dx = q[0] - mx, dy = q[1] - my; cxx += dx * dx; cyy += dy * dy; cxy += dx * dy; }
+        const tr = cxx + cyy || 1;
+        sxx += cxx / tr; syy += cyy / tr; sxy += cxy / tr;
+        logA.push(Math.log(tr / Q.length));
+      }
+      const aniso = Math.hypot(sxx - syy, 2 * sxy) / (sxx + syy);
+      const m = logA.reduce((a, b) => a + b, 0) / logA.length;
+      const sd = Math.sqrt(logA.reduce((a, b) => a + (b - m) ** 2, 0) / logA.length);
+      return aniso + sd;
+    };
+    let best = { s: score([0, 0, 1]), pitch: 0, roll: 0 };
+    const flat = best.s;
+    for (let pitch = 0; pitch <= 70; pitch += 5) for (let roll = -40; roll <= 40; roll += 5) {
+      const s = score(PH.downFromAngles(pitch, roll));
+      if (s < best.s) best = { s, pitch, roll };
+    }
+    // refine around the best
+    const b0 = { ...best };
+    for (let pitch = b0.pitch - 4; pitch <= b0.pitch + 4; pitch += 1) for (let roll = b0.roll - 4; roll <= b0.roll + 4; roll += 1) {
+      if (pitch < 0) continue;
+      const s = score(PH.downFromAngles(pitch, roll));
+      if (s < best.s) best = { s, pitch, roll };
+    }
+    return { down: PH.downFromAngles(best.pitch, best.roll), pitch: best.pitch, roll: best.roll, gain: flat - best.s, tilt: PH.tiltDeg(PH.downFromAngles(best.pitch, best.roll)) };
+  };
+
   /**
    * Wrap an image source (see Engine.processFrame) so it serves the virtual
    * top-down view instead. Only the processing-size image and the small

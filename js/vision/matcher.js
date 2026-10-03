@@ -55,11 +55,13 @@
   // always contains the partner and would push it higher, but on a real
   // table many partners haven't been scanned yet. Refit with real photos.
   PH.MATCH_TEMP = 0.2;
+  PH.BOX_VETO = +(typeof process !== 'undefined' && process.env && process.env.VETO) || 0.8;
+  PH.BOX_VETO_CONF = 0.5;
   PH.MATCH_NULL = 3.0;
 
   PH.boxAdjacency = function (pa, kA, pb, kB) {
     if (!pa || !pb) return 0;
-    const w = [1, 0.6, 0.4];
+    const w = [1, 0.35, 0.2]; // weight of 1st/2nd/3rd box placement candidates
     let best = 0;
     for (let i = 0; i < Math.min(3, pa.cands.length); i++) {
       const A = pa.cands[i];
@@ -97,6 +99,10 @@
             const adj = PH.boxAdjacency(P.t2, k, Q.t2, m);
             r.adj = adj;
             r.score -= adj * 1.2;
+            // Both confidently placed on the box but not neighbors there:
+            // probably a look-alike (matters most when the real partner
+            // hasn't been scanned yet).
+            if (!adj && P.t2 && Q.t2 && P.t2.conf >= PH.BOX_VETO_CONF && Q.t2.conf >= PH.BOX_VETO_CONF) r.score += PH.BOX_VETO;
             r.id = Q.id; r.edge = m;
             list.push(r);
           }
@@ -105,13 +111,18 @@
         // Probability that each candidate is the true partner: softmax over
         // all candidates plus a "partner not catalogued yet" option.
         if (list.length) {
+          // nullOdds: prior odds that the partner hasn't been scanned yet
+          // (from catalog coverage and the box picture), see Engine.nullOdds.
           const T = opts.temp || PH.MATCH_TEMP, s0 = list[0].score;
-          let z = Math.exp(-(PH.MATCH_NULL - s0) / T);
+          const odds = opts.nullOdds ? opts.nullOdds(k) : 1;
+          const zNull = Math.exp(-(PH.MATCH_NULL - s0) / T) * odds;
+          let z = zNull;
           for (const m of list) z += Math.exp(-(m.score - s0) / T);
           for (const m of list) m.prob = Math.exp(-(m.score - s0) / T) / z;
+          var pNone = zNull / z;
         }
       }
-      out.push({ edge: k, type: eA.type, matches: list.slice(0, topN) });
+      out.push({ edge: k, type: eA.type, matches: list.slice(0, topN), pNone: eA.type === 'F' ? 0 : list.length ? pNone : 1 });
     }
     return out;
   };

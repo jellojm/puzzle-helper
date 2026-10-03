@@ -8,7 +8,7 @@ const fs = require('fs');
 const S = require('./synth');
 
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
 
 const args = process.argv.slice(2);
@@ -161,6 +161,40 @@ function savePng(cv, mat, name) {
   check('true neighbor in top-3 (shape+color only)', m3nb / mTot > 0.7, `top-1 ${pct(m1nb, mTot)}, top-3 ${pct(m3nb, mTot)}`);
   check('true neighbor in top-3 (with box adjacency)', m3 / mTot > 0.85, `top-1 ${pct(m1, mTot)}, top-3 ${pct(m3, mTot)}`);
 
+  // ---------- 3b. Partial set: only half the pieces scanned so far ----------
+  {
+    const rnd = PH.mulberry32(77);
+    const half = [...eng.pieces.values()].filter(() => rnd() < 0.5);
+    const e2 = new PH.Engine();
+    e2.importState({ pieces: half.map((p) => eng.exportPiece(p)), box });
+    const inSet = new Set(half.map((p) => p.id));
+    let absent = 0, absentSaid = 0, absentGold = 0, present = 0, presentFound = 0, presentConfidentWrong = 0;
+    for (const p of half) {
+      const g = gtOf.get(p.id); if (!g) continue;
+      const res = e2.matchesFor(p.id);
+      const sides = sideOf.get(p.id);
+      for (const r of res) {
+        if (r.type === 'F') continue;
+        const side = sides[r.edge];
+        const nb = byCell.get((g.r + DIRS[side][1]) * cols + (g.c + DIRS[side][0]));
+        if (!nb) continue;
+        if (!inSet.has(nb)) {
+          absent++; if (r.pNone >= 0.5) absentSaid++;
+          if (r.matches[0] && r.matches[0].prob >= 0.5) absentGold++;
+          else if (process.env.DBG && absent < 400) console.log('missed', 'pNone', r.pNone.toFixed(2), 'top', r.matches[0] && r.matches[0].score.toFixed(2), 'adj', r.matches[0] && r.matches[0].adj.toFixed(2), 'conf', p.t2 && p.t2.conf.toFixed(2), 'spot', JSON.stringify(r.spot));
+          continue;
+        }
+        present++;
+        const top = r.matches[0];
+        if (top && top.id === nb && top.prob >= 0.5) presentFound++;
+        else if (top && top.prob >= 0.5) presentConfidentWrong++;
+      }
+    }
+    console.log(`partial set (50% scanned): partner missing -> said "not scanned" ${pct(absentSaid, absent)}, still showed a gold (wrong) match ${pct(absentGold, absent)}; partner present -> found confidently ${pct(presentFound, present)}, confident but wrong ${pct(presentConfidentWrong, present)}`);
+    check('partial set: few gold matches when the partner is missing', absentGold / absent < 0.35, `${pct(absentGold, absent)} gold, ${pct(absentSaid, absent)} said not scanned`);
+    check('partial set: present partners still found', presentFound / present > 0.7, pct(presentFound, present));
+  }
+
   // ---------- 4. Live sweep with tracking (pieces as anchors) ----------
   const live = new PH.Engine();
   live.setBox(box);
@@ -266,6 +300,53 @@ function savePng(cv, mat, name) {
     check('swapped pieces are re-identified, not duplicated', live.pieces.size <= before + 1, `${before} -> ${live.pieces.size}`);
   }
 
+  // ---------- 6a. Assembled sections ----------
+  {
+    const blocks = [{ r0: 2, c0: 1, rows: 3, cols: 3 }, { r0: 4, c0: 5, rows: 2, cols: 3 }];
+    const inBlock = (p) => blocks.some((b) => p.r >= b.r0 && p.r < b.r0 + b.rows && p.c >= b.c0 && p.c < b.c0 + b.cols);
+    const subset = P.pieces.map((p, i) => i).filter((i) => !inBlock(P.pieces[i]));
+    const sc2 = S.scatter(cv, P, { scale: 2.2, seed: 21, subset, blocks });
+    savePng(cv, sc2.table, 'sections');
+    if (process.env.DBG) { const f = PH.placeSection; PH.placeSection = function (...a) { const r = f.apply(this, a); console.log('placeSection crop', a[1].w, a[1].h, 'side', a[3].toFixed(1), '->', r && JSON.stringify({ score: r.score && +r.score.toFixed(3), rot: r.rot, sc: r.scale, cells: r.cells && r.cells.length, failed: r.failed })); return r; }; }
+    const e3 = new PH.Engine();
+    e3.setBox(box);
+    const t0 = Date.now();
+    e3.processSnap(S.matSource(cv, sc2.table));
+    const secs = [...e3.pieces.values()].filter((p) => p.kind === 'section' && p.sec && p.sec.cells);
+    let located = 0, partnersOk = 0, partnersTot = 0;
+    for (const bg of sc2.blocks) {
+      // the catalogued section nearest to this block
+      let best = null;
+      for (const sp of secs) {
+        const ov = sp.sec.cells.filter((c) => bg.cells.includes(c)).length / bg.cells.length;
+        if (!best || ov > best.ov) best = { ov, sp };
+      }
+      if (process.env.DBG) console.log('block', JSON.stringify(bg.cells), 'best section cells', best && JSON.stringify(best.sp.sec.cells), 'overlap', best && best.ov.toFixed(2));
+      if (best && best.ov >= 0.6) {
+        located++;
+        // loose pieces whose true cell borders the block should be offered
+        const trueOpen = new Set();
+        for (const c of bg.cells) for (const [dc, dr] of DIRS) {
+          const cc = (c % cols) + dc, rr = ((c / cols) | 0) + dr;
+          if (cc >= 0 && rr >= 0 && cc < cols && rr < rows && !bg.cells.includes(rr * cols + cc)) trueOpen.add(rr * cols + cc);
+        }
+        const offered = new Set(e3.sectionPartners(best.sp).map((q) => q.id));
+        for (const q of e3.pieces.values()) {
+          if (q.kind === 'section' || !q.t2 || !q.t2.cands.length) continue;
+          // ground-truth cell of this loose piece: nearest gt by position isn't available here, so use the snap engine's map
+          let g = null, bd = Infinity;
+          const cx = q.t1.corners.reduce((s, c) => s + c[0], 0) / 4, cy = q.t1.corners.reduce((s, c) => s + c[1], 0) / 4;
+          for (const gg of sc2.gt) { const d = Math.hypot(gg.x - cx, gg.y - cy); if (d < bd) { bd = d; g = gg; } }
+          if (!g || bd > sc2.core * 0.3) continue;
+          if (trueOpen.has(g.r * cols + g.c)) { partnersTot++; if (offered.has(q.id)) partnersOk++; }
+        }
+      }
+    }
+    console.log(`sections: ${secs.length} placed of ${[...e3.pieces.values()].filter((p) => p.kind === 'section').length} catalogued (${Date.now() - t0} ms snap); ${located}/${sc2.blocks.length} blocks located; loose neighbors offered ${partnersOk}/${partnersTot}`);
+    check('assembled sections are located on the box', located === sc2.blocks.length, `${located}/${sc2.blocks.length}`);
+    check('loose pieces that attach to a section are offered', partnersTot > 0 && partnersOk / partnersTot >= 0.7, `${partnersOk}/${partnersTot}`);
+  }
+
   // ---------- 6b. Phone held at an angle (tilt correction) ----------
   {
     const run = (pitch, roll, correct) => {
@@ -284,6 +365,16 @@ function savePng(cv, mat, name) {
       }
       return { found: res.found, n, same };
     };
+    // Photo with no sensor data: tilt estimated from the pieces themselves.
+    for (const [tp, tr] of [[30, 8], [45, -10]]) {
+      const v = S.tiltedFrame(cv, scat.table, scat.TW / 2, scat.TH / 2, 1.3, 1080, 1920, tp, tr, 66);
+      const e = new PH.Engine();
+      const est = e.estimatePhotoTilt(S.matSource(cv, v.mat));
+      v.mat.delete();
+      const err = est ? Math.acos(Math.min(1, est.down[0] * v.down[0] + est.down[1] * v.down[1] + est.down[2] * v.down[2])) * 180 / Math.PI : 99;
+      console.log(`auto tilt: true pitch ${tp} roll ${tr} -> estimated pitch ${est && est.pitch} roll ${est && est.roll} (error ${err.toFixed(1)}°)`);
+      check(`tilt estimated from the photo itself (${tp}°)`, err < 6, `${err.toFixed(1)}° off`);
+    }
     const TP = +(process.env.TILT || 30); const flat = run(0, 0, true), raw = run(TP, 8, false), fixed = run(TP, 8, true);
     console.log(`tilt ${TP}°: straight-down ${flat.same}/${flat.n} shapes match reference; tilted raw ${raw.same}/${raw.n}; tilted+corrected ${fixed.same}/${fixed.n}`);
     check('tilted view is straightened (shapes match top-down)', fixed.n >= 5 && fixed.same / fixed.n >= 0.8 && fixed.same / fixed.n > raw.same / Math.max(1, raw.n), `${pct(fixed.same, fixed.n)} vs ${pct(raw.same, raw.n)} uncorrected`);
