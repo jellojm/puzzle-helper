@@ -212,7 +212,7 @@ export class TableView {
       const r = p.kind === 'section' ? Math.max(u, Math.sqrt(p.area || u * u) / 2) * z : u * 0.62 * z;
       this.screen.push({ id: p.id, sx, sy, r });
       if (sx < -r * 2 || sy < -r * 2 || sx > w + r * 2 || sy > h + r * 2) continue;
-      ctx.globalAlpha = p.missing ? 0.35 : 1;
+      ctx.globalAlpha = p.missing || p.inPuzzle ? 0.35 : 1; // not where it was / already placed
       if (p.sprite) {
         // view, then: island offset + drift since the read, the read's
         // source->table similarity, thumbnail pixels -> source pixels
@@ -246,6 +246,20 @@ export class TableView {
       if (!s) continue;
       ctx.beginPath(); ctx.arc(s.sx, s.sy, Math.max(8, s.r), 0, Math.PI * 2);
       ctx.lineWidth = role === 'sel' ? 3.5 : 3; ctx.strokeStyle = ROLE[role] || ROLE.find; ctx.stroke();
+      // the selected piece's top edge (as it sits in the puzzle)
+      const p = role === 'sel' && this.byId.get(id);
+      if (p && p.upT) {
+        const c = Math.cos(this.view.rot), sn = Math.sin(this.view.rot);
+        const vx = c * p.upT[0] - sn * p.upT[1], vy = sn * p.upT[0] + c * p.upT[1], n = Math.hypot(vx, vy) || 1;
+        const len = Math.max(20, s.r * 1.5);
+        const ex = s.sx + (vx / n) * len, ey = s.sy + (vy / n) * len, a = Math.atan2(vy, vx);
+        for (const [w, col] of [[6, 'rgba(0,0,0,0.7)'], [3, '#ffffff']]) {
+          ctx.lineWidth = w; ctx.strokeStyle = col; ctx.lineCap = 'round';
+          ctx.beginPath(); ctx.moveTo(s.sx + (vx / n) * len * 0.3, s.sy + (vy / n) * len * 0.3); ctx.lineTo(ex, ey);
+          ctx.lineTo(ex - 9 * Math.cos(a - 0.6), ey - 9 * Math.sin(a - 0.6)); ctx.moveTo(ex, ey); ctx.lineTo(ex - 9 * Math.cos(a + 0.6), ey - 9 * Math.sin(a + 0.6));
+          ctx.stroke();
+        }
+      }
     }
   }
 

@@ -130,6 +130,22 @@ function writePng(file, mat) {
       console.log('find panel:', title, '|', sub, '|', cands, 'candidates');
       await page.screenshot({ path: path.join(OUT, 'e2e-find.png') });
       check('tapping a piece opens its matches', cands > 0, `${cands} candidate thumbnails`);
+      // Tier 1 (RESEARCH-ai-puzzle.md): verdict words, the box spot in words,
+      // the piece drawn upright, and "In the puzzle" with undo.
+      const verdicts = await page.$$eval('.cand .verdict', (els) => els.map((e) => e.textContent).filter(Boolean));
+      check('suggestions carry a verdict word', verdicts.length > 0 && verdicts.every((v) => /^(Strong match|Likely|Maybe|Unlikely|Look-alike)$/.test(v)), verdicts.slice(0, 4).join(', '));
+      check('box spot said in words', /Box: .*(sure|likely|look alike)|Not placed|Add a box/.test(sub), sub);
+      const upright = await page.evaluate(() => !document.getElementById('uprightBox').hidden);
+      const placedSpot = /Box: column/.test(sub);
+      check('placed piece is shown upright', upright || !placedSpot, `upright ${upright}`);
+      const before = await page.textContent('#stats');
+      await page.click('#inPuzzleBtn');
+      await page.waitForFunction(() => /in puzzle/.test(document.getElementById('stats').textContent) && document.getElementById('inPuzzleBtn').classList.contains('on'), null, { timeout: 5000 }).catch(() => {});
+      const marked = await page.evaluate(() => ({ stats: document.getElementById('stats').textContent, on: document.getElementById('inPuzzleBtn').classList.contains('on') }));
+      await page.click('#inPuzzleBtn');
+      await page.waitForFunction(() => !document.getElementById('inPuzzleBtn').classList.contains('on'), null, { timeout: 5000 }).catch(() => {});
+      const undone = await page.evaluate(() => !document.getElementById('inPuzzleBtn').classList.contains('on') && !/in puzzle/.test(document.getElementById('stats').textContent));
+      check('"In the puzzle" marks and undoes', marked.on && /1 in puzzle/.test(marked.stats) && undone, `${before} -> ${marked.stats}; undone ${undone}`);
     // Owner's screenshot (2026-10-03): the Find chips sat on top of the panel's Fits/No buttons.
     const chipsHidden = await page.evaluate(() => { const b = document.getElementById('findBar'); return !document.getElementById('findPanel').hidden && (b.hidden || getComputedStyle(b).display === 'none'); });
     check('Find chips are hidden while a piece panel is open', chipsHidden);

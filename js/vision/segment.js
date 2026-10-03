@@ -402,6 +402,14 @@
 
     // Distance-from-background image, 2 units per ΔE (WebAssembly).
     const ls = PH.L_SCALE * lightW;
+    // Glare / blown-out highlights: share of (real) pixels at full lightness.
+    // (Before `dd` below: a new Mat can grow WebAssembly memory, which would
+    // leave an earlier view of it empty.)
+    const blown = new cv.Mat();
+    cv.threshold(P.L, blown, 249, 255, cv.THRESH_BINARY);
+    if (validMat) cv.bitwise_and(blown, validMat, blown);
+    const glare = cv.countNonZero(blown) / Math.max(1, valid ? valid.nValid : w * h);
+    blown.delete();
     const dist = PH.labDistance(null, w, h, bg, ls, validMat, { L: flatL || P.L, A: P.A, B: P.B });
     const dd = dist.data;
     mark('dist');
@@ -599,7 +607,7 @@
     if (validMat) validMat.delete();
     P.delete(); if (flatL) flatL.delete();
     mark('dets');
-    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, unitArea: unitA, unitOwn, unitN: like.length, flat: flat && { ref: flat.ref, spread: flat.spread } };
+    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, glare, unitArea: unitA, unitOwn, unitN: like.length, flat: flat && { ref: flat.ref, spread: flat.spread } };
   };
 
   /**

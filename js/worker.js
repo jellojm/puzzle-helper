@@ -139,6 +139,7 @@ async function init(msg) {
     const st = await loadState();
     engine.importState(st);
     engine.fbLog = Array.isArray(st.feedback) ? st.feedback : [];
+    engine.refitCalib(); // the match-probability model learns from saved Fits/No answers
     // the marked border, if it was marked on this box's grid
     if (st.pframe && engine.box && st.pframe.cols === engine.box.cols && st.pframe.rows === engine.box.rows) {
       try { engine.pframe = PH.PuzzleFrame.fromJSON(st.pframe); } catch (_) { /* old format: mark again */ }
@@ -248,6 +249,13 @@ const handlers = {
       pairs: r.pairs.slice(0, 60).map((p) => Object.assign({}, p, { A: brief(p.a), B: brief(p.b) })) });
   },
   showPair(msg) { engine.selectPair(msg.a, msg.b); },
+  // "In the puzzle": the owner placed this piece (or takes that back).
+  inPuzzle(msg) {
+    engine.setInPuzzle(msg.id, !!msg.on);
+    scheduleSave();
+    post({ type: 'inPuzzle', id: msg.id, on: !!msg.on, counts: engine.counts() });
+    if (engine.selection) post({ type: 'selected', desc: engine.describe(engine.selection.id) });
+  },
   // Table view: every catalogued piece with its position, read placement and
   // picture. A thumbnail's pixels go to the page once: later visits send
   // data: null for a thumbnail already sent (the page keeps it), so opening

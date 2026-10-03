@@ -1,10 +1,10 @@
 // Page controller: camera, frame pump to the vision worker, overlay, UI.
-import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
+import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.11.1';
+const APP_VERSION = '0.12.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -117,8 +117,10 @@ worker.onmessage = (e) => {
       S.sig = sig;
       if (changed || moved || !S.lastStill || m.timings.t1 || m.timings.t2) { if (changed) noteActivity(); S.calm = 0; }
       else S.calm++;
+      tuneFrameRate();
       updateStats(m.counts, m.tracking);
       showDistanceHint(m.view);
+      coachFrame(m.coach);
       if (S.debug) showDebug(m);
       break;
     }
@@ -142,6 +144,11 @@ worker.onmessage = (e) => {
       break;
     case 'selected': showFind(m.desc); mapShowSelection(m.desc); break;
     case 'mapData': tableView.setData(m.data); mapApplyFilter(); break;
+    case 'inPuzzle':
+      updateStats(m.counts);
+      toast(m.on ? `#${m.id} marked as in the puzzle — its spot won't be offered for other pieces. Tap the button again to undo.` : `#${m.id} is back among the loose pieces.`, 3500);
+      if (S.mode === 'map') W.post({ type: 'mapData' });
+      break;
     case 'region': S.region = m.cells; toast(m.count ? `${m.count} catalogued pieces belong in that area.` : 'No catalogued pieces placed in that area yet.'); drawMinimap(); break;
     case 'filter': {
       const label = { corner: 'corner pieces', border: 'edge pieces', edges: 'border pieces (corners and edges)', unplaced: 'pieces not placed on the box', unread: 'pieces whose shape is unread' }[m.kind];
@@ -179,12 +186,16 @@ function setStatus(t) {
 }
 
 // ---------- camera / video ----------
+// 4:3 uses the whole sensor (16:9 crops it): ~33% more table per frame at
+// the same piece size. Frame rate: the vision loop takes ~8 frames a second,
+// so the camera runs at 24 while sweeping and 15 while the view is calm
+// (tuneFrameRate) - more only heats the phone. Reports record what iOS gave.
+const CAMERA = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 }, aspectRatio: { ideal: 4 / 3 } };
+const camFps = (fps) => ({ frameRate: { ideal: fps, max: fps >= 24 ? 30 : fps } });
 async function openCamera() {
   bump('cameraOpens');
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: false,
-    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-  });
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({}, CAMERA, camFps(24)) });
+  S.fpsWanted = 24;
   video.srcObject = stream;
   S.track = stream.getVideoTracks()[0];
   S.track.addEventListener('ended', () => ensureCamera());
@@ -200,6 +211,22 @@ async function ensureCamera() {
   try { await openCamera(); } catch (e) { logError('camera reopen: ' + e.message); }
   S.reopening = false;
   applyPower();
+}
+
+// Camera frame rate follows what the app needs: 15 fps once the view has been
+// calm for a few results (nothing new, the picture not moving), 24 as soon as
+// it moves. applyConstraints replaces the whole request, so the size and
+// aspect go along; at most one change per ~2.5 s (a change can drop a frame).
+function tuneFrameRate() {
+  const t = S.track;
+  if (!t || !t.applyConstraints || t.readyState !== 'live') return;
+  const want = S.calm >= 6 ? 15 : 24;
+  if (want === S.fpsWanted) return;
+  const now = performance.now();
+  if (now - (S.fpsChangedAt || 0) < 2500) return;
+  S.fpsWanted = want; S.fpsChangedAt = now;
+  bump('fps' + want);
+  t.applyConstraints(Object.assign({}, CAMERA, camFps(want))).catch((e) => logError('frameRate: ' + e.message));
 }
 
 // ---------- power ----------
@@ -551,6 +578,7 @@ function updateStats(c, tracking) {
   const parts = [`${c.pieces} pieces`];
   if (c.sections) parts.push(`${c.sections} section${c.sections > 1 ? 's' : ''}`);
   if (S.box) parts.push(`${c.placed} placed`);
+  if (c.inPuzzle) parts.push(`${c.inPuzzle} in puzzle`);
   const tilt = tiltDegOf(S.lastTilt);
   if (tilt >= 4) parts.push(`${Math.round(tilt)}° tilt`);
   const over = c.expected && c.pieces > c.expected;
@@ -559,6 +587,7 @@ function updateStats(c, tracking) {
   if (tilt > 50) $('modeHint').textContent = 'Tilt the phone less (under ~45°)';
   else if (S.ready && $('modeHint').textContent.startsWith('Tilt the phone')) $('modeHint').textContent = modeHint(S.mode);
   $('menuStats').textContent = `${c.pieces} pieces catalogued, ${c.shaped} shapes read, ${c.placed} placed on the box, ${c.located} on the table map`
+    + (c.inPuzzle ? `, ${c.inPuzzle} marked as in the puzzle${c.expected ? ` (${Math.round((100 * c.inPuzzle) / c.expected)}% done)` : ''}` : '')
     + (c.islands > 1 ? `, in ${c.islands} scan groups.` : '.')
     + (S.box ? ` Corners found: ${c.corner} of 4${c.cornerUnplaced ? ` (+${c.cornerUnplaced} corner-shaped piece${c.cornerUnplaced > 1 ? 's' : ''} not placed on the box yet)` : ''}.` : '')
     + (c.cornerDoubt ? ` ${c.cornerDoubt} more piece${c.cornerDoubt > 1 ? 's look' : ' looks'} like a corner but a better one already holds that corner (duplicate or misread) — Tidy up merges duplicates.` : '');
@@ -609,6 +638,31 @@ function showDebug(m) {
     `still ${isStill()}  rot ${S.motion.rot.toFixed(0)}°/s  tilt ${tiltDegOf(S.lastTilt).toFixed(0)}° ${m.rect ? '(corrected)' : ''}`,
   ].join('\n');
 }
+
+// ---------- capture coach ----------
+// Watches the last ~40 frames for setups that defeat the camera and says
+// what to change, once per problem per session: pale pieces that blend into
+// the board (a dark cloth fixes it: 9% -> 100% of pale pieces read right in
+// testing) and glare.
+S.coachWin = []; S.coachSeen = {};
+function coachFrame(c) {
+  if (!c || S.mode !== 'scan' || S.teaching) return;
+  const W = S.coachWin;
+  W.push(c);
+  if (W.length > 40) W.shift();
+  if (W.length < 15) return;
+  const n = W.reduce((s, x) => s + x.n, 0), low = W.reduce((s, x) => s + x.low, 0), glare = W.reduce((s, x) => s + x.glare, 0) / W.length;
+  S.coachNow = { n, low, glare: +glare.toFixed(3) };
+  let tip = null;
+  if (n >= 25 && low / n >= 0.3) tip = ['pale', 'Many pieces blend into the table, so their outlines get cut short. Lay a dark cloth or towel under them — pale pieces read far better on dark. (With a glass table, a tablet showing a white screen underneath works too.)'];
+  else if (glare >= 0.04) tip = ['glare', 'Glare is washing out part of the view. Move the light off to the side, or tilt the phone a little — the tilt is corrected.'];
+  if (!tip || S.coachSeen[tip[0]]) return;
+  S.coachSeen[tip[0]] = true;
+  bump('coach_' + tip[0]);
+  $('coachText').textContent = tip[1];
+  $('coach').hidden = false;
+}
+$('coachOk').onclick = () => { $('coach').hidden = true; };
 
 // ---------- teach background ----------
 // "Move closer" when the pieces are too small in the picture to read their
@@ -684,6 +738,8 @@ function pointInPoly(x, y, pts) {
 
 // ---------- find panel ----------
 const SIDE = { T: 'tab', B: 'blank', F: 'flat edge' };
+// Plain-words match verdicts (PH.matchVerdict): what the percentage means.
+const VERDICT = { strong: 'Strong match', likely: 'Likely', maybe: 'Maybe', weak: 'Unlikely', alike: 'Look-alike' };
 function showFind(desc) {
   S.desc = desc;
   S.needDraw = true;
@@ -703,12 +759,26 @@ function showFind(desc) {
   $('selTitle').textContent = `Piece #${p.id}` + (p.code ? ` · ${p.code.split('').map((c) => SIDE[c][0].toUpperCase()).join('')}` : '');
   let sub = desc.status || '';
   if (!sub && p.t2 && p.t2.cands.length) {
-    const c = p.t2.cands[0];
-    sub = `Box: column ${c.col + 1}, row ${c.row + 1} · ${Math.round(p.t2.conf * 100)}% sure`;
+    // In words, not a falsely precise percentage: placement on the box is
+    // usually "right area" rather than "exact cell" on big puzzles.
+    const c = p.t2.cands[0], conf = p.t2.conf;
+    const alt = p.t2.cands.find((q) => Math.abs(q.col - c.col) + Math.abs(q.row - c.row) > 1);
+    sub = conf >= 0.6 ? `Box: column ${c.col + 1}, row ${c.row + 1} · sure`
+      : conf >= 0.35 ? `Box: column ${c.col + 1}, row ${c.row + 1} · likely`
+        : `Box: several spots look alike — column ${c.col + 1}, row ${c.row + 1}` + (alt ? ` or column ${alt.col + 1}, row ${alt.row + 1}` : '');
+    if (p.t2.tex !== undefined && p.t2.tex < 0.2) sub += ' · plain piece, so the spot is a rough guess';
   } else if (!sub) sub = S.box ? 'Not placed on the box yet' : 'Add a box picture to see where it goes';
+  if (p.inPuzzle) sub = 'In the puzzle · ' + sub;
   // A shape is trusted once two separate views agreed on it.
   if (p.code) sub += p.confirmed ? ' · shape confirmed' : ' · shape read once — look at it again later to confirm';
   $('selSub').textContent = sub;
+  const ip = $('inPuzzleBtn');
+  ip.hidden = false;
+  ip.classList.toggle('on', !!p.inPuzzle);
+  ip.textContent = p.inPuzzle ? '✓ In the puzzle (tap to undo)' : 'Mark as in the puzzle';
+  ip.onclick = () => W.post({ type: 'inPuzzle', id: p.id, on: !p.inPuzzle });
+  $('uprightBox').hidden = p.up == null;
+  if (p.up != null) drawUpright($('selUpright'), p, p.up);
   const rows = $('edgeRows');
   rows.innerHTML = '';
   if (desc.attach && desc.attach.length) {
@@ -736,6 +806,12 @@ function showFind(desc) {
     else if (e.joined) list.innerHTML = '<span class="empty">Marked as joined.</span>';
     else if (!e.matches.length) list.innerHTML = '<span class="empty">No candidates yet — scan more pieces.</span>';
     const likely = e.matches[0] && e.matches[0].prob >= 0.5;
+    if (e.type !== 'F' && !e.joined && e.matches.length && !(e.matches[0].prob >= 0.2)) {
+      const note = document.createElement('div');
+      note.className = 'empty';
+      note.textContent = 'No reliable match yet — these are only possibilities.';
+      row.append(note);
+    }
     if (e.type !== 'F' && !e.joined && e.pNone >= 0.4) {
       const note = document.createElement('div');
       note.className = 'empty';
@@ -747,12 +823,16 @@ function showFind(desc) {
     e.matches.slice(0, 4).forEach((m, i) => {
       const c = document.createElement('div');
       const trusted = m.loopOk || (p.confirmed && m.confirmed);
-      c.className = 'cand ' + (i === 0 && likely && trusted ? 'gold' : i < 3 ? 'silver' : '') + (m.confirmed ? '' : ' unconfirmed');
+      c.className = 'cand ' + (i === 0 && likely && trusted ? 'gold' : i < 3 ? 'silver' : '') + (m.confirmed ? '' : ' unconfirmed') + (m.verdict === 'weak' ? ' weak' : '');
       const cv = document.createElement('canvas');
       cv.width = cv.height = 144;
       drawThumb(cv, m, m.edgeB, EDGE_COLORS[e.edge]);
       const label = document.createElement('div');
-      label.textContent = `#${m.id} · ${Math.round((m.prob || 0) * 100)}%${m.loopOk ? ' · 2×2 ✓' : m.adj > 0.3 ? ' · box ✓' : ''}${m.confirmed ? '' : ' · ?'}`;
+      const v = document.createElement('div');
+      v.className = 'verdict';
+      v.textContent = VERDICT[m.verdict] || '';
+      label.textContent = `#${m.id} · ${Math.round((m.prob || 0) * 100)}%${m.loopOk ? ' · 2×2 ✓' : m.mutual ? ' · picks it too' : m.adj > 0.3 ? ' · box ✓' : ''}${m.confirmed ? '' : ' · ?'}`;
+      label.prepend(v);
       label.title = (m.located ? '' : 'Not on the table map right now. ') + (m.confirmed ? '' : 'Its shape has been read only once (dashed frame).');
       const acts = document.createElement('div');
       acts.className = 'acts';
@@ -777,6 +857,7 @@ function showFind(desc) {
 // An assembled section: where it sits on the box and which scanned loose
 // pieces attach to it (they glow gold on the table).
 function showSection(desc) {
+  $('inPuzzleBtn').hidden = true; $('uprightBox').hidden = true;
   const ctx = $('selThumb').getContext('2d');
   ctx.clearRect(0, 0, 72, 72); ctx.fillStyle = '#c084fc'; ctx.fillRect(8, 8, 56, 56);
   $('selTitle').textContent = `Assembled section #${desc.piece.id}`;
@@ -907,7 +988,7 @@ function showMatches() {
   drawThumb($('matchA'), p.A, p.edgeA, '#ffffff');
   drawThumb($('matchB'), p.B, p.edgeB, EDGE_COLORS[p.edgeA]);
   const where = p.aLocated && p.bLocated ? '' : ' · not both on the table map';
-  $('matchLabel').textContent = `${S.pairIdx + 1} of ${S.pairs.length}${S.pairsDone ? '' : '+'} · #${p.a} + #${p.b} · ${Math.round(p.prob * 100)}%${p.loopOk ? ' · 2×2 ✓' : ''}${where}`;
+  $('matchLabel').textContent = `${S.pairIdx + 1} of ${S.pairs.length}${S.pairsDone ? '' : '+'} · #${p.a} + #${p.b} · ${VERDICT[p.verdict] ? VERDICT[p.verdict] + ' ' : ''}${Math.round(p.prob * 100)}%${p.loopOk ? ' · 2×2 ✓' : ''}${where}`;
   $('matchPrev').disabled = S.pairIdx === 0;
   $('matchNext').disabled = S.pairIdx >= S.pairs.length - 1;
   W.post({ type: 'showPair', a: p.a, b: p.b });
@@ -1239,6 +1320,9 @@ async function finishReport(workerData, analyzed, boxImg) {
       capabilities: (() => { try { return S.track && S.track.getCapabilities ? S.track.getCapabilities() : null; } catch (_) { return null; } })(),
       readyState: video.readyState, live: !!video.srcObject },
     mode: S.mode, fps: S.fps, motion: S.motion, gravity: S.gravity, tilt: S.lastTilt, tiltOn: S.tiltOn, fov: S.fov,
+    // capture coach: pieces blending into the board / glare over the last ~40 frames, and which tips were shown
+    coach: { now: S.coachNow || null, shown: Object.keys(S.coachSeen || {}) },
+    cameraFps: { wanted: S.fpsWanted || null, got: S.track && S.track.getSettings ? S.track.getSettings().frameRate : null },
     power: { active: S.active, idle: S.idle, idleOn: S.idleOn, calm: S.calm, gap: Math.round(frameGap()), wakeLock: !!S.wakeLock },
     // Camera-motion tracker health: how often it was sure of a step, its cost
     // on this phone, and the recent motion level it uses for stillness.

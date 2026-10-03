@@ -83,6 +83,36 @@
     return best * Math.sqrt(Math.max(0.2, pa.conf) * Math.max(0.2, pb.conf));
   };
 
+  // Score of Q's edge m as the partner of P's edge k (null = can't join).
+  // Shared by findMatches and bestPartner so both rank the same way.
+  function candScore(P, k, Q, m) {
+    const r = PH.edgeScore(P.t1.edges[k], Q.t1.edges[m]);
+    if (!r) return null;
+    const adj = PH.boxAdjacency(P.t2, k, Q.t2, m);
+    r.adj = adj;
+    r.score -= adj * 1.2;
+    // Both confidently placed on the box but not neighbors there:
+    // probably a look-alike (matters most when the real partner
+    // hasn't been scanned yet).
+    if (!adj && P.t2 && Q.t2 && P.t2.conf >= PH.BOX_VETO_CONF && Q.t2.conf >= PH.BOX_VETO_CONF) r.score += PH.BOX_VETO;
+    return r;
+  }
+  /** The single best partner {id, edge, score} for edge e of piece Q (the
+   *  "is it mutual?" check), or null. One edge only: a quarter of findMatches. */
+  PH.bestPartner = function (Q, e, pieces, skip) {
+    const eQ = Q.t1.edges[e];
+    if (eQ.type === 'F' && !eQ.unc) return null;
+    let best = null;
+    for (const R of pieces) {
+      if (R === Q || !R.t1 || (skip && skip(Q, R))) continue;
+      for (let m = 0; m < 4; m++) {
+        const r = candScore(Q, e, R, m);
+        if (r && (!best || r.score < best.score)) best = { id: R.id, edge: m, score: r.score };
+      }
+    }
+    return best;
+  };
+
   /**
    * Best partners for every edge of piece P.
    * @param pieces iterable of catalog pieces (with .t1, optional .t2)
@@ -100,15 +130,8 @@
         for (const Q of all) {
           if (Q === P || !Q.t1 || (opts.skip && opts.skip(P, Q))) continue;
           for (let m = 0; m < 4; m++) {
-            const r = PH.edgeScore(eA, Q.t1.edges[m]);
+            const r = candScore(P, k, Q, m);
             if (!r) continue;
-            const adj = PH.boxAdjacency(P.t2, k, Q.t2, m);
-            r.adj = adj;
-            r.score -= adj * 1.2;
-            // Both confidently placed on the box but not neighbors there:
-            // probably a look-alike (matters most when the real partner
-            // hasn't been scanned yet).
-            if (!adj && P.t2 && Q.t2 && P.t2.conf >= PH.BOX_VETO_CONF && Q.t2.conf >= PH.BOX_VETO_CONF) r.score += PH.BOX_VETO;
             r.id = Q.id; r.edge = m;
             list.push(r);
           }
@@ -124,7 +147,7 @@
           const zNull = Math.exp(-(PH.MATCH_NULL - s0) / T) * odds;
           let z = zNull;
           for (const m of list) z += Math.exp(-(m.score - s0) / T);
-          for (const m of list) m.prob = Math.exp(-(m.score - s0) / T) / z;
+          for (const m of list) m.prob = m.pSoft = Math.exp(-(m.score - s0) / T) / z;
           var pNone = zNull / z;
         }
       }
@@ -221,6 +244,85 @@
     return res;
   };
   PH.LOOP_CONF = 0.9;
+
+  /* ---- Calibrated match probability ----
+   * The softmax above only knows how a candidate's score compares with the
+   * others. Solvers that are right when they say so lean on consistency
+   * instead (RESEARCH-ai-puzzle.md): a clear lead over the runner-up (Paikin
+   * & Tal 2015), mutual best partners ("best buddies", Pomeranz 2011: 99.7%
+   * precise), closed loops (Son et al. 2014). A small logistic model combines
+   * them. Its starting weights (CALIB_PRIOR) are fitted on synthetic puzzles
+   * with known answers (tools/fit-calib.js); the owner's Fits/No answers
+   * refit it on the real puzzle (Engine.refitCalib), pulled toward the prior
+   * while there are few answers. */
+  PH.CALIB_FEATURES = ['bias', 'logit', 'lead', 'mutual', 'loop', 'confirmed', 'box', 'unsure'];
+  // Fitted by tools/fit-calib.js (2026-10-03: held-out synthetic log-loss
+  // 0.236 -> 0.12, calibration error 0.048 -> 0.02 vs the softmax alone).
+  // Two set by hand: 'box' fitted slightly negative (box agreement is already
+  // in the score) -> 0; 'unsure' never occurs on synthetic pieces -> a modest
+  // penalty for matching through an edge read as flat. 'confirmed' only
+  // varies on real tables (photo catalogues see each piece once) -> 0.5.
+  PH.CALIB_PRIOR = [-3.04, 0.11, 2.31, 2.75, 0.84, 0.5, 0, -0.5];
+  PH.candFeatures = function (f) {
+    const p = PH.clamp(f.pSoft || 0, 1e-4, 1 - 1e-4);
+    return [1, PH.clamp(Math.log(p / (1 - p)), -6, 6), PH.clamp(f.lead, -2, 2), f.mutual ? 1 : 0, f.loop ? 1 : 0, f.confirmed ? 1 : 0, f.adj || 0, f.unsure ? 1 : 0];
+  };
+  PH.calibProb = function (w, x) {
+    let z = 0;
+    for (let i = 0; i < w.length; i++) z += w[i] * x[i];
+    return 1 / (1 + Math.exp(-PH.clamp(z, -30, 30)));
+  };
+  /** Logistic regression on samples [{x, y: 0|1}] by Newton steps, with an
+   *  L2 pull of strength `lambda` toward `prior` (few answers -> stays near
+   *  the prior). Returns the weights. */
+  PH.fitCalib = function (samples, prior, lambda, iters) {
+    const d = prior.length, w = prior.slice();
+    lambda = lambda === undefined ? 4 : lambda;
+    for (let it = 0; it < (iters || 12); it++) {
+      const g = new Float64Array(d), H = Array.from({ length: d }, () => new Float64Array(d));
+      for (const s of samples) {
+        const p = PH.calibProb(w, s.x), r = p - s.y, v = Math.max(1e-6, p * (1 - p));
+        for (let i = 0; i < d; i++) {
+          g[i] += r * s.x[i];
+          for (let j = 0; j < d; j++) H[i][j] += v * s.x[i] * s.x[j];
+        }
+      }
+      for (let i = 0; i < d; i++) { g[i] += lambda * (w[i] - prior[i]); H[i][i] += lambda; }
+      const step = solve(H, g);
+      if (!step) break;
+      let big = 0;
+      for (let i = 0; i < d; i++) { w[i] -= step[i]; big = Math.max(big, Math.abs(step[i])); }
+      if (big < 1e-6) break;
+    }
+    return w;
+  };
+  // Gaussian elimination with partial pivoting (small dense systems).
+  function solve(A, b) {
+    const n = b.length, M = A.map((row, i) => Float64Array.from([...row, b[i]]));
+    for (let c = 0; c < n; c++) {
+      let piv = c;
+      for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+      if (Math.abs(M[piv][c]) < 1e-12) return null;
+      [M[c], M[piv]] = [M[piv], M[c]];
+      for (let r = 0; r < n; r++) {
+        if (r === c) continue;
+        const f = M[r][c] / M[c][c];
+        if (f) for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k];
+      }
+    }
+    return M.map((row, i) => row[n] / row[i]);
+  }
+  /** Plain-words verdict for a candidate partner, from its calibrated
+   *  probability and whether anything independent backs it (loop or mutual
+   *  best). 'alike' = it and the runner-up are about equally likely. */
+  PH.matchVerdict = function (m, next) {
+    const p = m.prob || 0, backed = m.loopOk || m.mutual;
+    if (next && (next.prob || 0) >= p * 0.7 && p < 0.7) return 'alike';
+    if (p >= 0.85 && backed) return 'strong';
+    if (p >= 0.5) return 'likely';
+    if (p >= 0.2) return 'maybe';
+    return 'weak';
+  };
   // A loop is only as good as its weakest join.
   PH.loopScore = (p) => Math.max(p[0], p[1], p[2], p[3]) + 0.25 * (p[0] + p[1] + p[2] + p[3]);
 })(typeof self !== 'undefined' ? self : globalThis);

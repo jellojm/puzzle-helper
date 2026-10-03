@@ -55,6 +55,8 @@
       this.cands = new Map();
       this.nextCid = 1;
       this.fbLog = [];   // Fits/No answers with what was claimed (answer key)
+      this.calibW = null; // match-probability weights refitted on the answer key (null = PH.CALIB_PRIOR)
+      this.bestCache = new Map(); // 'id:edge' -> {v, best}: best partner per edge (mutual-best check)
       this.rejects = {}; // why detections were not catalogued (reports)
     }
 
@@ -100,7 +102,7 @@
       // every undoubted corner shape was counted: 6 corners on a 15x20 box.
       const corner = this.box ? doubt.winners.size : cornerShaped;
       const cornerUnplaced = this.box ? cornerShaped - doubt.winners.size : 0;
-      return { pieces, sections, shaped, placed, located, border, corner, cornerUnplaced, cornerDoubt, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
+      return { inPuzzle: [...this.pieces.values()].filter((p) => p.inPuzzle).length, pieces, sections, shaped, placed, located, border, corner, cornerUnplaced, cornerDoubt, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
     }
 
     /**
@@ -492,6 +494,16 @@
       this.lastSegUnit = seg.unitArea; // the unit actually used this frame (for tests/reports)
       const t1 = now();
       const dets = this.classify(seg.dets, seg.unitArea);
+      // Capture coach: pieces whose colour barely differs from the board
+      // (pale pieces on a pale board: on synthetic tables half of them, vs
+      // <= 3% on good setups; a dark cloth fixes it), and glare.
+      let cLow = 0, cN = 0;
+      for (const d of dets) {
+        if (d.border || !d.fp) continue;
+        cN++;
+        if (PH.dE(d.fp.L, d.fp.a, d.fp.b, seg.bg.L, seg.bg.a, seg.bg.b, 1) < 25) cLow++;
+      }
+      this.coachNow = { n: cN, low: cLow, glare: +(seg.glare || 0).toFixed(3), boardL: Math.round(seg.bg.L) };
       this.poorStreak = dets.filter((d) => !d.border).length < 3 ? (this.poorStreak || 0) + 1 : 0;
       const unitF = this.unitFrame(dets);
       this.link(dets, unitF);
@@ -593,6 +605,7 @@
       // Lets the page map straightened coordinates back onto the camera view.
       out.rect = st.rect ? { H: st.rect.H, Hinv: st.rect.Hinv, tilt: PH.tiltDeg(info.tilt.down) } : null;
       out.pframe = this.puzzleFrameOut(proc, pfFound);
+      out.coach = this.coachNow;
       out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2, border: this.pfMs || 0 };
       this.pfMs = 0;
       for (const k in segT) out.timings['seg_' + k] = segT[k];
@@ -831,6 +844,7 @@
         const t1 = p.t1, pic = p.rd && p.pic;
         out.push({
           id: p.id, kind: p.kind || 'piece', pos: p.pos, island: p.island, rd: p.rd || null, missing: !!p.missing,
+          inPuzzle: !!p.inPuzzle, upT: (this.upOf(p) || {}).vt || null,
           area: p.area, shaped: !!t1, placed: !!(p.t2 && p.t2.conf >= 0.35), confirmed: shapeConfirmed(p),
           border: f.border && !f.corner, corner: f.corner && !doubt.has(p.id),
           thumb: pic ? pic.thumb : t1 ? t1.thumb : null, corners: pic ? pic.corners : t1 ? t1.corners : null,
@@ -1233,7 +1247,7 @@
           if (done.has(p.id) || !p.t1 || p.t2 || p.kind === 'section') continue;
           done.add(p.id);
           if (n2 >= 2 && now() > deadline) break;
-          p.t2 = PH.placePiece(this.box, p.t1, cal) || { cands: [], conf: 0, failed: true };
+          p.t2 = this.withoutTaken(p, PH.placePiece(this.box, p.t1, cal) || { cands: [], conf: 0, failed: true });
           this.touch(p);
           n2++;
         }
@@ -1332,6 +1346,50 @@
       return out;
     }
 
+    // ---------- "In puzzle": pieces the owner has physically placed ----------
+    /** Box cells held by pieces marked in the puzzle: 'col,row' -> piece id. */
+    takenCells() {
+      const m = new Map();
+      for (const p of this.pieces.values()) {
+        if (!p.inPuzzle || !p.t2) continue;
+        const c = (p.t2.orig || p.t2).cands[0];
+        if (c && (p.t2.orig || p.t2).conf >= 0.35) m.set(c.col + ',' + c.row, p.id);
+      }
+      return m;
+    }
+    /** A piece's box placement with cells already taken by placed pieces
+     *  removed (Piece Finder's "mark as placed" idea): the full placement is
+     *  kept in .orig so un-marking restores it. */
+    withoutTaken(p, t2, taken) {
+      if (!t2 || t2.failed) return t2;
+      const base = t2.orig || t2;
+      if (p.inPuzzle) return base;
+      taken = taken || this.takenCells();
+      const cands = base.cands.filter((c) => { const id = taken.get(c.col + ',' + c.row); return !id || id === p.id; });
+      if (cands.length === base.cands.length) return base;
+      if (!cands.length) return { cands: [], conf: 0, tex: base.tex, orig: base };
+      const s1 = cands[0].score, other = cands.find((s) => Math.abs(s.col - cands[0].col) + Math.abs(s.row - cands[0].row) > 1);
+      return { cands, conf: other ? PH.clamp((other.score - s1) / 0.25, 0, 1) : 0.5, tex: base.tex, orig: base };
+    }
+    /** Mark (or un-mark) a piece as physically in the puzzle. Its box cell
+     *  leaves every other piece's candidates, Border and the finders skip it,
+     *  and Matches skips pairs of two placed pieces. */
+    setInPuzzle(id, on) {
+      const P = this.pieces.get(id);
+      if (!P || P.kind === 'section') return false;
+      P.inPuzzle = on ? Date.now() : 0;
+      if (P.t2) P.t2 = this.withoutTaken(P, P.t2);
+      const taken = this.takenCells();
+      for (const q of this.pieces.values()) {
+        if (q === P || !q.t2) continue;
+        const t = this.withoutTaken(q, q.t2, taken);
+        if (t !== q.t2) { q.t2 = t; this.touch(q); }
+      }
+      this.touch(P);
+      this.version++;
+      return true;
+    }
+
     setBox(box) {
       this.clearPuzzleFrame(); // the mark is in the old box's grid
       this.box = box;
@@ -1341,9 +1399,30 @@
 
     // ---------- matching / selection ----------
     skipFn() {
-      return (P, Q) => P.wrong.includes(Q.id);
+      // judged wrong, or both already in the puzzle (nothing left to find there)
+      return (P, Q) => P.wrong.includes(Q.id) || (!!P.inPuzzle && !!Q.inPuzzle);
+    }
+    /** Which of P's edges is its top in the finished puzzle (box placement:
+     *  edge k faces box side (k + rot) % 4, 0 = top), and that edge's outward
+     *  direction on the table map (table units) when its read placement
+     *  allows (not after the piece moved). null without a confident spot. */
+    upOf(P) {
+      const t2 = P.t2;
+      if (!P.t1 || !t2 || !t2.cands.length || t2.conf < 0.35) return null;
+      const k = (4 - (t2.cands[0].rot % 4)) % 4;
+      let vt = null;
+      const r = P.rd;
+      if (r && !r.stale && !(P.pic && P.pic.sigs)) {
+        const c = (P.pic && P.pic.corners) || P.t1.corners;
+        const cx = (c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4, cy = (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4;
+        const vx = (c[k][0] + c[(k + 1) % 4][0]) / 2 - cx, vy = (c[k][1] + c[(k + 1) % 4][1]) / 2 - cy;
+        vt = [r.a * vx - r.b * vy, r.b * vx + r.a * vy];
+      }
+      return { k, vt };
     }
     // opts.loops: also run the 2x2 loop check (~30 ms; done for the selected piece).
+    // Probabilities are calibrated (calibrateMatches); candidates are ordered
+    // by that probability.
     matchesFor(id, opts) {
       const P = this.pieces.get(id);
       if (!P || !P.t1) return null;
@@ -1354,8 +1433,62 @@
       for (const r of res) r.spot = this.nullOdds(P, r.edge).spot;
       if (opts && opts.loops) PH.confirmWithLoops(res, PH.findLoops(P, all, { K: 6, skip: this.skipFn() }));
       for (const r of res) if (P.joined[r.edge]) r.matches = [];
+      this.calibrateMatches(P, res, all);
       this.matchCache.set(id, { version: this.version, res, loops: !!(opts && opts.loops) });
       return res;
+    }
+    // Q's best partner on edge e (cached per catalog version).
+    bestOf(Q, e, all) {
+      // Q's own matches already worked out for this catalog version: its top one.
+      const mc = this.matchCache.get(Q.id);
+      if (mc && mc.version === this.version && mc.res[e]) { const t = mc.res[e].matches[0]; return t ? { id: t.id, edge: t.edge, score: t.score } : null; }
+      const key = Q.id + ':' + e, c = this.bestCache.get(key);
+      if (c && c.v === this.version) return c.best;
+      const best = PH.bestPartner(Q, e, all || this.pieces.values(), this.skipFn());
+      this.bestCache.set(key, { v: this.version, best });
+      if (this.bestCache.size > 8000) this.bestCache.clear();
+      return best;
+    }
+    /** Calibrated probability per candidate (see PH.CALIB_FEATURES): the
+     *  softmax probability plus the consistency evidence - lead over the
+     *  runner-up, mutual best, closed 2x2 loop, both shapes confirmed, box
+     *  agreement - through the logistic model. Candidates of one edge exclude
+     *  each other, so their probabilities are capped to sum to at most 1. */
+    calibrateMatches(P, res, all) {
+      const w = this.calibW || PH.CALIB_PRIOR;
+      const confP = shapeConfirmed(P);
+      for (const r of res) {
+        const L = r.matches;
+        if (!L.length) continue;
+        L.forEach((m, i) => {
+          const Q = this.pieces.get(m.id);
+          const lead = i === 0 ? (L[1] ? L[1].score - m.score : 1) : L[0].score - m.score;
+          // mutual best: worth checking only for candidates with a real chance
+          let mutual = false;
+          if (i < 2 && (m.pSoft || 0) >= 0.15) {
+            const back = this.bestOf(Q, m.edge, all);
+            mutual = !!back && back.id === P.id && back.edge === r.edge;
+          }
+          m.mutual = mutual;
+          m.x = PH.candFeatures({ pSoft: m.pSoft, lead, mutual, loop: m.loopOk, confirmed: confP && shapeConfirmed(Q), adj: m.adj,
+            unsure: P.t1.edges[r.edge].type === 'F' || Q.t1.edges[m.edge].type === 'F' });
+          m.prob = PH.calibProb(w, m.x);
+        });
+        const sum = L.reduce((s, m) => s + m.prob, 0);
+        if (sum > 1) for (const m of L) m.prob /= sum;
+        L.sort((a, b) => b.prob - a.prob);
+        L.forEach((m, i) => (m.verdict = PH.matchVerdict(m, L[i + 1])));
+      }
+    }
+    /** Refit the match-probability model on the answer key: every Fits/No
+     *  answer that recorded its features. Needs a few of each before it moves
+     *  (and stays pulled toward the synthetic prior while answers are few). */
+    refitCalib() {
+      const S = (this.fbLog || []).filter((e) => Array.isArray(e.x) && e.x.length === PH.CALIB_PRIOR.length).map((e) => ({ x: e.x, y: e.kind === 'joined' ? 1 : 0 }));
+      const fits = S.filter((s) => s.y).length;
+      this.calibN = S.length;
+      this.calibW = S.length >= 12 && fits >= 3 && S.length - fits >= 3 ? PH.fitCalib(S, PH.CALIB_PRIOR, 6) : null;
+      this.version++;
     }
     /**
      * Prior odds that piece P's partner on edge k has NOT been scanned yet.
@@ -1440,13 +1573,14 @@
     describe(id) {
       const P = this.pieces.get(id);
       const res = this.matchesFor(id, { loops: true });
-      const brief = (Q) => ({ id: Q.id, code: Q.t1 ? Q.t1.code : null, thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, t2: Q.t2 ? { cands: Q.t2.cands.slice(0, 3), conf: Q.t2.conf } : null, located: !!Q.pos,
+      const brief = (Q) => ({ id: Q.id, code: Q.t1 ? Q.t1.code : null, thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, t2: Q.t2 ? { cands: Q.t2.cands.slice(0, 3), conf: Q.t2.conf, tex: Q.t2.tex } : null, located: !!Q.pos,
+        inPuzzle: !!Q.inPuzzle, up: (this.upOf(Q) || {}).k,
         confirmed: shapeConfirmed(Q), views: Q.t1 ? Q.t1.nObs || 1 : 0, quality: Q.t1 && Q.t1.quality ? Q.t1.quality.q : null, unc: Q.t1 ? Q.t1.edges.map((e) => !!e.unc) : null });
       return {
         piece: brief(P),
         attach: this.attachmentsOf(P),
         status: !P.t1 ? 'Hold steady over this piece to read its shape' : null,
-        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, unc: !!(P.t1.edges[r.edge] && P.t1.edges[r.edge].unc), joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
+        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, unc: !!(P.t1.edges[r.edge] && P.t1.edges[r.edge].unc), joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, mutual: !!m.mutual, verdict: m.verdict, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
       };
     }
     selectRegion(c0, r0, c1, r1) {
@@ -1478,7 +1612,7 @@
       const out = [];
       const doubt = this.filter === 'corner' || this.filter === 'edges' ? this.cornerDoubts() : null;
       for (const p of this.pieces.values()) {
-        if (p.kind === 'section') continue;
+        if (p.kind === 'section' || p.inPuzzle) continue; // placed pieces are done
         const f = edgeFlags(p);
         const hit = this.filter === 'corner' ? f.corner && !doubt.has(p.id)
           : this.filter === 'edges' ? (f.corner && !doubt.has(p.id)) || (f.border && !f.corner)
@@ -1537,7 +1671,7 @@
           pairs.push({
             a: id, b: m.id, edgeA: r.edge, edgeB: m.edge,
             prob: Math.min(m.prob, back.prob || 0),
-            loopOk: !!m.loopOk,
+            loopOk: !!m.loopOk, verdict: m.verdict,
             aLocated: !!A.pos && A.island === this.island,
             bLocated: !!B.pos && B.island === this.island,
           });
@@ -1614,6 +1748,10 @@
         if (e.loopOk) { out.loopOk.n++; if (fit) out.loopOk.fits++; }
       }
       out.accuracy = L.length ? +(out.fits / L.length).toFixed(3) : null;
+      // the match-probability model: refitted on this many answers (null = synthetic prior)
+      out.calib = { n: this.calibN || 0, fitted: !!this.calibW, w: (this.calibW || PH.CALIB_PRIOR).map((v) => +v.toFixed(3)), features: PH.CALIB_FEATURES };
+      out.byVerdict = {};
+      for (const e of L) if (e.verdict) add(out.byVerdict, e.verdict, e.kind === 'joined');
       return out;
     }
     feedback(f) {
@@ -1623,15 +1761,20 @@
       // judged it. Fits/No taps are ground truth, so the log measures match
       // accuracy on the real puzzle, by confidence (see feedbackStats).
       if (f.kind === 'joined' || f.kind === 'wrong') {
-        let prob = null, rank = null, loopOk = false, adj = null;
+        let prob = null, rank = null, loopOk = false, adj = null, x = null, pSoft = null, mutual = false, verdict = null;
         const res = A.t1 ? this.matchesFor(f.a) : null;
         const list = res && res[f.ka] ? res[f.ka].matches : [];
         const i = list.findIndex((m) => m.id === f.b && m.edge === f.kb);
-        if (i >= 0) { rank = i + 1; prob = +list[i].prob.toFixed(3); loopOk = !!list[i].loopOk; adj = +(list[i].adj || 0).toFixed(2); }
-        this.fbLog.push({ t: Date.now(), kind: f.kind, a: f.a, ka: f.ka, b: f.b, kb: f.kb, prob, rank, loopOk, adj,
+        if (i >= 0) {
+          const m = list[i];
+          rank = i + 1; prob = +m.prob.toFixed(3); loopOk = !!m.loopOk; adj = +(m.adj || 0).toFixed(2);
+          x = m.x ? m.x.map((v) => +v.toFixed(4)) : null; pSoft = m.pSoft !== undefined ? +m.pSoft.toFixed(3) : null; mutual = !!m.mutual; verdict = m.verdict || null;
+        }
+        this.fbLog.push({ t: Date.now(), kind: f.kind, a: f.a, ka: f.ka, b: f.b, kb: f.kb, prob, rank, loopOk, adj, x, pSoft, mutual, verdict,
           confirmed: [shapeConfirmed(A), shapeConfirmed(B)], q: [A.t1 && A.t1.quality ? A.t1.quality.q : null, B.t1 && B.t1.quality ? B.t1.quality.q : null],
           source: f.source || 'panel' });
         if (this.fbLog.length > 2000) this.fbLog.shift();
+        if (x) this.refitCalib();
       }
       if (f.kind === 'wrong') { A.wrong.push(B.id); B.wrong.push(A.id); }
       if (f.kind === 'joined') { A.joined[f.ka] = true; B.joined[f.kb] = true; }
@@ -1648,7 +1791,7 @@
         const p = d.id ? this.pieces.get(d.id) : null;
         let status = 'unknown';
         if (d.merged) status = p && p.kind === 'section' && p.sec && p.sec.cells ? 'section' : 'merged';
-        else if (p) status = p.t2 && p.t2.conf >= 0.35 ? 'placed' : p.t1 ? 'shaped' : 'seen';
+        else if (p) status = p.inPuzzle ? 'done' : p.t2 && p.t2.conf >= 0.35 ? 'placed' : p.t1 ? 'shaped' : 'seen';
         if (p) byId.set(p.id, d);
         // `r` lets the page draw a marker without walking the outline at all.
         // The outline itself is simplified harder than it used to be: it is
@@ -1672,7 +1815,17 @@
         for (const p of this.sectionPartners(S)) locate(p.id, 'gold', { edge: p.edges[0] });
       } else if (this.selection) {
         const sid = this.selection.id;
-        locate(sid, 'sel');
+        // Arrow from the piece toward its top edge (as it sits in the puzzle):
+        // table-map direction -> this frame through the inverse pose.
+        const u = this.upOf(this.pieces.get(sid) || {}), dSel = byId.get(sid);
+        let up = null;
+        if (u && u.vt && dSel && this.pose) {
+          const a = this.pose.a, b = this.pose.b, n2 = a * a + b * b;
+          const px = (a * u.vt[0] + b * u.vt[1]) / n2, py = (-b * u.vt[0] + a * u.vt[1]) / n2, n = Math.hypot(px, py) || 1;
+          const len = Math.sqrt(dSel.area || 400) * 0.85;
+          up = [dSel.cx + (px / n) * len, dSel.cy + (py / n) * len];
+        }
+        locate(sid, 'sel', up ? { up } : undefined);
         const P = this.pieces.get(sid);
         if (P) for (const a of this.attachmentsOf(P)) locate(a.section, 'section');
         const res = this.matchesFor(sid);
@@ -1723,6 +1876,7 @@
           const m = r.matches[0];
           if (!m || m.prob < 0.8 || !best.has(m.id) || id > m.id) continue;
           if (!shapeConfirmed(this.pieces.get(id)) || !shapeConfirmed(this.pieces.get(m.id))) continue; // both shapes seen twice
+          if (this.pieces.get(id).inPuzzle && this.pieces.get(m.id).inPuzzle) continue; // both already placed
           // Both confidently placed on the box but not side by side: not a pair.
           const P = this.pieces.get(id), Q = this.pieces.get(m.id);
           // With a box picture, wait until both are placed so it can veto the pair.
@@ -1750,7 +1904,7 @@
 
     // ---------- persistence ----------
     exportPiece(p) {
-      return { id: p.id, kind: p.kind, sec: p.sec, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created, rd: p.rd || null, pic: p.pic || null, missing: !!p.missing };
+      return { id: p.id, kind: p.kind, sec: p.sec, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created, rd: p.rd || null, pic: p.pic || null, missing: !!p.missing, inPuzzle: p.inPuzzle || 0 };
     }
     importState(state) {
       this.reset();

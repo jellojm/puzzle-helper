@@ -6,6 +6,7 @@ const STATUS = {
   seen: { stroke: '#aab2bb', dash: [] },
   shaped: { stroke: '#4f9dff', dash: [] },
   placed: { stroke: '#3ddc84', dash: [] },
+  done: { stroke: 'rgba(160,170,180,0.35)', dash: [2, 4] }, // marked as in the puzzle
   merged: { stroke: '#ff9f43', dash: [6, 4] },
   section: { stroke: '#c084fc', dash: [] },
 };
@@ -172,6 +173,7 @@ export function drawOverlay(ctx, res, M, opts) {
         const [x, y] = M.toScreen(d.cx, d.cy);
         badge(ctx, x, y, h.role === 'gold' ? '★' : '·', style.color, EDGE_COLORS[h.edge]);
       }
+      if (h.role === 'sel' && h.up) upArrow(ctx, M.toScreen(d.cx, d.cy), M.toScreen(h.up[0], h.up[1]));
     } else if (!h.visible) {
       arrow(ctx, M, h, style.color);
     }
@@ -252,6 +254,49 @@ function arrow(ctx, M, h, color) {
   ctx.shadowBlur = 6;
   ctx.fill();
   ctx.restore();
+}
+
+// The selected piece's top edge (as it sits in the puzzle): a white arrow
+// from its centre out past that edge.
+function upArrow(ctx, from, to) {
+  const [x0, y0] = from, [x1, y1] = to;
+  if (!isFinite(x0 + y0 + x1 + y1)) return;
+  const ang = Math.atan2(y1 - y0, x1 - x0), len = Math.hypot(x1 - x0, y1 - y0);
+  if (len < 6) return;
+  ctx.save();
+  ctx.translate(x0, y0); ctx.rotate(ang);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const [w, c] of [[7, 'rgba(0,0,0,0.7)'], [3.5, '#ffffff']]) {
+    ctx.lineWidth = w; ctx.strokeStyle = c;
+    ctx.beginPath(); ctx.moveTo(len * 0.25, 0); ctx.lineTo(len, 0); ctx.moveTo(len - 9, -7); ctx.lineTo(len, 0); ctx.lineTo(len - 9, 7); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** The piece drawn upright as it sits in the finished puzzle: its edge k
+ *  (the top edge from the box placement) turned to face up. */
+export function drawUpright(canvas, piece, k) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  if (!piece || !piece.thumb || !piece.thumb.data || !piece.corners || k == null) return;
+  const th = piece.thumb;
+  const tmp = new OffscreenCanvas(th.w, th.h);
+  tmp.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(th.data), th.w, th.h), 0, 0);
+  const P = piece.corners.map(([x, y]) => [(x - th.ox) * th.s, (y - th.oy) * th.s]);
+  const cx = (P[0][0] + P[1][0] + P[2][0] + P[3][0]) / 4, cy = (P[0][1] + P[1][1] + P[2][1] + P[3][1]) / 4;
+  const mx = (P[k][0] + P[(k + 1) % 4][0]) / 2 - cx, my = (P[k][1] + P[(k + 1) % 4][1]) / 2 - cy;
+  let side = 0;
+  for (let i = 0; i < 4; i++) side += Math.hypot(P[(i + 1) % 4][0] - P[i][0], P[(i + 1) % 4][1] - P[i][1]) / 4;
+  const s = (Math.min(W, H) * 0.6) / Math.max(1, side);
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.rotate(-Math.PI / 2 - Math.atan2(my, mx));
+  ctx.scale(s, s);
+  ctx.drawImage(tmp, -cx, -cy);
+  ctx.restore();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.moveTo(W / 2, 3); ctx.lineTo(W / 2 - 8, 13); ctx.lineTo(W / 2 + 8, 13); ctx.closePath(); ctx.fill();
 }
 
 // Thumbnail with one edge highlighted (corners are in source pixels; the

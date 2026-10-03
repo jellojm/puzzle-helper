@@ -6,7 +6,9 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
 - **Border:** one tap lights up the whole frame of the puzzle — corner pieces orange, edge pieces teal — with arrows to the nearest ones off screen. Tap again to turn it off.
 - **More → Catalog from a photo:** take a full-resolution photo to catalog every piece in it at once.
 - **Box:** photograph the box picture. The app splits it into the puzzle's grid and works out where each piece belongs. Enter the **finished size** printed on the box (optional): with the real piece size the app can tell you how close to hold the phone.
-- **Find:** tap a piece to see its spot on the box and its best partners for each edge, with a percentage likelihood. A partner marked **2×2 ✓** is confirmed by a closed 2×2 block: the app found two more pieces that fit both this piece and the partner. These confirmed matches were right about 94% of the time in testing. Matching pieces glow on the table (gold = best). Pieces off-screen get an arrow pointing toward them.
+- **Find:** tap a piece to see its spot on the box and its best partners for each edge. Each partner gets a word and a percentage: **Strong match** (very likely, and backed by a second check — the two pieces pick each other, or a closed 2×2 block), **Likely**, **Maybe**, **Look-alike** (another piece is about as good) or **Unlikely** (dimmed). The percentages are calibrated — "90%" means about 9 in 10 fit — and they keep learning from your **Fits / No** answers on your own puzzle. The box spot is said in words too (sure / likely / several spots look alike), with a warning for plain pieces whose spot is only a rough guess. Matching pieces glow on the table (gold = best). Pieces off-screen get an arrow pointing toward them.
+  - **Which way up:** a white arrow on the selected piece points to its top edge as it sits in the finished puzzle (also on the Map), and the panel shows the piece upright.
+  - **Mark as in the puzzle:** once you've placed a piece, tap this in its panel. Its spot on the box is no longer offered for other pieces, Border and the finders skip it, it's dimmed on the table and the Map, and More shows how much is done. Tap again to undo.
   - **Corners / Edges:** light up every corner piece (orange) or edge piece (teal) on the table, with counts. **Unplaced** and **Unread** light up pieces not yet found on the box, or whose shape hasn't been read.
   - **Matches:** search the whole catalog for pairs that fit, with no box picture needed, and step through them with ‹ ›. Tap **Fits** or **No** on each: the app keeps an answer key and shows its running accuracy under **More**.
   - **Box picture:** hide or show the small box picture when it's in the way.
@@ -15,7 +17,9 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
 
 Everything runs on the phone. Nothing is uploaded, and the catalog is saved on the phone (IndexedDB).
 
-The camera is switched off while **More** or the box editor is open, and the app pauses itself if the phone is left still for 90 seconds (tap to carry on). The scan also slows down while nothing new is being learned. All of this saves battery.
+**Capture coach:** if many pieces blend into the table (pale pieces on a white board) or glare washes out the view, a tip says what to change — once per problem. Pale pieces on a dark cloth read right far more often (in testing: none of the pale pieces on white, all of them on dark).
+
+The camera is switched off while **More** or the box editor is open, and the app pauses itself if the phone is left still for 90 seconds (tap to carry on). The scan also slows down while nothing new is being learned, and the camera itself drops to 15 frames a second while the view is calm (24 while sweeping). All of this saves battery.
 
 ## Put it on your iPhone
 
@@ -95,6 +99,9 @@ node test/quality-gate.js    # blurred, distant or one-off views never become pi
 node test/answer-key.js      # Fits/No answers are logged with what was claimed; accuracy stats
 node test/table-view.js      # Map: each piece's picture at its place, angle and size; groups, fit, tap
 node test/rectify-proc.js    # tilt-corrected frame: same bytes as the reference, and its time per frame
+node test/trust.js           # calibrated match probabilities, refit from answers, verdicts, In puzzle, top-edge arrow
+node test/capture-coach.js   # coach flags pale pieces on a white board; a dark cloth fixes them
+node tools/fit-calib.js      # refit the match-probability model's starting weights on synthetic puzzles
 node test/speed.js           # per-stage timing (VISION=<dir> runs another copy of js/vision to compare)
 ```
 
