@@ -11,11 +11,12 @@
 
   // Estimate background Lab as the mean of the most populated coarse bin.
   PH.estimateBackground = function (lab, w, h, valid) {
+    if (!valid) valid = PH.onesMask(w * h);
     const counts = new Uint32Array(8 * 32 * 32);
     const step = 3;
     for (let y = 0; y < h; y += step) {
       for (let x = 0; x < w; x += step) {
-        if (valid && !valid[y * w + x]) continue;
+        if (!valid[y * w + x]) continue;
         const i = (y * w + x) * 3;
         counts[((lab[i] >> 5) << 10) | ((lab[i + 1] >> 3) << 5) | (lab[i + 2] >> 3)]++;
       }
@@ -25,14 +26,14 @@
     let sL = 0, sa = 0, sb = 0, n = 0;
     for (let y = 0; y < h; y += step) {
       for (let x = 0; x < w; x += step) {
-        if (valid && !valid[y * w + x]) continue;
+        if (!valid[y * w + x]) continue;
         const i = (y * w + x) * 3;
         if ((((lab[i] >> 5) << 10) | ((lab[i + 1] >> 3) << 5) | (lab[i + 2] >> 3)) === best) {
           sL += lab[i]; sa += lab[i + 1]; sb += lab[i + 2]; n++;
         }
       }
     }
-    const nValid = valid ? valid.reduce((a, v) => a + v, 0) : w * h;
+    let nValid = 0; for (let p = 0; p < w * h; p++) nValid += valid[p];
     return { L: sL / n, a: sa / n, b: sb / n, frac: (n * step * step) / Math.max(1, nValid) };
   };
 
@@ -47,13 +48,14 @@
    * even (nothing to fix).
    */
   PH.flattenLight = function (lab, w, h, valid, unitArea, boardL) {
+    if (!valid) valid = PH.onesMask(w * h);
     const cv = PH.cv;
     const n = w * h;
     const L = new cv.Mat(h, w, cv.CV_8UC1), Ld = L.data;
     let darker = 0, brighter = 0, cnt = 0;
     for (let p = 0, i = 0; p < n; p++, i += 3) {
       Ld[p] = lab[i];
-      if (valid && !valid[p]) continue;
+      if (!valid[p]) continue;
       cnt++;
       if (lab[i] < boardL - 12) darker++; else if (lab[i] > boardL + 12) brighter++;
     }
@@ -94,10 +96,11 @@
    *  an already-picked bin are skipped), as {L,a,b,frac}. Background
    *  candidates: on a dense pile the most common colour can be the pieces. */
   PH.colorModes = function (lab, w, h, valid, k) {
+    if (!valid) valid = PH.onesMask(w * h);
     const counts = new Uint32Array(8 * 32 * 32), sums = new Float64Array(8 * 32 * 32 * 3);
     let n = 0;
     for (let y = 0; y < h; y += 3) for (let x = 0; x < w; x += 3) {
-      if (valid && !valid[y * w + x]) continue;
+      if (!valid[y * w + x]) continue;
       const i = (y * w + x) * 3, b = ((lab[i] >> 5) << 10) | ((lab[i + 1] >> 3) << 5) | (lab[i + 2] >> 3);
       counts[b]++; sums[3 * b] += lab[i]; sums[3 * b + 1] += lab[i + 1]; sums[3 * b + 2] += lab[i + 2]; n++;
     }
@@ -144,6 +147,14 @@
     let s = 0, w = 0;
     for (const a of areas) if (Math.abs(Math.log2(a) * 4 - best.k) <= 2) { s += a * a; w += a; }
     return w ? s / w : Math.pow(2, best.k / 4);
+  };
+
+  // Shared all-ones mask per size ("every pixel valid"), so callers never pass null.
+  const onesCache = new Map();
+  PH.onesMask = function (n) {
+    let m = onesCache.get(n);
+    if (!m) { m = new Uint8Array(n).fill(1); onesCache.set(n, m); if (onesCache.size > 4) onesCache.delete(onesCache.keys().next().value); }
+    return m;
   };
 
   // Coarse Lab bin (8 L x 32 a x 32 b) used by the background lookup table.
@@ -227,8 +238,13 @@
     const lab = PH.rgbaToLab(img.data, w, h);
     mark('lab');
     // Pixels outside the real camera image (tilt correction): alpha 0.
-    let valid = null;
+    // Always a Uint8Array (all ones when nothing is invalid): the hot loops
+    // below then see one type. A null-or-array mask makes JavaScriptCore
+    // (iOS) drop them to a slow tier - tilt-corrected frames were 15-40x
+    // slower on the phone only.
+    let valid;
     if (img.invalid) { valid = new Uint8Array(w * h); for (let p = 0; p < w * h; p++) valid[p] = img.data[4 * p + 3] ? 1 : 0; }
+    else valid = PH.onesMask(w * h);
     // opts.bgModel (chosen by the engine, see Engine.chooseBackground):
     //   {kind:'color', bg:{L,a,b}} plain board of that colour
     //   {kind:'taught'} / {kind:'palette'} colour tables; absent = automatic.
@@ -256,7 +272,7 @@
           // the chosen board colour, re-measured in the shadow-evened image
           let sL = 0, sa = 0, sb = 0, m = 0;
           for (let p = 0, i = 0; p < w * h; p += 5, i += 15) {
-            if (valid && !valid[p]) continue;
+            if (!valid[p]) continue;
             if (Math.abs(lab[i + 1] - est.a) < 8 && Math.abs(lab[i + 2] - est.b) < 8 && Math.abs(lab[i] - est.L) < 40) { sL += labS[i]; sa += labS[i + 1]; sb += labS[i + 2]; m++; }
           }
           if (m > 50) est = { L: sL / m, a: sa / m, b: sb / m, frac: 1 };
@@ -274,7 +290,7 @@
     // explain under a fifth of the frame, use the plain-board model this frame.
     if (lut && taughtActive && !model) {
       let bgc = 0, m = 0;
-      for (let p = 0, i = 0; p < w * h; p += 7, i += 21) { if (valid && !valid[p]) continue; m++; if (lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], lut.corr)]) bgc++; }
+      for (let p = 0, i = 0; p < w * h; p += 7, i += 21) { if (!valid[p]) continue; m++; if (lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], lut.corr)]) bgc++; }
       if (bgc < m * 0.2 && est.frac >= 0.2) { lut = null; plainCloth = true; }
     }
     mark('lut');
@@ -295,7 +311,7 @@
     for (let p = 0, i = 0; p < w * h; p++, i += 3) {
       const dL = (labS[i] - bg.L) * ls, da = labS[i + 1] - bg.a, db = labS[i + 2] - bg.b;
       const d = 2 * Math.sqrt(dL * dL + da * da + db * db);
-      dd[p] = valid && !valid[p] ? 0 : d > 255 ? 255 : d;
+      dd[p] = !valid[p] ? 0 : d > 255 ? 255 : d;
     }
     mark('dist');
     // Threshold from the cloth's own noise: the background is the large peak
@@ -306,7 +322,7 @@
     let thresh;
     if (lut) {
       // Mixed background: classify each pixel by its color bin.
-      for (let p = 0, i = 0; p < w * h; p++, i += 3) dd[p] = lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], lut.corr)] || (valid && !valid[p]) ? 0 : 255;
+      for (let p = 0, i = 0; p < w * h; p++, i += 3) dd[p] = lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], lut.corr)] || !valid[p] ? 0 : 255;
       thresh = 128;
     } else {
       const otsu = cv.threshold(dist, mask, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
@@ -337,7 +353,7 @@
       cv.convertScaleAbs(gx, ax, 1 / 16); cv.convertScaleAbs(gy, ay, 1 / 16);
       cv.addWeighted(ax, 0.5, ay, 0.5, 0, mag);
       cv.threshold(mag, mag, opts.boundaryT || 10, 255, cv.THRESH_BINARY);
-      if (valid) for (let p = 0; p < w * h; p++) if (!valid[p]) mag.data[p] = 0; // no edges in the filled-in corners
+      if (img.invalid) for (let p = 0; p < w * h; p++) if (!valid[p]) mag.data[p] = 0; // no edges in the filled-in corners
       if (opts.boundary === 'fill') {
         // Close the edge rings and keep only what they enclose: a ring that
         // doesn't close adds nothing (no stray edge fragments), a closed one

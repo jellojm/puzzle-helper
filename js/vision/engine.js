@@ -425,7 +425,7 @@
     // top-down view of the table instead of the raw (tilted) image.
     straighten(source, info) {
       const t = info && info.tilt;
-      if (!t || !t.down || this.opts.tiltCorrection === false || PH.tiltDeg(t.down) < 4) return { source, rect: null };
+      if (!t || !t.down || this.opts.tiltCorrection === false || PH.tiltDeg(t.down) < 8) return { source, rect: null }; // under 8° the distortion is < 1%: not worth the cost
       const rect = PH.tiltHomography(source.w, source.h, PH.focalPx(source.w, source.h, t.fov), t.down, 3);
       return rect ? { source: PH.rectifiedSource(source, rect), rect } : { source, rect: null };
     }
@@ -934,7 +934,10 @@
         }
         jobs.sort((a, b) => a.pri - b.pri);
         for (const j of jobs) {
-          if (j.d.t1 === undefined && now() > t1Deadline) break;
+          // Always read at least 2 shapes per steady frame: when segmentation
+          // alone overruns the budget (dense views on a slow phone), shape
+          // reading would otherwise never run and nothing gets matched.
+          if (j.d.t1 === undefined && n1 >= 2 && now() > t1Deadline) break;
           const t1 = this.detT1(j.d);
           if (!t1) {
             j.p.t1Fail = (j.p.t1Fail || 0) + 1;
