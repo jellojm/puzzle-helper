@@ -7,6 +7,7 @@
  * foreground. */
 (function (G) {
   const PH = G.PH;
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
   // Estimate background Lab as the mean of the most populated coarse bin.
   PH.estimateBackground = function (lab, w, h) {
@@ -190,8 +191,13 @@
     // Split clusters of touching pieces (watershed from piece centers).
     const parts = [];
     let labMat = null;
+    // Only clusters of a few pieces are worth splitting (huge blobs are
+    // background or whole piles), and live frames get a small time budget.
+    const splitMax = (opts.splitMaxRatio || 8) * unitA;
+    const splitEnd = opts.splitBudgetMs === undefined ? Infinity : now() + opts.splitBudgetMs;
+    blobs.sort((a, b) => a.area - b.area);
     for (const b of blobs) {
-      if (opts.split !== false && unitA && b.area > 1.8 * unitA) {
+      if (opts.split !== false && unitA && b.area > 1.8 * unitA && b.area < splitMax && now() < splitEnd) {
         if (!labMat) { labMat = new cv.Mat(h, w, cv.CV_8UC3); labMat.data.set(lab); }
         const pieces = PH.splitBlob(b.cnt, labMat, unitA, w, h);
         if (pieces) { b.cnt.delete(); for (const p of pieces) parts.push({ cnt: p, split: true }); continue; }

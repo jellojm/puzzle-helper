@@ -2,6 +2,7 @@
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 
+const APP_VERSION = '0.3.0';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
 
@@ -18,7 +19,12 @@ const S = {
   lastSend: 0,
   motion: { rot: 0, acc: 0, t: 0 },
   fps: 0,
+  errors: [],       // recent errors, included in reports
+  history: [],      // recent frame timings, included in reports
 };
+window.addEventListener('error', (e) => logError('page: ' + e.message));
+window.addEventListener('unhandledrejection', (e) => logError('promise: ' + (e.reason && e.reason.message || e.reason)));
+function logError(msg) { S.errors.push({ t: new Date().toISOString(), msg: String(msg) }); if (S.errors.length > 50) S.errors.shift(); }
 
 // ---------- worker ----------
 const worker = new Worker('js/worker.js');
@@ -43,6 +49,8 @@ worker.onmessage = (e) => {
       S.lastResult = now;
       S.last = m;
       S.busy = false;
+      S.history.push({ t: Math.round(now), grab: Math.round(S.grabMs || 0), ...Object.fromEntries(Object.entries(m.timings).map(([k, v]) => [k, Math.round(v)])), dets: m.dets.length, tracking: m.tracking, island: m.island, still: S.lastStill });
+      if (S.history.length > 60) S.history.shift();
       updateStats(m.counts, m.tracking);
       if (S.debug) showDebug(m);
       break;
@@ -59,8 +67,10 @@ worker.onmessage = (e) => {
     case 'boxCorners': if (m.corners) boxSetup.setCorners(m.corners); break;
     case 'selected': showFind(m.desc); break;
     case 'region': S.region = m.cells; toast(m.count ? `${m.count} catalogued pieces belong in that area.` : 'No catalogued pieces placed in that area yet.'); drawMinimap(); break;
+    case 'report': finishReport(m.data); break;
     case 'error':
       S.busy = false; S.snapping = false;
+      logError(`worker(${m.where}): ${m.message}`);
       console.error('worker:', m.where, m.message);
       toast('Error: ' + m.message, 4000);
       break;
@@ -74,19 +84,42 @@ function setStatus(t) {
 }
 
 // ---------- camera / video ----------
+async function openCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+  });
+  video.srcObject = stream;
+  S.track = stream.getVideoTracks()[0];
+  S.track.addEventListener('ended', () => ensureCamera());
+  await video.play();
+}
+// iOS hands the camera to the photo picker (Box/Snap) or another app and
+// doesn't give it back; reopen it whenever we come back to a dead stream.
+async function ensureCamera() {
+  if (!S.usingCamera || S.reopening || document.hidden || S.pickerOpen) return;
+  const dead = !S.track || S.track.readyState === 'ended' || S.track.muted || video.paused;
+  if (!dead) return;
+  S.reopening = true;
+  try { await openCamera(); } catch (e) { logError('camera reopen: ' + e.message); }
+  S.reopening = false;
+}
+// While a photo picker has the camera, don't fight it for the camera.
+document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('#snapBtn, #boxPick, #boxRetake')) S.pickerOpen = true; }, true);
+const pickerDone = () => { S.pickerOpen = false; setTimeout(ensureCamera, 300); };
+['snapInput', 'boxInput'].forEach((id) => { $(id).addEventListener('change', pickerDone); $(id).addEventListener('cancel', pickerDone); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(pickerDone, 800); });
+window.addEventListener('focus', () => setTimeout(pickerDone, 800));
+setInterval(ensureCamera, 2000);
+
 async function startCamera() {
   $('startBtn').disabled = true;
   setStatus('Starting camera…');
   await requestMotion();
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-    });
-    video.srcObject = stream;
-    S.track = stream.getVideoTracks()[0];
+    await openCamera();
+    S.usingCamera = true;
     $('torchRow').hidden = false;
-    await video.play();
     enterApp();
   } catch (e) {
     $('startBtn').disabled = false;
@@ -133,6 +166,7 @@ function isStill() {
 async function sendFrame() {
   S.busy = true;
   S.lastSend = performance.now();
+  const g0 = performance.now();
   let bmp;
   try {
     bmp = await createImageBitmap(video);
@@ -142,7 +176,9 @@ async function sendFrame() {
     c.getContext('2d').drawImage(video, 0, 0);
     bmp = await createImageBitmap(c);
   }
-  W.post({ type: 'frame', bitmap: bmp, still: isStill() }, [bmp]);
+  S.grabMs = performance.now() - g0;
+  S.lastStill = isStill();
+  W.post({ type: 'frame', bitmap: bmp, still: S.lastStill }, [bmp]);
 }
 
 function loop() {
@@ -160,7 +196,9 @@ function loop() {
 }
 
 // ---------- UI ----------
+function endTeaching() { S.teaching = false; $('teachBar').hidden = true; }
 function setMode(mode) {
+  endTeaching();
   S.mode = mode;
   document.querySelectorAll('#toolbar [data-mode]').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
   $('modeHint').textContent = S.ready ? modeHint(mode) : $('modeHint').textContent;
@@ -182,7 +220,7 @@ function updateStats(c, tracking) {
   if (tracking !== undefined) {
     dot.className = 'dot ' + (tracking ? 'on' : 'lost');
     const lost = !tracking && c.pieces > 0 && S.last && S.last.dets.length > 0;
-    $('banner').hidden = !lost;
+    $('banner').hidden = !lost || S.teaching;
     if (lost) $('banner').textContent = 'Lost my place — hold still over pieces you have already scanned.';
   }
 }
@@ -229,7 +267,7 @@ function sampleVideo(clientX, clientY) {
   return [med(0), med(1), med(2)];
 }
 $('teachBtn').onclick = () => { S.teaching = true; $('menu').hidden = true; $('teachBar').hidden = false; showTaught(+($('teachCount').textContent.match(/\d+/) || [0])[0]); };
-$('teachDone').onclick = () => { S.teaching = false; $('teachBar').hidden = true; };
+$('teachDone').onclick = endTeaching;
 $('teachUndo').onclick = () => W.post({ type: 'undoBg' });
 $('teachClear').onclick = () => W.post({ type: 'clearBg' });
 
@@ -411,12 +449,13 @@ minimap.addEventListener('pointerup', () => {
 });
 
 // ---------- snap / box / menu ----------
-$('snapBtn').onclick = () => $('snapInput').click();
+$('snapBtn').onclick = () => { endTeaching(); $('snapInput').click(); };
 $('snapInput').onchange = async (e) => {
   const f = e.target.files[0];
   e.target.value = '';
   if (!f) return;
   S.snapping = true;
+  S.lastSnapFile = f;
   toast('Cataloging photo…', 15000);
   try {
     const bmp = await createImageBitmap(f, { imageOrientation: 'from-image' });
@@ -426,8 +465,9 @@ $('snapInput').onchange = async (e) => {
     toast('Could not read that photo.');
   }
 };
-$('boxBtn').onclick = () => boxSetup.open();
-$('menuBtn').onclick = () => { $('menu').hidden = !$('menu').hidden; $('findPanel').hidden = true; };
+$('boxBtn').onclick = () => { endTeaching(); boxSetup.open(); };
+$('menuBtn').onclick = () => {
+  endTeaching(); $('menu').hidden = !$('menu').hidden; $('findPanel').hidden = true; };
 $('closeMenu').onclick = () => ($('menu').hidden = true);
 $('sens').oninput = (e) => {
   const v = parseInt(e.target.value, 10);
@@ -451,6 +491,55 @@ $('newPuzzle').onclick = () => {
 $('clearAll').onclick = () => {
   if (confirm('Forget all pieces and the box picture?')) { W.post({ type: 'reset', keepBox: false }); closeFind(); }
 };
+
+// ---------- debug report ----------
+// Bundles what's needed to diagnose problems: the current camera frame (full
+// resolution), the last Snap photo, and a JSON file with timings, settings,
+// what was detected and the catalog. Shared via the iOS share sheet, so it
+// can be saved to Files/OneDrive or sent anywhere.
+$('reportBtn').onclick = () => {
+  $('menu').hidden = true;
+  toast('Preparing report…', 10000);
+  W.post({ type: 'report' });
+};
+async function finishReport(workerData) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const files = [];
+  try {
+    if (video.videoWidth) {
+      const c = document.createElement('canvas');
+      c.width = video.videoWidth; c.height = video.videoHeight;
+      c.getContext('2d').drawImage(video, 0, 0);
+      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.92));
+      if (blob) files.push(new File([blob], `puzzle-report-${stamp}-frame.jpg`, { type: 'image/jpeg' }));
+    }
+  } catch (e) { logError('report frame: ' + e.message); }
+  if (S.lastSnapFile) files.push(new File([S.lastSnapFile], `puzzle-report-${stamp}-snap.jpg`, { type: S.lastSnapFile.type || 'image/jpeg' }));
+  const data = {
+    app: APP_VERSION, time: new Date().toISOString(), userAgent: navigator.userAgent,
+    screen: { w: screen.width, h: screen.height, dpr: devicePixelRatio, viewW: innerWidth, viewH: innerHeight },
+    video: { w: video.videoWidth, h: video.videoHeight, settings: S.track && S.track.getSettings ? S.track.getSettings() : null },
+    mode: S.mode, fps: S.fps, motion: S.motion, history: S.history, errors: S.errors,
+    lastFrame: S.last, selected: S.desc, worker: workerData,
+  };
+  files.push(new File([JSON.stringify(data)], `puzzle-report-${stamp}.json`, { type: 'application/json' }));
+  $('toast').hidden = true;
+  try {
+    if (navigator.canShare && navigator.canShare({ files })) {
+      await navigator.share({ files, title: 'Puzzle Helper report' });
+      return;
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    logError('share: ' + e.message);
+  }
+  // Desktop fallback: download each file.
+  for (const f of files) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(f); a.download = f.name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+}
 
 $('startBtn').onclick = startCamera;
 $('videoTest').onclick = (e) => { e.preventDefault(); $('videoInput').click(); };

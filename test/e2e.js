@@ -141,6 +141,13 @@ function writePng(file, mat) {
     await page.click('#teachClear');
     await page.click('#teachDone');
     check('teach background learns a tapped color', /1 spot/.test(taught), taught);
+    // Send report: in a desktop browser the files are downloaded.
+    await page.click('#menuBtn');
+    const dls = [];
+    page.on('download', (d) => dls.push(d.suggestedFilename()));
+    await page.click('#reportBtn');
+    await page.waitForTimeout(4000);
+    check('send report produces frame + data files', dls.some((n) => n.endsWith('.json')) && dls.some((n) => n.endsWith('frame.jpg')), dls.join(', '));
     check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   } finally {
     await browser.close();

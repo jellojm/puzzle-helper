@@ -9,6 +9,7 @@ const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-rel
 const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'engine'];
 
 let engine = null;
+const recent = []; // recent frame timings
 let db = null;
 let saveTimer = null;
 
@@ -129,7 +130,9 @@ const handlers = {
   init,
   frame(msg) {
     const src = bitmapSource(msg.bitmap);
+    const g0 = performance.now();
     const out = engine.processFrame(src, { still: msg.still });
+    out.timings.workerTotal = performance.now() - g0;
     msg.bitmap.close();
     out.type = 'frame';
     out.frameW = src.w; out.frameH = src.h;
@@ -172,6 +175,22 @@ const handlers = {
     post({ type: 'region', count: n, cells: [msg.c0, msg.r0, msg.c1, msg.r1] });
   },
   clearHighlights() { engine.selection = null; engine.region = null; },
+  // Diagnostic snapshot for "Send report".
+  report() {
+    const pieces = [...engine.pieces.values()].map((p) => ({
+      id: p.id, island: p.island, pos: p.pos && p.pos.map(Math.round), area: Math.round(p.area || 0),
+      code: p.t1 ? p.t1.code : null, cornerScore: p.t1 ? +p.t1.cornerScore.toFixed(3) : null, nObs: p.t1 ? p.t1.nObs || 1 : 0,
+      meanSide: p.t1 ? Math.round(p.t1.meanSide) : null, t1Fail: p.t1Fail || 0,
+      box: p.t2 && p.t2.cands.length ? { col: p.t2.cands[0].col, row: p.t2.cands[0].row, conf: +p.t2.conf.toFixed(2) } : null,
+      wrong: p.wrong, joined: p.joined,
+    }));
+    post({ type: 'report', data: {
+      opts: engine.opts, taught: engine.taught, counts: engine.counts(), bg: engine.bg, thresh: engine.thresh,
+      box: engine.box ? { cols: engine.box.cols, rows: engine.box.rows, white: engine.box.white } : null,
+      island: engine.island, tracking: !!engine.pose, pieces,
+      cvInfo: PH.cv && PH.cv.getBuildInformation ? String(PH.cv.getBuildInformation()).slice(0, 3000) : null,
+    } });
+  },
   feedback(msg) {
     engine.feedback(msg);
     scheduleSave();

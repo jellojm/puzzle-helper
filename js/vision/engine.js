@@ -285,7 +285,7 @@
       info = info || {};
       const t0 = now();
       const proc = source.getProc(this.opts.procW);
-      const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.3 }));
+      const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25 }));
       this.bg = seg.bg; this.thresh = seg.thresh;
       const t1 = now();
       const dets = this.classify(seg.dets, seg.unitArea);
