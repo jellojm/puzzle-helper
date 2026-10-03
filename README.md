@@ -88,6 +88,7 @@ node test/flow-lab.js        # motion tracker accuracy and cost on synthetic shi
 node test/worker-reset.js    # New puzzle / Clear everything forget taught table colours
 node test/seg-regression.js  # segmentation on real white-table frames doesn't regress
 node test/leak-check.js      # the live pipeline doesn't leak OpenCV (WebAssembly) memory
+node test/dupes.js           # pieces that drop out of detection aren't catalogued twice
 ```
 
 Working from real data (the phone's **Send report** files in `reports/`):
@@ -97,6 +98,7 @@ python tools/report-summary.py reports/puzzle-report-*.json   # speed per stage,
 node test/report-replay.js reports/<report>.json --draw       # re-run a report's frame with its settings -> test/out/
 node test/seg-lab.js --draw <photo.jpg> ...                   # compare segmentation option sets on real photos
 node test/flow-video.js <dir of fNNNN.jpg frames>              # motion tracker on frames from a real phone video
+node test/shape-real.js <photo.jpg> 15 20 --autotilt          # shape reading on a real photo: outlines, flat edges, failures -> test/out/
 node test/real-box.js test/fixtures/<box>.jpg                 # real box picture: corners, grid, placement + matching + 2x2 loops
 node test/real-pieces.js test/fixtures/<photo>.jpg test/fixtures/<box>.jpg   # outlines found in a real photo -> test/out/
 npm run serve       # http://localhost:8080 for desktop testing (add ?video=clip.mp4 to replay a recorded sweep)

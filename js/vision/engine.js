@@ -804,7 +804,9 @@
           const dist = Math.hypot(p.pos[0] - q[0], p.pos[1] - q[1]);
           if (dist > unitT * (d.merged ? 1.2 : 0.55)) continue;
           const sim = PH.fpSimilarity(d.fp, p.fp);
-          if (sim < 0.5) continue;
+          // A piece flagged missing is matched at its last-known spot too, but
+          // needs a closer colour match (another piece may have taken the spot).
+          if (sim < (p.missing ? 0.6 : 0.5)) continue;
           const c = dist / unitT + (1 - sim);
           if (!best || c < best.c) best = { c, p };
         }
@@ -847,7 +849,7 @@
         const moved = this.findMoved(d, s, claimed);
         if (moved === 'defer') continue; // out of time this frame; decide next frame
         if (moved) {
-          moved.pos = q; moved.island = this.island; moved.miss = 0; d.id = moved.id; claimed.add(moved.id); this.touch(moved);
+          moved.pos = q; moved.island = this.island; moved.miss = 0; moved.missing = false; d.id = moved.id; claimed.add(moved.id); this.touch(moved);
           continue;
         }
         if (!this.frameCtx.still && this.pieces.size) continue; // wait for a steady view before cataloging
@@ -859,19 +861,27 @@
         d.id = p.id; claimed.add(p.id);
         this.version++;
       }
-      // Located pieces that should be in view but aren't were probably moved.
+      // Located pieces that should be in view but aren't: maybe moved, but on
+      // a white board far more often just not detected this frame (pale
+      // pieces; report 15:52 had a median of 16 detections with many more
+      // pieces in view). Forgetting the position (as before v0.9.2) made the
+      // piece's next detection a NEW entry whenever the strict shape/colour
+      // re-identification failed — 566 entries for ~150 pieces. Now a piece
+      // only gets flagged `missing` after 12 steady-frame misses and keeps its
+      // last-known spot, where it is re-linked when it shows up again;
+      // findMoved() still catches pieces that really were moved.
       const inv = PH.simInvert(T);
       const seen = new Set(dets.map((d) => d.id));
       const margin = unitF;
-      for (const p of this.pieces.values()) {
-        if (!p.pos || p.island !== this.island || seen.has(p.id)) continue;
+      if (this.frameCtx.still) for (const p of this.pieces.values()) {
+        if (!p.pos || p.missing || p.island !== this.island || seen.has(p.id)) continue;
         const f = PH.simApply(inv, p.pos[0], p.pos[1]);
         if (f[0] < margin || f[1] < margin || f[0] > proc.w - margin || f[1] > proc.h - margin) continue;
         const covered = dets.some((d) => (d.merged || d.border) && f[0] >= d.bbox[0] && f[1] >= d.bbox[1] && f[0] <= d.bbox[0] + d.bbox[2] && f[1] <= d.bbox[1] + d.bbox[3]);
         if (covered) continue;
-        if (++p.miss > 6) { p.pos = null; p.miss = 0; this.touch(p); }
+        if (++p.miss > 12) { p.missing = true; p.miss = 0; this.touch(p); }
       }
-      for (const d of dets) if (d.id) { const p = this.pieces.get(d.id); p.miss = 0; p.lastSeen = Date.now(); }
+      for (const d of dets) if (d.id) { const p = this.pieces.get(d.id); p.miss = 0; p.missing = false; p.lastSeen = Date.now(); }
     }
 
     findMoved(d, s, claimed) {
@@ -891,7 +901,7 @@
       for (const c of cands.slice(0, 6)) {
         if (c.p.t1 && t1) { if (PH.samePiece(t1, c.p.t1, PH.SAME_SHAPE).ok) return c.p; continue; }
         const near = c.p.pos && c.p.island === this.island && Math.hypot(c.p.pos[0] - q[0], c.p.pos[1] - q[1]) < unitT * 2.5;
-        if (c.sim > 0.9 && (!c.p.pos || near)) return c.p;
+        if (c.sim > 0.9 && (!c.p.pos || c.p.missing || near)) return c.p;
       }
       return null;
     }
@@ -910,7 +920,9 @@
       const crop = source.getCrop(x0, y0, x1 - x0, y1 - y0);
       try {
         const hint = d.split ? Array.from(d.pts, (v, i) => v / scale - (i % 2 ? y0 : x0)) : null;
-        d.t1 = PH.analyzePiece(crop, { bg: F.bg, threshDE: F.thresh, lut: F.lut, hint, lightW: this.opts.lightW, ox: x0, oy: y0 });
+        d.t1 = PH.analyzePiece(crop, { bg: F.bg, threshDE: F.thresh, lut: F.lut, hint, lightW: this.opts.lightW, ox: x0, oy: y0,
+          // one piece's area in this crop's (source) pixels, for the partial-outline check
+          unitArea: F.unitArea ? F.unitArea / (scale * scale) : null });
       } catch (e) { d.t1 = null; }
       // Background scraps and half-detected pieces don't have 4 good corners.
       if (d.t1 && d.t1.cornerScore < PH.MIN_CORNER_SCORE) { d.t1 = null; d.notPiece = true; }

@@ -2,7 +2,7 @@
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 
-const APP_VERSION = '0.9.1';
+const APP_VERSION = '0.9.2';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
 
@@ -262,6 +262,11 @@ $('resume').onclick = noteActivity;
 // every button that opens or closes one.
 const powerWatch = new MutationObserver(() => applyPower());
 ['menu', 'boxModal', 'start'].forEach((id) => powerWatch.observe($(id), { attributes: true, attributeFilter: ['hidden'] }));
+// The Find chips float just above the toolbar; while the piece panel (a bottom
+// sheet) is open they sat on top of its Fits/No buttons (owner's screenshot,
+// 2026-10-03). Hide them while it's open — closing the panel brings them back.
+const panelWatch = new MutationObserver(() => document.body.classList.toggle('panel-open', !$('findPanel').hidden));
+panelWatch.observe($('findPanel'), { attributes: true, attributeFilter: ['hidden'] });
 $('idleToggle').onchange = (e) => { S.idleOn = e.target.checked; noteActivity(); saveLocal(); };
 // While a photo picker has the camera, don't fight it for the camera.
 document.addEventListener('click', (e) => {

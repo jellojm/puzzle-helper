@@ -473,7 +473,9 @@
       const area = cv.contourArea(cnt);
       if (area < minArea) { cnt.delete(); continue; }
       cv.convexHull(cnt, hull);
-      blobs.push({ cnt, area, solidity: area / Math.max(1, cv.contourArea(hull)) });
+      const r = cv.boundingRect(cnt);
+      const edge = r.x <= 1 || r.y <= 1 || r.x + r.width >= w - 1 || r.y + r.height >= h - 1;
+      blobs.push({ cnt, area, edge, solidity: area / Math.max(1, cv.contourArea(hull)) });
     }
     hull.delete();
     // This frame's own "one piece" area: mass-weighted mode of log2(area) over
@@ -483,7 +485,11 @@
     // median of everything (that once picked up a 578k px background blob).
     // (one piece is never more than ~12% of the view; bigger "piece-shaped"
     // blobs are piles or assembled sections and must not set the size)
-    const like = blobs.filter((b) => b.solidity > 0.6 && b.area < Math.min(maxArea, w * h * 0.12) && PH.pieceScore(b.cnt.data32S, b.area) > PH.MIN_CORNER_SCORE).map((b) => b.area);
+    // Blobs cut off by the frame edge are never whole pieces: the owner's
+    // kitchen photo (IMG_3573) had a wall region touching the top edge pass as
+    // "piece-shaped" (score 0.034) and, being 100x a piece's area, it won the
+    // mass mode — the photo then catalogued nothing.
+    const like = blobs.filter((b) => !b.edge && b.solidity > 0.6 && b.area < Math.min(maxArea, w * h * 0.12) && PH.pieceScore(b.cnt.data32S, b.area) > PH.MIN_CORNER_SCORE).map((b) => b.area);
     const unitOwn = like.length >= 3 ? PH.massMode(like) : null;
     if (PH.DEBUG_SEG) console.log('piece-like', like.map(Math.round).sort((a, b) => a - b).join(','), 'own', unitOwn);
     // A caller-supplied unit (live scanning keeps one across frames) wins.

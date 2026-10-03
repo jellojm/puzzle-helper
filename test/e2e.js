@@ -130,6 +130,9 @@ function writePng(file, mat) {
       console.log('find panel:', title, '|', sub, '|', cands, 'candidates');
       await page.screenshot({ path: path.join(OUT, 'e2e-find.png') });
       check('tapping a piece opens its matches', cands > 0, `${cands} candidate thumbnails`);
+    // Owner's screenshot (2026-10-03): the Find chips sat on top of the panel's Fits/No buttons.
+    const chipsHidden = await page.evaluate(() => { const b = document.getElementById('findBar'); return !document.getElementById('findPanel').hidden && (b.hidden || getComputedStyle(b).display === 'none'); });
+    check('Find chips are hidden while a piece panel is open', chipsHidden);
     } else {
       check('tapping a piece opens its matches', false, 'no shaped piece on screen to tap');
     }

@@ -12,7 +12,67 @@
   const STRIP = 16;       // color samples per edge
   PH.SQ = 24;             // core-square size (matches box cell size)
 
-  function segmentCrop(lab, w, h, bg, threshDE, lightW, lut, hint) {
+  /**
+   * Add a piece's outline to its colour mask (in place). The outline is where
+   * lightness changes sharply — the cut edge and its thin shadow — which holds
+   * even where the print matches the board. Edges are closed into rings,
+   * enclosed regions filled, and only the region overlapping the middle of
+   * the crop (the piece) is kept, so shadows and neighbours can't attach.
+   * The edge threshold comes from the crop's own border (board texture), since
+   * photo crops are far higher resolution than live frames.
+   */
+  function addOutline(lab, w, h, mask) {
+    const cv = PH.cv;
+    const lab3 = new cv.Mat(h, w, cv.CV_8UC3); lab3.data.set(lab);
+    const planes = new cv.MatVector(); cv.split(lab3, planes);
+    const L = planes.get(0);
+    const gx = new cv.Mat(), gy = new cv.Mat(), ax = new cv.Mat(), ay = new cv.Mat(), mag = new cv.Mat();
+    cv.Scharr(L, gx, cv.CV_16S, 1, 0); cv.Scharr(L, gy, cv.CV_16S, 0, 1);
+    cv.convertScaleAbs(gx, ax, 1 / 16); cv.convertScaleAbs(gy, ay, 1 / 16);
+    cv.addWeighted(ax, 0.5, ay, 0.5, 0, mag);
+    // board texture: gradient along a 3 px frame of the crop
+    const md = mag.data, v = [];
+    for (let x = 0; x < w; x += 2) for (const y of [0, 1, 2, h - 3, h - 2, h - 1]) if (y >= 0 && y < h) v.push(md[y * w + x]);
+    for (let y = 3; y < h - 3; y += 2) for (const x of [0, 1, 2, w - 3, w - 2, w - 1]) if (x >= 0 && x < w) v.push(md[y * w + x]);
+    v.sort((a, b) => a - b);
+    const noise = v.length ? v[Math.floor(v.length * 0.75)] : 4;
+    const T = Math.max(6, Math.min(40, noise * 2.5 + 3));
+    cv.threshold(mag, mag, T, 255, cv.THRESH_BINARY);
+    const bk = Math.max(3, 2 * Math.round(Math.max(w, h) * 0.012) + 1);
+    const kb = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(bk, bk));
+    cv.morphologyEx(mag, mag, cv.MORPH_CLOSE, kb);
+    // enclosed = not reachable from the crop border through non-edge pixels
+    const inv = new cv.Mat();
+    cv.bitwise_not(mag, inv);
+    cv.rectangle(inv, new cv.Point(0, 0), new cv.Point(w - 1, h - 1), new cv.Scalar(255), 1);
+    const ff = cv.Mat.zeros(h + 2, w + 2, cv.CV_8UC1);
+    cv.floodFill(inv, ff, new cv.Point(0, 0), new cv.Scalar(0), new cv.Rect(), new cv.Scalar(0), new cv.Scalar(0), 4);
+    const shape = new cv.Mat();
+    cv.bitwise_or(inv, mag, shape);
+    cv.bitwise_or(shape, mask, shape);
+    // keep only the connected region at the middle of the crop (the piece)
+    const labels = new cv.Mat();
+    cv.connectedComponents(shape, labels, 8, cv.CV_32S);
+    const ld = labels.data32S, cx = w >> 1, cy = h >> 1;
+    const counts = new Map();
+    const r = Math.max(2, Math.round(Math.min(w, h) * 0.08));
+    for (let y = cy - r; y <= cy + r; y++) for (let x = cx - r; x <= cx + r; x++) {
+      const k = ld[y * w + x]; if (k > 0) counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    let keep = 0, kc = 0;
+    for (const [k, c] of counts) if (c > kc) { kc = c; keep = k; }
+    if (keep > 0) {
+      const sel = new cv.Mat(), kmat = new cv.Mat(h, w, cv.CV_32S, new cv.Scalar(keep));
+      cv.compare(labels, kmat, sel, cv.CMP_EQ);
+      cv.bitwise_or(mask, sel, mask);
+      // the ring sits ~1 px outside the true edge after closing: trim it back
+      cv.morphologyEx(mask, mask, cv.MORPH_OPEN, kb);
+      sel.delete(); kmat.delete();
+    }
+    [lab3, planes, L, gx, gy, ax, ay, mag, kb, inv, ff, shape, labels].forEach((m) => m.delete());
+  }
+
+  function segmentCrop(lab, w, h, bg, threshDE, lightW, lut, hint, boundary) {
     const cv = PH.cv;
     const dist = new cv.Mat(h, w, cv.CV_8UC1);
     const dd = dist.data;
@@ -41,6 +101,7 @@
     const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
     cv.morphologyEx(mask, mask, cv.MORPH_OPEN, k);
     cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, k);
+    if (boundary) addOutline(lab, w, h, mask);
     if (hint) {
       // Limit to this piece's (slightly grown) outline from the split.
       const hm = cv.Mat.zeros(h, w, cv.CV_8UC1);
@@ -193,20 +254,42 @@
    * @param crop {w,h,data:RGBA} full-resolution crop around the piece
    * @param ctx {bg:{L,a,b}, threshDE, lightW, ox, oy (crop origin in source px)}
    */
+  PH._segmentCrop = (...a) => segmentCrop(...a); // diagnostics only (test/shape-real.js --sheet)
   PH.analyzePiece = function (crop, ctx) {
     const cv = PH.cv;
     const w = crop.w, h = crop.h;
     const lab = PH.rgbaToLab(crop.data, w, h);
-    const seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, ctx.lightW === undefined ? 0.5 : ctx.lightW, ctx.lut, ctx.hint);
-    if (!seg.pts || seg.pts.length < 40) { seg.filled.delete(); return null; }
-    const touches = (() => {
-      for (let i = 0; i < seg.pts.length; i += 2) {
-        const x = seg.pts[i], y = seg.pts[i + 1];
+    const lightW = ctx.lightW === undefined ? 0.5 : ctx.lightW;
+    const touchesCrop = (pts) => {
+      for (let i = 0; i < pts.length; i += 2) {
+        const x = pts[i], y = pts[i + 1];
         if (x <= 0 || y <= 0 || x >= w - 1 || y >= h - 1) return true;
       }
       return false;
-    })();
-    if (touches) { seg.filled.delete(); return null; }
+    };
+    // Colour distance alone loses pale print on a pale board: the outline
+    // then follows only the colourful part of the piece, tabs read as flat
+    // edges, or the read fails (owner's kitchen photo IMG_3573: 66% read, 33%
+    // "edge" pieces vs 22% possible). So the piece's own outline (a lightness
+    // edge ring, closed and filled) is added first; if that leaks to the crop
+    // border or balloons past the colour blob, fall back to colour only.
+    const useOutline = ctx.boundary !== false;
+    // A piece-sized outline only. A partial one (pale part lost, cut along a
+    // print boundary inside the piece) is what produces FALSE FLAT edges; a
+    // much bigger one has swallowed a neighbour. Both are rejected rather
+    // than trusted. ctx.unitArea = one piece's area in crop pixels.
+    const U = ctx.unitArea || 0;
+    const fits = (r) => r.pts && r.pts.length >= 40 && !touchesCrop(r.pts) && (!U || (r.area >= U * (ctx.minUnit || 0.6) && r.area <= U * (ctx.maxUnit || 1.9)));
+    // Colour first: where it yields a whole piece it is the most faithful
+    // (the outline channel also picks up the lamp shadow beside a piece, which
+    // fills the blanks on that side). Only when colour gives a partial piece
+    // (pale part lost) is the outline added to rescue it.
+    let seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, false);
+    if (useOutline && !fits(seg)) {
+      const withOutline = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, true);
+      seg.filled.delete(); seg = withOutline;
+    }
+    if (!fits(seg)) { seg.filled.delete(); return null; }
 
     let P = PH.resampleClosed(seg.pts, N).pts;
     if (PH.polyArea(P) < 0) { // make clockwise on screen

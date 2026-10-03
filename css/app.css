@@ -61,6 +61,7 @@ button { font: inherit; color: inherit; }
 #findBar { position: absolute; left: 0; right: 0; bottom: calc(var(--safe-b) + 68px); z-index: 6;
   display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; padding: 6px 10px; pointer-events: none; }
 #findBar::-webkit-scrollbar { display: none; }
+body.panel-open #findBar, body.panel-open #matchBar { display: none; }
 #findBar button { pointer-events: auto; flex: none; border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px;
   background: rgba(0, 0, 0, 0.62); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   color: var(--text); font-size: 13px; }
