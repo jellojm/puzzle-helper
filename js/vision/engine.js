@@ -458,23 +458,32 @@
       const st = this.straighten(source, info);
       source = st.source;
       const proc = source.getProc(this.opts.procW);
-      this.lastProc = proc; // kept for debug reports (what the app actually analyzed)
-      const pfFound = this.findPuzzleFrame(proc);
       // Per-stage segmentation timings ride along in out.timings (as flat
       // seg_* numbers) so a phone report shows where the time actually goes.
-      const segT = {};
+      // seg_proc = straightening + the processing-size image; seg_bgChoice =
+      // background re-checks (both used to be in "seg" but in no sub-stage).
+      const segT = { proc: now() - t0 };
+      this.lastProc = proc; // kept for debug reports (what the app actually analyzed)
+      const pfFound = this.findPuzzleFrame(proc);
       if (this.unitLiveW !== proc.w) { this.unitLive = null; this.unitLiveW = proc.w; } // Scan detail changed
       // Pick (or re-check) the background model: at the start, every ~90
-      // frames, and when detections have collapsed for a while.
+      // frames, and when detections have collapsed for a while. Each
+      // candidate costs a whole extra segmentation, so when the last re-check
+      // kept the model (the view is just sparse - few pieces, the box, an
+      // empty patch) the next "collapsed" re-check waits ~45 frames (report
+      // 19:12: re-checks ran on most frames of a sparse view).
       this.fNo = (this.fNo || 0) + 1;
       if (this.opts.autoBg !== false && info.still !== false) {
-        const due = !this.bgModelAt || this.fNo - this.bgModelAt > 90 || (this.poorStreak || 0) >= 6;
+        const poor = (this.poorStreak || 0) >= 6 && (!this.bgKept || this.fNo - this.bgModelAt > 45);
+        const due = !this.bgModelAt || this.fNo - this.bgModelAt > 90 || poor;
+        const tb = now();
         if (this.bgEval || due) {
           if (!this.bgEval) { this.bgModelAt = this.fNo; this.poorStreak = 0; }
           // First frame with no model at all: decide right away; later
           // re-checks run one candidate per frame in the background.
           if (!this.bgModel && !this.bgEval) { const b = this.chooseBackground(proc); this.bgModel = b ? b.c : null; }
           else this.stepBgChoice(proc);
+          segT.bgChoice = now() - tb;
         }
       }
       const seg = PH.segment(proc, this.liveSegOpts(info, { timings: segT }));
@@ -708,7 +717,8 @@
      */
     bgCandidates(proc) {
       const lab = PH.rgbaToLab(proc.data, proc.w, proc.h);
-      const valid = proc.invalid ? Uint8Array.from({ length: proc.w * proc.h }, (_, p) => (proc.data[4 * p + 3] ? 1 : 0)) : null;
+      let valid = null;
+      if (proc.invalid) { const v = PH.validFromAlpha(proc); valid = v.valid; v.validMat.delete(); } // (a per-pixel JS callback before)
       const modes = PH.colorModes(lab, proc.w, proc.h, valid, 4).filter((m) => m.frac > 0.03);
       const cands = modes.map((bg) => ({ kind: 'color', bg }));
       // mixed tables: pairs of the 3 most common colours as a two-colour background
@@ -774,8 +784,9 @@
       if (E.i < E.cands.length) return false;
       this.bgEval = null;
       const best = this.pickBg(E.tried);
-      const cur = this.bgModel && E.tried.find((t) => t.c === this.bgModel);
+      const prev = this.bgModel, cur = prev && E.tried.find((t) => t.c === prev);
       if (best && (!cur || best.c === cur.c || best.score > cur.score * 1.2)) this.bgModel = best.c;
+      this.bgKept = !!prev && this.bgModel === prev; // nothing better: back off (processFrame)
       return true;
     }
 

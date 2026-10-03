@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.11.0';
+const APP_VERSION = '0.11.1';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });

@@ -77,6 +77,16 @@ export function outlinePoints(p) {
   return out;
 }
 
+/** What a piece's cut-out picture depends on: its thumbnail and outline. */
+function spriteKey(p) {
+  const th = p.thumb;
+  let k = `${th.w}x${th.h}:${th.ox.toFixed(1)},${th.oy.toFixed(1)},${th.s.toFixed(4)}`;
+  for (const c of p.corners || []) k += `:${c[0].toFixed(1)},${c[1].toFixed(1)}`;
+  let sum = 0;
+  for (const sig of p.sigs || []) if (sig) for (let i = 0; i < sig.length; i++) sum += sig[i] * (i + 1);
+  return k + ':' + sum.toFixed(3);
+}
+
 const ROLE = { sel: '#ffffff', gold: '#ffcc00', silver: '#c9ced6', corner: '#ff8c3a', border: '#35e0d8', find: '#ff4fd8', pairA: '#ffffff', pairB: '#ffcc00' };
 const STATUS = { seen: '#aab2bb', shaped: '#4f9dff', placed: '#3ddc84', section: '#c084fc' };
 
@@ -93,6 +103,8 @@ export class TableView {
     this.fitted = false;
     this.pointers = new Map();
     this.dirty = false;
+    this.sprites = new Map(); // id -> {key, sprite}: kept between Map visits
+    this.thumbPx = new Map(); // id -> thumbnail pixels (sent once by the worker)
     this.bindGestures();
     window.addEventListener('resize', () => this.request());
   }
@@ -103,18 +115,36 @@ export class TableView {
     this.pieces = data.pieces;
     this.byId = new Map(this.pieces.map((p) => [p.id, p]));
     this.off = layoutIslands(this.pieces, this.unit);
-    for (const p of this.pieces) p.sprite = p.thumb && p.rd ? this.makeSprite(p) : null;
+    // Cut-out pictures are rebuilt only for pieces whose picture or outline
+    // changed since the last visit (a 1000-piece table would otherwise make
+    // 1000 of them every time Map is opened).
+    const keep = new Map();
+    for (const p of this.pieces) {
+      p.sprite = null;
+      if (p.thumb) {
+        // data: null = the same picture as last time (the worker sends pixels once)
+        // pixels sent = a new picture (the worker sends them only then): rebuild
+        if (p.thumb.data) { if (this.thumbPx.has(p.id)) this.sprites.delete(p.id); this.thumbPx.set(p.id, p.thumb.data); }
+        else p.thumb.data = this.thumbPx.get(p.id) || null;
+        if (!p.thumb.data) p.thumb = null;
+      }
+      if (!p.thumb || !p.rd) continue;
+      const key = spriteKey(p), old = this.sprites.get(p.id);
+      p.sprite = old && old.key === key ? old.sprite : this.makeSprite(p);
+      keep.set(p.id, { key, sprite: p.sprite });
+    }
+    this.sprites = keep;
     if (!this.fitted) { this.fit(); this.fitted = true; }
     this.request();
   }
   // The piece's thumbnail cut out along its own outline (no board around it).
   makeSprite(p) {
     const th = p.thumb;
-    const src = document.createElement('canvas');
-    src.width = th.w; src.height = th.h;
+    const src = this.scratch || (this.scratch = document.createElement('canvas'));
+    src.width = th.w; src.height = th.h; // (resizing also clears it)
     src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(th.data), th.w, th.h), 0, 0);
     const pts = outlinePoints(p);
-    if (pts.length < 8) return src;
+    if (pts.length < 8) { const c = document.createElement('canvas'); c.width = th.w; c.height = th.h; c.getContext('2d').drawImage(src, 0, 0); return c; }
     const c = document.createElement('canvas');
     c.width = th.w; c.height = th.h;
     const g = c.getContext('2d');

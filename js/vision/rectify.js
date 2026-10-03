@@ -158,11 +158,19 @@
   PH.rectifiedSource = function (base, rect) {
     const cv = PH.cv;
     const { H, Hinv } = rect;
-    const warp = (img, M, ow, oh) => {
+    // `valid` (optional, 0/255): where it is 0 the output's alpha becomes 0.
+    const warp = (img, M, ow, oh, valid) => {
       const src = new cv.Mat(img.h, img.w, cv.CV_8UC4); src.data.set(img.data);
       const m = cv.matFromArray(3, 3, cv.CV_64F, M);
       const dst = new cv.Mat();
       cv.warpPerspective(src, dst, m, new cv.Size(ow, oh), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+      if (valid) {
+        const ch = new cv.MatVector(); cv.split(dst, ch);
+        const a = ch.get(3);
+        cv.bitwise_and(a, valid, a);
+        ch.set(3, a); cv.merge(ch, dst);
+        a.delete(); ch.delete();
+      }
       const out = { w: ow, h: oh, data: new Uint8ClampedArray(dst.data) };
       src.delete(); m.delete(); dst.delete();
       return out;
@@ -177,19 +185,20 @@
         const si = srcImg.scale;
         // proc pixel <- virtual (x/scale) <- original <- source-proc (x/si)
         const M = mul3([scale, 0, 0, 0, scale, 0, 0, 0, 1], mul3(H, [1 / si, 0, 0, 0, 1 / si, 0, 0, 0, 1]));
-        const out = warp(srcImg, M, ow, oh);
-        out.scale = scale;
         // Corners outside the camera image are filled by stretching the edge
         // pixels (streaks). Mark them (alpha 0, plus a 2 px seam) so the
         // segmentation treats them as background instead of as objects.
+        // All in WebAssembly: a JS loop over every pixel here cost up to
+        // ~90 ms per tilted frame on the phone (reports 2026-10-03).
         const ones = new cv.Mat(srcImg.h, srcImg.w, cv.CV_8UC1, new cv.Scalar(255));
         const m = cv.matFromArray(3, 3, cv.CV_64F, M), valid = new cv.Mat();
         cv.warpPerspective(ones, valid, m, new cv.Size(ow, oh), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(0));
         const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
         cv.erode(valid, valid, k);
-        let invalid = 0;
-        for (let p = 0; p < ow * oh; p++) if (!valid.data[p]) { out.data[4 * p + 3] = 0; invalid++; }
-        out.invalid = invalid > 0;
+        const invalid = ow * oh - cv.countNonZero(valid) > 0;
+        const out = warp(srcImg, M, ow, oh, invalid ? valid : null);
+        out.scale = scale;
+        out.invalid = invalid;
         [ones, m, valid, k].forEach((x) => x.delete());
         return out;
       },

@@ -45,15 +45,47 @@
   };
   function countValid(valid) { let c = 0; for (let p = 0; p < valid.length; p++) c += valid[p]; valid.nValid = c; return c; }
 
+  /** Which pixels of a tilt-corrected image are real camera pixels (alpha
+   *  > 0): `valid`, a 0/1 Uint8Array (.nValid = count) for the sampled JS
+   *  loops, and `validMat`, a 0/255 cv.Mat for the WebAssembly stages
+   *  (caller deletes it). WebAssembly, no per-pixel JS. */
+  PH.validFromAlpha = function (img) {
+    const cv = PH.cv, w = img.w, h = img.h;
+    const rgba = new cv.Mat(h, w, cv.CV_8UC4); rgba.data.set(img.data);
+    const ch = new cv.MatVector(); cv.split(rgba, ch);
+    // MatVector.get() returns a new Mat each call that must be deleted.
+    const alpha = ch.get(3);
+    const validMat = new cv.Mat(); cv.threshold(alpha, validMat, 0, 255, cv.THRESH_BINARY);
+    const v01 = new cv.Mat(); cv.threshold(alpha, v01, 0, 1, cv.THRESH_BINARY);
+    const valid = new Uint8Array(v01.data);
+    valid.nValid = cv.countNonZero(validMat);
+    [alpha, rgba, ch, v01].forEach((m) => m.delete());
+    return { valid, validMat };
+  };
+
+  /** The L, a, b planes of an interleaved Lab image as three 8-bit cv.Mats
+   *  (caller deletes them: P.delete()). segment() makes them once per frame
+   *  and shares them; copying and splitting the frame used to happen up to
+   *  three times (shadow flattening, distance, outlines). */
+  PH.labPlanes = function (lab, w, h) {
+    const cv = PH.cv;
+    const lab3 = new cv.Mat(h, w, cv.CV_8UC3); lab3.data.set(lab);
+    const mv = new cv.MatVector(); cv.split(lab3, mv);
+    const P = { L: mv.get(0), A: mv.get(1), B: mv.get(2) };
+    lab3.delete(); mv.delete();
+    P.delete = () => { P.L.delete(); P.A.delete(); P.B.delete(); };
+    return P;
+  };
+
   /** Colour distance of every pixel from `bg`, 2 units per ΔE with lightness
    *  weighted by `ls`, as an 8-bit cv.Mat (saturating at 255). Pixels where
    *  `validMat` (0/255, optional) is 0 come out 0 (= background). WebAssembly
-   *  throughout; replaces a JS loop that cost up to ~80 ms on the phone. */
-  PH.labDistance = function (lab, w, h, bg, ls, validMat) {
+   *  throughout; replaces a JS loop that cost up to ~80 ms on the phone.
+   *  `planes` ({L, A, B} Mats, optional) are used instead of splitting `lab`. */
+  PH.labDistance = function (lab, w, h, bg, ls, validMat, planes) {
     const cv = PH.cv;
-    const lab3 = new cv.Mat(h, w, cv.CV_8UC3); lab3.data.set(lab);
-    const planes = new cv.MatVector(); cv.split(lab3, planes);
-    const L = planes.get(0), A = planes.get(1), B = planes.get(2);
+    const own = planes ? null : PH.labPlanes(lab, w, h);
+    const { L, A, B } = planes || own;
     const fL = new cv.Mat(), fA = new cv.Mat(), fB = new cv.Mat(), m1 = new cv.Mat(), m2 = new cv.Mat();
     L.convertTo(fL, cv.CV_32F, ls, -bg.L * ls);
     A.convertTo(fA, cv.CV_32F, 1, -bg.a);
@@ -64,7 +96,8 @@
     // ×2 per ΔE; the -0.5 makes the rounding match the old truncating store.
     m2.convertTo(dist, cv.CV_8U, 2, -0.5);
     if (validMat) cv.bitwise_and(dist, validMat, dist);
-    [lab3, planes, L, A, B, fL, fA, fB, m1, m2].forEach((m) => m.delete());
+    [fL, fA, fB, m1, m2].forEach((m) => m.delete());
+    if (own) own.delete();
     return dist;
   };
 
@@ -77,14 +110,16 @@
    * darker blobs (closing); darker (black felt) -> remove brighter blobs
    * (opening); in between -> median. Returns null when the light is already
    * even (nothing to fix).
+   * With `planes` ({L, A, B} Mats of `lab`, shared by segment()) it returns
+   * the corrected lightness plane as a Mat {Lmat, ref, spread} (caller
+   * deletes Lmat; a and b are unchanged) instead of a merged Lab array.
    */
-  PH.flattenLight = function (lab, w, h, valid, unitArea, boardL, validMat) {
+  PH.flattenLight = function (lab, w, h, valid, unitArea, boardL, validMat, planes) {
     const cv = PH.cv;
     const n = w * h;
     // Lightness plane and the darker/brighter-than-board counts, in WebAssembly.
-    const lab3 = new cv.Mat(h, w, cv.CV_8UC3); lab3.data.set(lab);
-    const planes = new cv.MatVector(); cv.split(lab3, planes);
-    const L = planes.get(0), A = planes.get(1), B = planes.get(2);
+    const own = planes ? null : PH.labPlanes(lab, w, h);
+    const { L, A, B } = planes || own;
     let vm = validMat || null;
     if (valid && !vm) { vm = new cv.Mat(h, w, cv.CV_8UC1); vm.data.set(valid); cv.threshold(vm, vm, 0, 255, cv.THRESH_BINARY); }
     const tmp = new cv.Mat();
@@ -115,7 +150,7 @@
     // How uneven is the light? 10th..90th percentile of the surface (from a
     // 256-bin histogram of the small surface image, not a comparator sort).
     const lo = percentile8(sm.data, 0.1), hi = percentile8(sm.data, 0.9);
-    const done = (r) => { [lab3, planes, L, A, B, sm].forEach((m) => m.delete()); return r; };
+    const done = (r) => { sm.delete(); if (own) own.delete(); return r; };
     if (hi - lo < hi * 0.08) return done(null);
     // Ratio correction L' = L * ref / max(16, surface), saturated, in WebAssembly.
     const big = new cv.Mat(), floor = new cv.Mat(h, w, cv.CV_8UC1, new cv.Scalar(16)), Lf = new cv.Mat(), Lout = new cv.Mat();
@@ -127,14 +162,22 @@
     // coarse colour bin wins the background estimate.
     cv.divide(L, big, Lf, ref, cv.CV_32F);
     Lf.convertTo(Lout, cv.CV_8U, 1, -0.5);
-    Lf.delete();
-    const merged = new cv.Mat(), mv = new cv.MatVector();
-    mv.push_back(Lout); mv.push_back(A); mv.push_back(B);
-    cv.merge(mv, merged);
-    const out = new Uint8Array(merged.data);
-    [big, floor, Lout, merged, mv].forEach((m) => m.delete());
+    [Lf, big, floor].forEach((m) => m.delete());
+    if (planes) return done({ Lmat: Lout, ref, spread: (hi - lo) / hi });
+    const out = mergeLab(Lout, A, B);
+    Lout.delete();
     return done({ lab: out, ref, spread: (hi - lo) / hi });
   };
+  // Interleaved Lab array from three planes.
+  function mergeLab(L, A, B) {
+    const cv = PH.cv;
+    const merged = new cv.Mat(), mv = new cv.MatVector();
+    mv.push_back(L); mv.push_back(A); mv.push_back(B);
+    cv.merge(mv, merged);
+    const out = new Uint8Array(merged.data);
+    merged.delete(); mv.delete();
+    return out;
+  }
   // Mixed-table classification: 0 where the pixel's colour bin is background, else 255.
   function lutClassify(lab, n, lut, out) {
     const corr = lut.corr;
@@ -286,6 +329,7 @@
     let tm = now();
     const mark = (k) => { if (T) { const t = now(); T[k] = (T[k] || 0) + (t - tm); tm = t; } };
     const lab = PH.rgbaToLab(img.data, w, h);
+    const P = PH.labPlanes(lab, w, h); // shared by the WebAssembly stages below
     mark('lab');
     // Pixels outside the real camera image (tilt correction): alpha 0.
     // `validMat` (0/255) masks the WebAssembly stages; `valid` (0/1 array) the
@@ -294,17 +338,7 @@
     // next phone reports showed untilted frames getting as slow as tilted
     // ones, so that was reverted and the full-frame work moved to WebAssembly.)
     let valid = null, validMat = null;
-    if (img.invalid) {
-      const rgba = new cv.Mat(h, w, cv.CV_8UC4); rgba.data.set(img.data);
-      const ch = new cv.MatVector(); cv.split(rgba, ch);
-      // MatVector.get() returns a new Mat each call that must be deleted.
-      const alpha = ch.get(3);
-      validMat = new cv.Mat(); cv.threshold(alpha, validMat, 0, 255, cv.THRESH_BINARY);
-      const v01 = new cv.Mat(); cv.threshold(alpha, v01, 0, 1, cv.THRESH_BINARY);
-      valid = new Uint8Array(v01.data);
-      valid.nValid = cv.countNonZero(validMat);
-      [alpha, rgba, ch, v01].forEach((m) => m.delete());
-    }
+    if (img.invalid) ({ valid, validMat } = PH.validFromAlpha(img));
     // opts.bgModel (chosen by the engine, see Engine.chooseBackground):
     //   {kind:'color', bg:{L,a,b}} plain board of that colour
     //   {kind:'taught'} / {kind:'palette'} colour tables; absent = automatic.
@@ -323,20 +357,22 @@
     const taughtActive = model ? model.kind === 'taught' || model.kind === 'colors' : taught.length > 0 && !taughtPlain;
     // Shadow-evened lightness for the plain-board model (colour fingerprints
     // and taught/palette tables keep using the real colours).
-    let labS = lab, flat = null;
+    // (Only the lightness plane changes, flatL; a and b stay those of `lab`.)
+    let flat = null, flatL = null;
     if (opts.flatten !== false && !(model && model.kind !== 'color')) {
-      flat = PH.flattenLight(lab, w, h, valid, opts.unitArea, est.L, validMat);
+      flat = PH.flattenLight(lab, w, h, valid, opts.unitArea, est.L, validMat, P);
       if (flat) {
-        labS = flat.lab;
+        flatL = flat.Lmat;
         if (model) {
           // the chosen board colour, re-measured in the shadow-evened image
+          const Ls = flatL.data; // read right away: a view of WebAssembly memory
           let sL = 0, sa = 0, sb = 0, m = 0;
           for (let p = 0, i = 0; p < w * h; p += 5, i += 15) {
             if (valid && !valid[p]) continue;
-            if (Math.abs(lab[i + 1] - est.a) < 8 && Math.abs(lab[i + 2] - est.b) < 8 && Math.abs(lab[i] - est.L) < 40) { sL += labS[i]; sa += labS[i + 1]; sb += labS[i + 2]; m++; }
+            if (Math.abs(lab[i + 1] - est.a) < 8 && Math.abs(lab[i + 2] - est.b) < 8 && Math.abs(lab[i] - est.L) < 40) { sL += Ls[p]; sa += lab[i + 1]; sb += lab[i + 2]; m++; }
           }
           if (m > 50) est = { L: sL / m, a: sa / m, b: sb / m, frac: 1 };
-        } else est = PH.estimateBackground(labS, w, h, valid);
+        } else est = PH.estimateBackground(mergeLab(flatL, P.A, P.B), w, h, valid);
       }
     }
     mark('flatten');
@@ -366,7 +402,7 @@
 
     // Distance-from-background image, 2 units per ΔE (WebAssembly).
     const ls = PH.L_SCALE * lightW;
-    const dist = PH.labDistance(labS, w, h, bg, ls, validMat);
+    const dist = PH.labDistance(null, w, h, bg, ls, validMat, { L: flatL || P.L, A: P.A, B: P.B });
     const dd = dist.data;
     mark('dist');
     // Threshold from the cloth's own noise: the background is the large peak
@@ -400,11 +436,7 @@
     // `boundaryT` is added to the mask, so a pale piece becomes a closed ring
     // and RETR_EXTERNAL returns its outline.
     if (opts.boundary) {
-      // L plane via cv.split (WASM) rather than a JS strided copy.
-      const lab3 = new cv.Mat(h, w, cv.CV_8UC3); lab3.data.set(lab);
-      const planes = new cv.MatVector(); cv.split(lab3, planes);
-      const Lm = planes.get(0);
-      lab3.delete(); planes.delete();
+      const Lm = P.L; // the frame's own lightness (not shadow-evened)
       const gx = new cv.Mat(), gy = new cv.Mat(), ax = new cv.Mat(), ay = new cv.Mat(), mag = new cv.Mat();
       cv.Scharr(Lm, gx, cv.CV_16S, 1, 0); cv.Scharr(Lm, gy, cv.CV_16S, 0, 1);
       cv.convertScaleAbs(gx, ax, 1 / 16); cv.convertScaleAbs(gy, ay, 1 / 16);
@@ -446,7 +478,7 @@
       } else {
         cv.bitwise_or(mask, mag, mask);
       }
-      [Lm, gx, gy, ax, ay, mag].forEach((m) => m.delete());
+      [gx, gy, ax, ay, mag].forEach((m) => m.delete());
       mark('boundary');
     }
 
@@ -565,6 +597,7 @@
     noHier.delete();
     contours.delete(); hier.delete(); dist.delete(); mask.delete(); k3.delete(); k5.delete();
     if (validMat) validMat.delete();
+    P.delete(); if (flatL) flatL.delete();
     mark('dets');
     return { lab, w, h, bg, thresh: thresh / 2, dets, lut, unitArea: unitA, unitOwn, unitN: like.length, flat: flat && { ref: flat.ref, spread: flat.spread } };
   };

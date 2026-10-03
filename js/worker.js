@@ -10,6 +10,7 @@ const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 's
 
 let engine = null;
 const recent = []; // recent frame timings
+const sentThumbs = new Map(); // Map view: piece id -> thumbnail object whose pixels the page already has
 let db = null;
 let saveTimer = null;
 
@@ -247,8 +248,19 @@ const handlers = {
       pairs: r.pairs.slice(0, 60).map((p) => Object.assign({}, p, { A: brief(p.a), B: brief(p.b) })) });
   },
   showPair(msg) { engine.selectPair(msg.a, msg.b); },
-  // Table view: every catalogued piece with its position, read placement and picture.
-  mapData() { post({ type: 'mapData', data: engine.mapData() }); },
+  // Table view: every catalogued piece with its position, read placement and
+  // picture. A thumbnail's pixels go to the page once: later visits send
+  // data: null for a thumbnail already sent (the page keeps it), so opening
+  // Map on a big table doesn't copy every picture again.
+  mapData() {
+    const d = engine.mapData();
+    for (const p of d.pieces) {
+      if (!p.thumb) continue;
+      if (sentThumbs.get(p.id) === p.thumb) p.thumb = Object.assign({}, p.thumb, { data: null });
+      else sentThumbs.set(p.id, p.thumb);
+    }
+    post({ type: 'mapData', data: d });
+  },
   // Fold duplicate scan groups together and drop entries that never read as pieces.
   async tidy() {
     const r = engine.tidy();

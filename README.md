@@ -94,6 +94,7 @@ node test/dupes.js           # pieces that drop out of detection aren't catalogu
 node test/quality-gate.js    # blurred, distant or one-off views never become pieces
 node test/answer-key.js      # Fits/No answers are logged with what was claimed; accuracy stats
 node test/table-view.js      # Map: each piece's picture at its place, angle and size; groups, fit, tap
+node test/rectify-proc.js    # tilt-corrected frame: same bytes as the reference, and its time per frame
 node test/speed.js           # per-stage timing (VISION=<dir> runs another copy of js/vision to compare)
 ```
 
