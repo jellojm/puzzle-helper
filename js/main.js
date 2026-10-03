@@ -1,9 +1,10 @@
 // Page controller: camera, frame pump to the vision worker, overlay, UI.
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
+import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.10.2';
+const APP_VERSION = '0.11.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -71,6 +72,7 @@ const bump = (k) => { STATS[k] = (STATS[k] || 0) + 1; };
 const worker = new Worker('js/worker.js');
 const W = { post: (m, t) => worker.postMessage(m, t || []) };
 const boxSetup = new BoxSetup(W, () => toast('Preparing box picture…'), toast, () => applyPower());
+const frameSetup = new FrameSetup(W, toast, () => applyPower());
 
 worker.onmessage = (e) => {
   const m = e.data;
@@ -81,6 +83,7 @@ worker.onmessage = (e) => {
       setStatus('');
       $('modeHint').textContent = modeHint(S.mode);
       setBox(m.box);
+      S.border = !!m.border; $('frameForget').hidden = !S.border; // a border marked in an earlier session
       if (m.settings) { $('sens').value = m.settings.minDE; $('sensVal').textContent = m.settings.minDE; showTaught(m.settings.taught); }
       W.post({ type: 'settings', settings: { procW: S.procW } }); // kept on the page, not in the worker's store
       updateStats(m.counts);
@@ -131,6 +134,12 @@ worker.onmessage = (e) => {
     case 'box': setBox(m.box); toast(`Box picture ready: ${m.box.cols} × ${m.box.rows} grid.`); break;
     case 'taught': showTaught(m.count); break;
     case 'boxCorners': if (m.corners) boxSetup.setCorners(m.corners); break;
+    case 'frameMarked':
+      S.border = m.ok;
+      $('frameForget').hidden = !m.ok;
+      if (m.ok) toast('Border marked. Select a piece: its spot inside the border lights up when the border is in view.', 6000);
+      else if (!m.cleared) toast(m.why || 'Could not mark the border. Try again with the whole border in view.', 6000);
+      break;
     case 'selected': showFind(m.desc); mapShowSelection(m.desc); break;
     case 'mapData': tableView.setData(m.data); mapApplyFilter(); break;
     case 'region': S.region = m.cells; toast(m.count ? `${m.count} catalogued pieces belong in that area.` : 'No catalogued pieces placed in that area yet.'); drawMinimap(); break;
@@ -200,7 +209,7 @@ async function ensureCamera() {
 // is released outright (not just paused) so the recording indicator goes out.
 function scanningWanted() {
   return S.running && !document.hidden && !S.pickerOpen && !S.idle && S.mode !== 'map' &&
-    $('menu').hidden && $('boxModal').hidden && $('start').hidden;
+    $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden && $('start').hidden;
 }
 // Last real camera view, kept when the camera is switched off (menu, idle)
 // so "Send report" can still include what the camera saw.
@@ -221,7 +230,7 @@ function releaseCamera() {
 }
 function applyPower() {
   const want = scanningWanted();
-  $('resume').hidden = !(S.idle && S.running && !document.hidden && $('menu').hidden && $('boxModal').hidden);
+  $('resume').hidden = !(S.idle && S.running && !document.hidden && $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden);
   if (want === S.active) return;
   S.active = want;
   if (want) {
@@ -482,7 +491,7 @@ function loop() {
   // Redraw only when there is a new result, the camera moved the marks by
   // more than half a pixel, a pulsing highlight (capped at ~20 fps) or
   // something asked for one — not 60 times a second regardless.
-  const pulsing = S.last && S.last.highlights && S.last.highlights.length > 0;
+  const pulsing = S.last && ((S.last.highlights && S.last.highlights.length > 0) || (S.last.pframe && S.last.pframe.target));
   const k = S.last ? Math.max(overlay.clientWidth / S.last.frameW, overlay.clientHeight / S.last.frameH) : 1;
   const ds = S.drawnShift, sh = shift ? [shift.dx * k, shift.dy * k] : [0, 0];
   const followMoved = !ds || Math.hypot(sh[0] - ds[0], sh[1] - ds[1]) > 0.5;
@@ -681,6 +690,10 @@ function showFind(desc) {
   drawMinimap();
   if (!desc) { closeFind(); return; }
   closeMatches(); clearFilter();
+  const pid = desc.piece && desc.piece.id;
+  if (pid !== S.peekId) { S.peekId = pid; $('findPanel').classList.remove('peek'); }
+  $('findPeek').hidden = !S.border;
+  $('findPeek').textContent = $('findPanel').classList.contains('peek') ? 'Details' : 'Show spot';
   $('findPanel').hidden = false;
   $('menu').hidden = true;
   applyPower();
@@ -839,6 +852,11 @@ function closeFind() {
   drawMinimap();
 }
 $('closeFind').onclick = closeFind;
+$('findPeek').onclick = () => {
+  const on = $('findPanel').classList.toggle('peek');
+  $('findPeek').textContent = on ? 'Details' : 'Show spot';
+  S.needDraw = true;
+};
 
 // ---------- find bar: piece groups, match cycling, map toggle ----------
 // Light up a whole class of pieces at once — corners and edges first, since
@@ -935,6 +953,9 @@ function applyMapVisibility() {
 // ---------- minimap ----------
 function setBox(box) {
   S.box = box;
+  frameSetup.setBox(box);
+  if (S.border && box && (!S.borderGrid || S.borderGrid !== box.cols + 'x' + box.rows)) { S.border = false; $('frameForget').hidden = true; }
+  if (box) S.borderGrid = box.cols + 'x' + box.rows;
   if (!box) { S.boxImg = null; S.region = null; applyMapVisibility(); return; }
   const c = document.createElement('canvas');
   c.width = box.preview.w; c.height = box.preview.h;
@@ -1060,6 +1081,27 @@ $('menuBtn').onclick = () => {
   applyPower(); // Settings is a full-screen read: no reason to hold the camera
 };
 $('closeMenu').onclick = () => { $('menu').hidden = true; noteActivity(); applyPower(); };
+// Mark the finished border: aim (camera on, whole border in view), capture,
+// then drag the 4 numbered corners (js/frameSetup.js).
+$('frameBtn').onclick = () => {
+  $('menu').hidden = true;
+  if (!S.box) { toast('Add the box picture first (Box button): the border is marked on its grid.'); applyPower(); return; }
+  endTeaching(); closeFind(); closeMatches();
+  $('frameBar').hidden = false;
+  noteActivity(); applyPower();
+};
+$('frameBarCancel').onclick = () => { $('frameBar').hidden = true; };
+$('frameShot').onclick = async () => {
+  if (!video.videoWidth) { toast('Camera not ready yet.'); return; }
+  $('frameBar').hidden = true;
+  let bmp;
+  try { bmp = await createImageBitmap(video); } catch (_) {
+    const c = document.createElement('canvas'); c.width = video.videoWidth; c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0); bmp = await createImageBitmap(c);
+  }
+  frameSetup.open(bmp, currentTilt());
+};
+$('frameForget').onclick = () => { $('menu').hidden = true; W.post({ type: 'frameClear' }); toast('Border mark forgotten.'); applyPower(); };
 $('tidyBtn').onclick = () => {
   $('menu').hidden = true;
   noteActivity(); applyPower();
@@ -1260,6 +1302,7 @@ window.__phPick = (want) => {
 window.__phSelectStatus = (want) => { const d = S.last && S.last.dets.find((x) => x.id && x.status === want); if (!d) return false; setMode('find'); W.post({ type: 'select', id: d.id }); return true; };
 // Select a catalogued piece/section even when it isn't in view right now.
 window.__phSelectKind = (kind) => { setMode('find'); W.post({ type: 'selectKind', kind }); return true; };
+window.__phBorder = () => S.last && S.last.pframe; // test hook: the marked border in the last result
 window.__phStatuses = () => S.last && S.last.dets.map((d) => d.status + (d.border ? '/border' : ''));
 
 // ?video=URL plays a recorded sweep instead of the camera (desktop testing).

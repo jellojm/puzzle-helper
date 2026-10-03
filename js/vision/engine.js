@@ -24,6 +24,7 @@
     }
 
     reset() {
+      this.pframe = null; this.pfLoc = null;
       this.pieces = new Map();
       this.nextId = 1;
       this.pose = null;
@@ -458,6 +459,7 @@
       source = st.source;
       const proc = source.getProc(this.opts.procW);
       this.lastProc = proc; // kept for debug reports (what the app actually analyzed)
+      const pfFound = this.findPuzzleFrame(proc);
       // Per-stage segmentation timings ride along in out.timings (as flat
       // seg_* numbers) so a phone report shows where the time actually goes.
       const segT = {};
@@ -581,7 +583,9 @@
       }
       // Lets the page map straightened coordinates back onto the camera view.
       out.rect = st.rect ? { H: st.rect.H, Hinv: st.rect.Hinv, tilt: PH.tiltDeg(info.tilt.down) } : null;
-      out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2 };
+      out.pframe = this.puzzleFrameOut(proc, pfFound);
+      out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2, border: this.pfMs || 0 };
+      this.pfMs = 0;
       for (const k in segT) out.timings['seg_' + k] = segT[k];
       return out;
     }
@@ -1253,7 +1257,72 @@
     }
     uncalibrate(t1) { this.calibrate(t1, -1); }
 
+    // ---------- the marked border: the puzzle's real place on the table ----------
+    /**
+     * Mark the finished border: `corners` = its 4 outer corners in the camera
+     * frame `source` (camera pixels), clockwise from the box picture's
+     * top-left. Analysed in the same (straightened) view as live frames.
+     */
+    setPuzzleFrame(source, info, corners) {
+      if (!this.box) return { ok: false, why: 'Add the box picture first.' };
+      const st = this.straighten(source, info || {});
+      const proc = st.source.getProc(this.opts.procW);
+      const pts = corners.map(([x, y]) => {
+        const p = st.rect ? PH.applyH(st.rect.H, x, y) : [x, y];
+        return [p[0] * proc.scale, p[1] * proc.scale];
+      });
+      this.pframe = new PH.PuzzleFrame(proc, pts, this.box.cols, this.box.rows);
+      if (this.pframe.feat.n < 60) { this.pframe = null; return { ok: false, why: 'Too little detail in that view to recognise the table again.' }; }
+      // t: 0 = look for it again on the very next live frame (the phone moves on)
+      this.pfLoc = { H: this.pframe.Hbox, t: 0, fNo: this.fNo || 0, w: proc.w, h: proc.h, inliers: this.pframe.feat.n };
+      return { ok: true, features: this.pframe.feat.n };
+    }
+    clearPuzzleFrame() { this.pframe = null; this.pfLoc = null; }
+    // Re-find the marked border in this view, at most every frameEveryMs
+    // (ORB matching is ~60-90 ms on a PC). Returns true when found now.
+    findPuzzleFrame(proc) {
+      if (!this.pframe) return false;
+      const t = now();
+      if (this.pfLoc && t - this.pfLoc.t < (this.opts.frameEveryMs || 700)) return false;
+      const loc = this.pframe.locate(proc);
+      this.pfMs = now() - t;
+      this.pfTries = (this.pfTries || 0) + 1;
+      if (!loc) { if (this.pfLoc) this.pfLoc.t = t; else this.pfLoc = { H: null, t }; return false; }
+      this.pfFound = (this.pfFound || 0) + 1;
+      this.pfLoc = { H: loc.H, t, fNo: this.fNo || 0, w: proc.w, h: proc.h, inliers: loc.inliers, pose: null, island: null };
+      return true;
+    }
+    /** Where the border is in this view (proc px) for the page, plus the
+     *  selected piece's (or region's) target spot inside it. Between ORB fixes
+     *  the last fix is carried along with the table map's camera pose. */
+    puzzleFrameOut(proc, foundNow) {
+      const L = this.pfLoc;
+      if (!this.pframe || !L || !L.H || L.w !== proc.w) return this.pframe ? { marked: true, visible: false } : null;
+      let H = null;
+      if (foundNow) { H = L.H; if (this.pose) { L.pose = Object.assign({}, this.pose); L.island = this.island; } }
+      else if (L.pose && this.pose && L.island === this.island) {
+        // box -> fix view -> table -> this view
+        const S = (T) => [T.a, -T.b, T.tx, T.b, T.a, T.ty, 0, 0, 1];
+        H = PH.homMul(S(PH.simInvert(this.pose)), PH.homMul(S(L.pose), L.H));
+      } else if ((this.fNo || 0) - L.fNo <= 2) H = L.H; // just found: the page's motion tracker covers the rest
+      if (!H) return { marked: true, visible: false };
+      const { cols, rows } = this.pframe;
+      const out = { marked: true, visible: true, quad: PH.PuzzleFrame.cellQuad(H, 0, 0, cols, rows), cols, rows };
+      const sel = this.selection && this.pieces.get(this.selection.id);
+      if (sel && sel.kind !== 'section' && sel.t2 && sel.t2.cands.length && sel.t2.conf >= 0.15) {
+        const c = sel.t2.cands[0];
+        out.target = { quad: PH.PuzzleFrame.cellQuad(H, c.col, c.row), col: c.col, row: c.row, conf: sel.t2.conf };
+      } else if (sel && sel.kind === 'section' && sel.sec && sel.sec.cells) {
+        out.target = { quads: sel.sec.cells.map((k) => PH.PuzzleFrame.cellQuad(H, k % cols, Math.floor(k / cols))) };
+      } else if (this.region) {
+        const R = this.region;
+        out.target = { quad: PH.PuzzleFrame.cellQuad(H, R.c0, R.r0, R.c1 - R.c0 + 1, R.r1 - R.r0 + 1) };
+      }
+      return out;
+    }
+
     setBox(box) {
+      this.clearPuzzleFrame(); // the mark is in the old box's grid
       this.box = box;
       for (const p of this.pieces.values()) { p.t2 = null; this.touch(p); }
       this.version++;

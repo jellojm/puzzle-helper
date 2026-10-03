@@ -30,6 +30,13 @@
       <span id="modeHint"></span>
     </header>
     <div id="banner" hidden></div>
+    <div id="frameBar" hidden>
+      <span>Hold the phone up so the <b>whole border</b> is in view, then tap Capture.</span>
+      <div class="teach-actions">
+        <button id="frameBarCancel">Cancel</button>
+        <button id="frameShot" class="strong">Capture</button>
+      </div>
+    </div>
     <div id="teachBar" hidden>
       <span id="teachText">Tap bare table in a few spots — every different surface (cloth, wood, tile, glass, shadow).</span>
       <div class="teach-actions">
@@ -78,6 +85,7 @@
           <strong id="selTitle">Piece</strong>
           <span id="selSub"></span>
         </div>
+        <button id="findPeek" class="link" hidden>Show spot</button>
         <button id="closeFind" class="icon-btn" aria-label="Close">✕</button>
       </div>
       <div id="edgeRows"></div>
@@ -95,7 +103,10 @@
       <div class="menu-actions">
         <button id="snapBtn">Catalog from a photo</button>
         <button id="tidyBtn">Tidy up the catalog</button>
+        <button id="frameBtn">Mark the finished border</button>
+        <button id="frameForget" hidden>Forget the marked border</button>
       </div>
+      <p class="muted small">Once the border is assembled, mark it from high enough that the whole border is in view: then a selected piece's real spot inside it is shown on the camera view.</p>
       <p class="muted small">Folds scan groups back together when the same piece was catalogued twice after losing tracking, and drops blobs that never read as pieces.</p>
       <label class="row"><input id="idleToggle" type="checkbox" checked> Pause the camera when the phone is left still</label>
       <label class="row">Background sensitivity
@@ -197,6 +208,20 @@
       <button id="boxRetake" class="link" hidden>Retake</button>
     </div>
     <input id="boxInput" type="file" accept="image/*" hidden>
+  </section>
+
+  <section id="frameModal" class="screen" hidden>
+    <div class="box-head">
+      <button id="frameCancel" class="link">Cancel</button>
+      <strong>Mark the border</strong>
+      <button id="frameUse" class="link strong">Use</button>
+    </div>
+    <div id="frameBody"><canvas id="frameCanvas"></canvas></div>
+    <div class="frame-controls">
+      <canvas id="frameBox"></canvas>
+      <p class="small">Drag each dot onto the <b>outer corner</b> of the assembled border that matches the same number on the box picture.</p>
+      <button id="frameTurn" class="link">Turn numbers ↻</button>
+    </div>
   </section>
 
   <script src="js/vision/flow.js"></script>

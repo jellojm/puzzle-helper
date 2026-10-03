@@ -6,7 +6,7 @@
 'use strict';
 
 const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
-const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine'];
+const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'frame', 'engine'];
 
 let engine = null;
 const recent = []; // recent frame timings
@@ -76,7 +76,8 @@ async function loadState() {
   const box = await tx('meta', 'readonly', (s) => s.get('box'));
   const settings = await tx('meta', 'readonly', (s) => s.get('settings'));
   const feedback = await tx('meta', 'readonly', (s) => s.get('feedback'));
-  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [] };
+  const pframe = await tx('meta', 'readonly', (s) => s.get('pframe'));
+  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null };
 }
 function scheduleSave() {
   if (saveTimer || !db) return;
@@ -137,6 +138,10 @@ async function init(msg) {
     const st = await loadState();
     engine.importState(st);
     engine.fbLog = Array.isArray(st.feedback) ? st.feedback : [];
+    // the marked border, if it was marked on this box's grid
+    if (st.pframe && engine.box && st.pframe.cols === engine.box.cols && st.pframe.rows === engine.box.rows) {
+      try { engine.pframe = PH.PuzzleFrame.fromJSON(st.pframe); } catch (_) { /* old format: mark again */ }
+    }
     if (st.settings) {
       if (st.settings.minDE) engine.opts.minDE = st.settings.minDE;
       engine.taught = st.settings.taught || [];
@@ -144,7 +149,7 @@ async function init(msg) {
   } catch (e) {
     post({ type: 'error', message: 'Storage unavailable; the catalog will not be saved (' + e.message + ')' });
   }
-  post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo() });
+  post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo(), border: !!engine.pframe });
   post({ type: 'feedbackStats', stats: engine.feedbackStats() }); // running match accuracy in More
 }
 function settingsInfo() { return { minDE: engine.opts.minDE, taught: engine.taught.length }; }
@@ -192,8 +197,8 @@ const handlers = {
     // Real piece side (mm) from the finished size; else Engine.pieceMM() uses a typical one.
     if (msg.sizeCm) box.pieceMM = Math.sqrt((msg.sizeCm[0] * 10 * msg.sizeCm[1] * 10) / (box.cols * box.rows));
     msg.bitmap.close();
-    engine.setBox(box);
-    if (db) await tx('meta', 'readwrite', (s) => s.put(box, 'box'));
+    engine.setBox(box); // also forgets the marked border (it was on the old grid)
+    if (db) { await tx('meta', 'readwrite', (s) => s.put(box, 'box')); await tx('meta', 'readwrite', (s) => s.delete('pframe')); }
     post({ type: 'box', box: boxInfo() });
     scheduleSave();
   },
@@ -304,6 +309,9 @@ const handlers = {
       // WebAssembly heap: grows without bound if OpenCV Mats leak.
       wasmHeapMB: PH.cv && PH.cv.HEAP8 ? +(PH.cv.HEAP8.buffer.byteLength / 1048576).toFixed(1) : null,
       cornerDoubts: [...doubt],
+      border: engine.pframe ? { features: engine.pframe.feat.n, tries: engine.pfTries || 0, found: engine.pfFound || 0,
+        lastMatch: engine.pframe.lastMatch || null, lastInliers: engine.pfLoc ? engine.pfLoc.inliers || 0 : 0,
+        lastFoundSecAgo: engine.pfLoc && engine.pfLoc.H ? Math.round((performance.now() - engine.pfLoc.t) / 1000) : null } : null,
     };
     // Catalog shape at a glance (the full list is below).
     const all = [...engine.pieces.values()];
@@ -355,6 +363,18 @@ const handlers = {
     await saveSettings();
     post({ type: 'taught', count: 0 });
   },
+  async frameMark(msg) {
+    const src = bitmapSource(msg.bitmap);
+    const r = engine.setPuzzleFrame(src, { tilt: msg.tilt }, msg.corners);
+    msg.bitmap.close();
+    if (r.ok && db) await tx('meta', 'readwrite', (s) => s.put(engine.pframe.toJSON(), 'pframe'));
+    post({ type: 'frameMarked', ok: r.ok, why: r.why, features: r.features });
+  },
+  async frameClear() {
+    engine.clearPuzzleFrame();
+    if (db) await tx('meta', 'readwrite', (s) => s.delete('pframe'));
+    post({ type: 'frameMarked', ok: false, cleared: true });
+  },
   async reset(msg) {
     const keepBox = msg.keepBox ? engine.box : null;
     engine.reset();
@@ -366,6 +386,7 @@ const handlers = {
       await tx('pieces', 'readwrite', (s) => s.clear());
       await tx('meta', 'readwrite', (s) => s.delete('feedback')); // the answer key belongs to the old catalog
       if (!keepBox) await tx('meta', 'readwrite', (s) => s.delete('box'));
+      await tx('meta', 'readwrite', (s) => s.delete('pframe')); // a new puzzle has its own border
     }
     post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo() });
     post({ type: 'feedbackStats', stats: engine.feedbackStats() });

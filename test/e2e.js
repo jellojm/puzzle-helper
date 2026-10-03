@@ -178,6 +178,37 @@ function writePng(file, mat) {
     check('Border button lights up corners + edges and toggles off', borderOn.pressed === 'true' && /border pieces/.test(borderOn.toast) && borderOff === 'false', `${borderOn.toast} | off: ${borderOff}`);
     check('Snap is off the toolbar (kept under More)', await page.evaluate(() => !document.querySelector('#toolbar #snapBtn') && !!document.querySelector('#menu #snapBtn')));
 
+    // Mark the finished border: aim, capture, Use (the default corners are
+    // fine here: what matters is that the view is learned and found again).
+    await page.click('#menuBtn');
+    await page.click('#frameBtn');
+    await page.waitForSelector('#frameBar:not([hidden])', { timeout: 5000 });
+    await page.waitForTimeout(800);
+    await page.click('#frameShot');
+    const modal = await page.waitForSelector('#frameModal:not([hidden])', { timeout: 5000 }).then(() => true).catch(() => false);
+    const canvasW = await page.evaluate(() => document.getElementById('frameCanvas').clientWidth);
+    await page.screenshot({ path: path.join(OUT, 'e2e-border-mark.png') });
+    check('Mark border: camera still with 4 numbered corners', modal && canvasW > 100, `canvas ${canvasW}px wide`);
+    await page.click('#frameUse');
+    const marked = await page.waitForFunction(() => /Border marked/.test(document.getElementById('toast').textContent), null, { timeout: 15000 }).then(() => true).catch(() => false);
+    check('Mark border: border marked', marked, await page.textContent('#toast'));
+    const seen = await page.waitForFunction(() => { const b = window.__phBorder(); return b && b.visible; }, null, { timeout: 15000, polling: 200 }).then(() => true).catch(() => false);
+    check('Mark border: found again in the live view', seen, JSON.stringify(await page.evaluate(() => window.__phBorder())).slice(0, 120));
+    await page.evaluate(() => window.__phSelectStatus('placed'));
+    const spot = await page.waitForFunction(() => { const b = window.__phBorder(); return b && b.target; }, null, { timeout: 15000, polling: 200 }).then(() => true).catch(() => false);
+    check('Mark border: a selected piece gets its spot inside the border', spot, JSON.stringify(await page.evaluate(() => window.__phBorder())).slice(0, 120));
+    const peekShown = await page.evaluate(() => !document.getElementById('findPeek').hidden);
+    if (peekShown) await page.click('#findPeek');
+    await page.waitForTimeout(500);
+    const panelH = await page.evaluate(() => document.getElementById('findPanel').getBoundingClientRect().height);
+    await page.screenshot({ path: path.join(OUT, 'e2e-border-spot.png') });
+    check('Mark border: "Show spot" folds the piece panel out of the way', peekShown && panelH < 140, `panel ${Math.round(panelH)}px tall`);
+    await page.click('#closeFind').catch(() => {});
+    await page.click('#menuBtn');
+    const forgetShown = await page.evaluate(() => !document.getElementById('frameForget').hidden);
+    await page.click('#frameForget');
+    check('Mark border: can be forgotten', forgetShown);
+
     // Send report: in a desktop browser the files are downloaded.
     await page.click('#menuBtn');
     const dls = [];

@@ -134,6 +134,8 @@ export function drawOverlay(ctx, res, M, opts) {
     ctx.setLineDash([]);
   }
 
+  if (res.pframe && res.pframe.visible) drawPuzzleFrame(ctx, res.pframe, M, t);
+
   // Highlights: on-screen ring, off-screen arrows at the edge.
   // No ctx.shadowBlur anywhere — it is re-rasterised per shape and is by far
   // the most expensive thing a 2D canvas can do on a phone. A translucent
@@ -175,6 +177,42 @@ export function drawOverlay(ctx, res, M, opts) {
     }
   }
   ctx.globalAlpha = 1;
+}
+
+// The marked border (js/vision/frame.js) located in this view: its outline,
+// and the selected piece's spot inside it (an arrow at the edge if off screen).
+function drawPuzzleFrame(ctx, F, M, t) {
+  const quadPath = (q) => {
+    ctx.beginPath();
+    q.forEach(([x, y], i) => { const [sx, sy] = M.toScreen(x, y); if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
+    ctx.closePath();
+  };
+  ctx.setLineDash([10, 8]);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+  quadPath(F.quad);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  const T = F.target;
+  if (!T) return;
+  const quads = T.quads || [T.quad];
+  const pulse = 0.6 + 0.4 * Math.sin(t * 5);
+  let cx = 0, cy = 0, n = 0;
+  for (const q of quads) {
+    quadPath(q);
+    ctx.globalAlpha = 0.25 + 0.25 * pulse;
+    ctx.fillStyle = '#ff4fd8';
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#ff4fd8';
+    ctx.stroke();
+    for (const [x, y] of q) { cx += x; cy += y; n++; }
+  }
+  cx /= n; cy /= n;
+  const [sx, sy] = M.toScreen(cx, cy);
+  if (!(sx >= 0 && sy >= 0 && sx <= M.cw && sy <= M.ch)) arrow(ctx, M, { x: cx, y: cy }, '#ff4fd8');
+  else if (!T.quads) badge(ctx, sx, sy - 26, '⌂', '#ff4fd8');
 }
 
 function badge(ctx, x, y, text, color, ring) {
