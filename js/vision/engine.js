@@ -70,8 +70,9 @@
       return p;
     }
     counts() {
-      let shaped = 0, placed = 0, located = 0, sections = 0, pieces = 0, border = 0, corner = 0;
+      let shaped = 0, placed = 0, located = 0, sections = 0, pieces = 0, border = 0, corner = 0, cornerDoubt = 0;
       const islands = new Set();
+      const doubt = this.cornerDoubts();
       for (const p of this.pieces.values()) {
         if (p.kind === 'section') { sections++; continue; }
         pieces++;
@@ -79,12 +80,132 @@
         if (p.t2 && p.t2.conf >= 0.35) placed++;
         if (p.pos) { located++; islands.add(p.island); }
         const f = edgeFlags(p);
-        if (f.corner) corner++; else if (f.border) border++;
+        if (f.corner) { if (doubt.has(p.id)) cornerDoubt++; else corner++; } else if (f.border) border++;
       }
       // `islands` is how many disconnected scan groups the table map is in.
       // More than a few means tracking keeps breaking and the same physical
       // pieces are being catalogued more than once.
-      return { pieces, sections, shaped, placed, located, border, corner, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
+      return { pieces, sections, shaped, placed, located, border, corner, cornerDoubt, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
+    }
+
+    /**
+     * A puzzle has exactly 4 corner pieces, one per corner spot of the box.
+     * Corner-shaped pieces placed on the same corner spot compete: the most
+     * confident (box placement, corner quality, times seen) is "the" corner,
+     * the rest are doubtful (a duplicate that couldn't be merged, or a piece
+     * whose straight edges were misread). Returns the set of doubtful ids.
+     */
+    cornerDoubts() {
+      const doubt = new Set();
+      if (!this.box) return doubt;
+      const { cols, rows } = this.box;
+      const isCornerCell = (c, r) => (c === 0 || c === cols - 1) && (r === 0 || r === rows - 1);
+      const best = new Map();
+      for (const p of this.pieces.values()) {
+        if (p.kind === 'section' || !edgeFlags(p).corner || !p.t2 || !p.t2.cands.length || p.t2.conf < 0.35) continue;
+        const c = p.t2.cands[0];
+        if (!isCornerCell(c.col, c.row)) { doubt.add(p.id); continue; } // corner shape but placed mid-edge: misread
+        const key = c.row * cols + c.col;
+        const score = p.t2.conf + 0.5 * Math.min(1, (p.t1.cornerScore || 0) / 0.1) + 0.1 * Math.min(5, p.t1.nObs || 1);
+        const cur = best.get(key);
+        if (!cur) best.set(key, { p, score });
+        else if (score > cur.score) { doubt.add(cur.p.id); best.set(key, { p, score }); }
+        else doubt.add(p.id);
+      }
+      return doubt;
+    }
+
+    /**
+     * Duplicate clean-up keyed on the box picture: one spot holds one piece.
+     * Pieces placed on the same spot whose outline and print match are the
+     * same physical piece (catalogued twice after tracking broke): merge
+     * them. When >= 3 such pairs link two scan islands, the islands are
+     * aligned and joined too. budgetMs limits the work (live scanning);
+     * Infinity = all (Tidy up). Returns {merged, islands}.
+     */
+    dedupeByCell(budgetMs) {
+      if (!this.box) return { merged: 0, islands: 0 };
+      const end = budgetMs === Infinity ? Infinity : now() + budgetMs;
+      const groups = new Map();
+      for (const p of this.pieces.values()) {
+        if (p.kind === 'section' || !p.t1 || !p.t2 || !p.t2.cands.length || p.t2.conf < 0.35) continue;
+        const c = p.t2.cands[0], key = c.row * this.box.cols + c.col;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(p);
+      }
+      const keys = [...groups.keys()].filter((k) => groups.get(k).length > 1);
+      // resume where the last (budgeted) pass stopped
+      keys.sort((a, b) => a - b);
+      const start = this.dedupeCursor || 0;
+      const order = keys.filter((k) => k >= start).concat(keys.filter((k) => k < start));
+      const links = new Map(); // "islA>islB" -> [{src: posB, dst: posA}]
+      let merged = 0;
+      for (const key of order) {
+        if (now() > end) { this.dedupeCursor = key; break; }
+        const g = groups.get(key).filter((p) => this.pieces.has(p.id));
+        for (let i = 0; i < g.length; i++) for (let j = i + 1; j < g.length; j++) {
+          const A = g[i], B = g[j];
+          if (!this.pieces.has(A.id) || !this.pieces.has(B.id)) continue;
+          const m = PH.samePiece(A.t1, B.t1);
+          if (!m.ok) continue;
+          const keep = (A.t1.nObs || 1) >= (B.t1.nObs || 1) ? A : B, drop = keep === A ? B : A;
+          if (keep.pos && drop.pos && keep.island !== drop.island) {
+            const k = keep.island + '>' + drop.island;
+            if (!links.has(k)) links.set(k, []);
+            links.get(k).push({ src: drop.pos, dst: keep.pos });
+          }
+          PH.fuseShapes(keep.t1, drop.t1, keep === A ? m.r : (4 - m.r) % 4);
+          if (!keep.pos && drop.pos) { keep.pos = drop.pos; keep.island = drop.island; }
+          keep.wrong = [...new Set(keep.wrong.concat(drop.wrong))];
+          for (let k = 0; k < 4; k++) keep.joined[k] = keep.joined[k] || drop.joined[k];
+          this.touch(keep);
+          this.removePiece(drop.id);
+          merged++;
+        }
+      }
+      if (now() <= end) this.dedupeCursor = 0;
+      // Join islands linked by >= 3 consistent duplicate pairs.
+      let joinedIslands = 0;
+      const unitT = this.unitTable() || 1;
+      for (const [k, pairs] of links) {
+        if (pairs.length < 3) continue;
+        const [ia, ib] = k.split('>').map(Number);
+        if (ia === ib) continue;
+        const r = PH.simRansac(pairs, unitT * 1.0, 100, this.rnd);
+        if (!r || r.inliers.length < 3) continue;
+        for (const p of this.pieces.values()) {
+          if (p.island === ib && p.pos) { p.pos = PH.simApply(r.T, p.pos[0], p.pos[1]); p.island = ia; this.touch(p); }
+        }
+        if (this.island === ib) { this.island = ia; if (this.pose) this.pose = composeSim(r.T, this.pose); }
+        joinedIslands++;
+      }
+      // After islands are joined, copies that slipped through (placed on a
+      // different spot, or a weaker shape match) now sit at the same table
+      // position: same island, within half a piece, and alike -> merge.
+      if (joinedIslands || budgetMs === Infinity) {
+        const list = [...this.pieces.values()].filter((p) => p.kind !== 'section' && p.pos);
+        const cell = unitT, grid = new Map();
+        const key = (x, y, isl) => isl + ':' + Math.floor(x / cell) + ':' + Math.floor(y / cell);
+        for (const p of list) { const k = key(p.pos[0], p.pos[1], p.island); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(p); }
+        for (const A of list) {
+          if (!this.pieces.has(A.id)) continue;
+          const gx = Math.floor(A.pos[0] / cell), gy = Math.floor(A.pos[1] / cell);
+          for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+            for (const B of grid.get(A.island + ':' + (gx + dx) + ':' + (gy + dy)) || []) {
+              if (B === A || !this.pieces.has(B.id) || !this.pieces.has(A.id) || B.id < A.id) continue;
+              if (Math.hypot(A.pos[0] - B.pos[0], A.pos[1] - B.pos[1]) > unitT * 0.5) continue;
+              const alike = A.t1 && B.t1 ? PH.samePiece(A.t1, B.t1, PH.ANCHOR_SHAPE * 1.5).ok || PH.fpSimilarity(A.fp, B.fp) > 0.85 : PH.fpSimilarity(A.fp, B.fp) > 0.85;
+              if (!alike) continue;
+              const keep = (A.t1 ? A.t1.nObs || 1 : 0) >= (B.t1 ? B.t1.nObs || 1 : 0) ? A : B, drop = keep === A ? B : A;
+              if (!keep.t1 && drop.t1) { keep.t1 = drop.t1; keep.t2 = drop.t2; }
+              keep.wrong = [...new Set(keep.wrong.concat(drop.wrong))];
+              this.touch(keep); this.removePiece(drop.id); merged++;
+            }
+          }
+        }
+      }
+      if (merged) { this.version++; this.matchCache.clear(); }
+      return { merged, islands: joinedIslands };
     }
 
     // ---------- tracking ----------
@@ -379,6 +500,8 @@
       if (ok) { this.lost = 0; this.assign(dets, unitF, proc); }
       const t2 = now();
       const work = this.runQueue(dets, t0 + this.opts.budgetMs);
+      // Background duplicate clean-up, a few ms every ~20 frames.
+      if ((this.frameNo = (this.frameNo || 0) + 1) % 20 === 0) this.dedupeByCell(3);
       this.tracks = dets.map((d) => ({ id: d.id, x: d.cx, y: d.cy, fp: d.fp }));
       const out = this.output(dets, proc);
       // Lets the page map straightened coordinates back onto the camera view.
@@ -927,10 +1050,11 @@
     filterIds() {
       if (!this.filter) return [];
       const out = [];
+      const doubt = this.filter === 'corner' ? this.cornerDoubts() : null;
       for (const p of this.pieces.values()) {
         if (p.kind === 'section') continue;
         const f = edgeFlags(p);
-        const hit = this.filter === 'corner' ? f.corner
+        const hit = this.filter === 'corner' ? f.corner && !doubt.has(p.id)
           : this.filter === 'border' ? f.border && !f.corner
             : this.filter === 'unplaced' ? !!p.t1 && !(p.t2 && p.t2.conf >= 0.35)
               : this.filter === 'unread' ? !p.t1
@@ -1008,6 +1132,9 @@
      *  it changed so the UI can say so. */
     tidy() {
       const before = this.counts();
+      // 0. One spot on the box holds one piece: merge same-spot duplicates
+      //    first, so the pairs they form can align and join the islands.
+      const dd = this.dedupeByCell(Infinity);
       // 1. Merge islands: a piece whose shape matches a piece in another island
       //    is the same physical piece seen after tracking broke.
       const shaped = [...this.pieces.values()].filter((p) => p.t1 && p.kind !== 'section');
@@ -1039,7 +1166,7 @@
       }
       this.matchCache.clear();
       this.selection = null; this.region = null; this.pairSel = null;
-      return { removed: dropped.length, before, after: this.counts() };
+      return { removed: dropped.length + dd.merged, before, after: this.counts(), joinedIslands: dd.islands };
     }
 
     feedback(f) {
@@ -1179,6 +1306,11 @@
         del: ids.filter((id) => !this.pieces.has(id)),
       };
     }
+  }
+
+  // Compose similarity transforms: (A o B)(x) = A(B(x)).
+  function composeSim(A, B) {
+    return { a: A.a * B.a - A.b * B.b, b: A.a * B.b + A.b * B.a, tx: A.a * B.tx - A.b * B.ty + A.tx, ty: A.b * B.tx + A.a * B.ty + A.ty };
   }
 
   /** Flat-edge summary of a piece: how many straight edges it has, and whether

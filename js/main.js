@@ -2,7 +2,7 @@
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.7.1';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
 
@@ -422,7 +422,8 @@ function updateStats(c, tracking) {
   if (tilt > 50) $('modeHint').textContent = 'Tilt the phone less (under ~45°)';
   else if (S.ready && $('modeHint').textContent.startsWith('Tilt the phone')) $('modeHint').textContent = modeHint(S.mode);
   $('menuStats').textContent = `${c.pieces} pieces catalogued, ${c.shaped} shapes read, ${c.placed} placed on the box, ${c.located} on the table map`
-    + (c.islands > 1 ? `, in ${c.islands} scan groups.` : '.');
+    + (c.islands > 1 ? `, in ${c.islands} scan groups.` : '.')
+    + (c.cornerDoubt ? ` ${c.cornerDoubt} more piece${c.cornerDoubt > 1 ? 's look' : ' looks'} like a corner but a better one already holds that corner (duplicate or misread) — Tidy up merges duplicates.` : '');
   // The catalog can't honestly hold more pieces than the puzzle has. When it
   // does, tracking broke and the same pieces were catalogued twice.
   const warn = $('countWarn');
