@@ -10,11 +10,12 @@
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
   // Estimate background Lab as the mean of the most populated coarse bin.
-  PH.estimateBackground = function (lab, w, h) {
+  PH.estimateBackground = function (lab, w, h, valid) {
     const counts = new Uint32Array(8 * 32 * 32);
     const step = 3;
     for (let y = 0; y < h; y += step) {
       for (let x = 0; x < w; x += step) {
+        if (valid && !valid[y * w + x]) continue;
         const i = (y * w + x) * 3;
         counts[((lab[i] >> 5) << 10) | ((lab[i + 1] >> 3) << 5) | (lab[i + 2] >> 3)]++;
       }
@@ -24,13 +25,69 @@
     let sL = 0, sa = 0, sb = 0, n = 0;
     for (let y = 0; y < h; y += step) {
       for (let x = 0; x < w; x += step) {
+        if (valid && !valid[y * w + x]) continue;
         const i = (y * w + x) * 3;
         if ((((lab[i] >> 5) << 10) | ((lab[i + 1] >> 3) << 5) | (lab[i + 2] >> 3)) === best) {
           sL += lab[i]; sa += lab[i + 1]; sb += lab[i + 2]; n++;
         }
       }
     }
-    return { L: sL / n, a: sa / n, b: sb / n, frac: (n * step * step) / (w * h) };
+    const nValid = valid ? valid.reduce((a, v) => a + v, 0) : w * h;
+    return { L: sL / n, a: sa / n, b: sb / n, frac: (n * step * step) / Math.max(1, nValid) };
+  };
+
+  /**
+   * Even out lamp shadows / uneven light. Estimates how bright the bare board
+   * is at every spot (a smooth surface with the pieces removed), then scales
+   * lightness so the whole board reads like its lit part. Shadows scale
+   * brightness, so the correction is a ratio. How the pieces are removed
+   * depends on the board: brighter than the pieces (white board) -> remove
+   * darker blobs (closing); darker (black felt) -> remove brighter blobs
+   * (opening); in between -> median. Returns null when the light is already
+   * even (nothing to fix).
+   */
+  PH.flattenLight = function (lab, w, h, valid, unitArea, boardL) {
+    const cv = PH.cv;
+    const n = w * h;
+    const L = new cv.Mat(h, w, cv.CV_8UC1), Ld = L.data;
+    let darker = 0, brighter = 0, cnt = 0;
+    for (let p = 0, i = 0; p < n; p++, i += 3) {
+      Ld[p] = lab[i];
+      if (valid && !valid[p]) continue;
+      cnt++;
+      if (lab[i] < boardL - 12) darker++; else if (lab[i] > boardL + 12) brighter++;
+    }
+    const s = Math.max(1, Math.round(Math.max(w, h) / 120));
+    const sw = Math.max(8, Math.round(w / s)), sh = Math.max(8, Math.round(h / s));
+    const sm = new cv.Mat();
+    cv.resize(L, sm, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+    const side = unitArea ? Math.sqrt(unitArea) : Math.max(w, h) / 10;
+    const kmax = 2 * Math.floor((Math.min(sw, sh) - 1) / 2) + 1;
+    const k = Math.min(kmax, Math.max(5, Math.round((1.6 * side) / s) | 1));
+    if (brighter < cnt * 0.1) {
+      const ker = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(k, k));
+      cv.morphologyEx(sm, sm, cv.MORPH_CLOSE, ker); ker.delete();
+    } else if (darker < cnt * 0.1) {
+      const ker = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(k, k));
+      cv.morphologyEx(sm, sm, cv.MORPH_OPEN, ker); ker.delete();
+    } else {
+      cv.medianBlur(sm, sm, Math.min(k, 255));
+    }
+    cv.GaussianBlur(sm, sm, new cv.Size(0, 0), Math.max(1, k / 3));
+    // How uneven is the light? 10th..90th percentile of the surface.
+    const sv = Array.from(sm.data).sort((a, b) => a - b);
+    const lo = sv[Math.floor(sv.length * 0.1)], hi = sv[Math.floor(sv.length * 0.9)];
+    if (hi - lo < hi * 0.08) { [L, sm].forEach((m) => m.delete()); return null; }
+    const big = new cv.Mat();
+    cv.resize(sm, big, new cv.Size(w, h), 0, 0, cv.INTER_LINEAR);
+    const ref = hi, bd = big.data;
+    const out = new Uint8Array(lab);
+    for (let p = 0, i = 0; p < n; p++, i += 3) {
+      const v = (lab[i] * ref) / Math.max(16, bd[p]);
+      out[i] = v > 255 ? 255 : v;
+    }
+    [L, sm, big].forEach((m) => m.delete());
+    return { lab: out, ref, spread: (hi - lo) / hi };
   };
 
   // Mass-weighted mode of log2(area), quarter-octave bins: the size that most
@@ -130,14 +187,39 @@
     const mark = (k) => { if (T) { const t = now(); T[k] = (T[k] || 0) + (t - tm); tm = t; } };
     const lab = PH.rgbaToLab(img.data, w, h);
     mark('lab');
-    const est = PH.estimateBackground(lab, w, h);
+    // Pixels outside the real camera image (tilt correction): alpha 0.
+    let valid = null;
+    if (img.invalid) { valid = new Uint8Array(w * h); for (let p = 0; p < w * h; p++) valid[p] = img.data[4 * p + 3] ? 1 : 0; }
+    let est = PH.estimateBackground(lab, w, h, valid);
     mark('bgEst');
+    // Taught colours that are all near-neutral and alike are just "the board"
+    // (e.g. its lit and shadowed parts): handle it as a plain board, which
+    // copes with lighting changes, instead of matching those exact colours.
+    const taught = opts.taught || [];
+    const taughtPlain = taught.length > 0 && taught.every((t) => Math.hypot(t.a - 128, t.b - 128) < 22) &&
+      taught.every((t) => taught.every((u) => Math.hypot(t.a - u.a, t.b - u.b) < 12));
+    const taughtActive = taught.length > 0 && !taughtPlain;
+    // Shadow-evened lightness for the plain-board model (colour fingerprints
+    // and taught/palette tables keep using the real colours).
+    let labS = lab, flat = null;
+    if (opts.flatten !== false) {
+      flat = PH.flattenLight(lab, w, h, valid, opts.unitArea, est.L);
+      if (flat) { labS = flat.lab; est = PH.estimateBackground(labS, w, h, valid); }
+    }
+    mark('flatten');
     // A plain cloth (one dominant color that isn't a puzzle color) is handled
     // more precisely by the distance model; the palette table is for mixed
-    // tables. Taught colors always win.
-    const plainCloth = est.frac >= 0.2 && !(opts.taught && opts.taught.length) &&
+    // tables. (Non-plain) taught colours win.
+    let plainCloth = est.frac >= 0.2 && !taughtActive &&
       (!opts.palette || opts.palette[PH.coarseBin(est.L | 0, est.a | 0, est.b | 0)] * 8 < est.frac);
-    const lut = plainCloth ? null : PH.buildBgLut(lab, w * h, opts);
+    let lut = plainCloth ? null : PH.buildBgLut(lab, w * h, taughtActive ? opts : Object.assign({}, opts, { taught: null }));
+    // Stale taught colours (the light changed since they were tapped): if they
+    // explain under a fifth of the frame, use the plain-board model this frame.
+    if (lut && taughtActive) {
+      let bgc = 0, m = 0;
+      for (let p = 0, i = 0; p < w * h; p += 7, i += 21) { if (valid && !valid[p]) continue; m++; if (lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], lut.corr)]) bgc++; }
+      if (bgc < m * 0.2 && est.frac >= 0.2) { lut = null; plainCloth = true; }
+    }
     mark('lut');
     let bg = est;
     if (opts.bg && opts.bgSmooth) {
@@ -154,9 +236,9 @@
     const dd = dist.data;
     const ls = PH.L_SCALE * lightW;
     for (let p = 0, i = 0; p < w * h; p++, i += 3) {
-      const dL = (lab[i] - bg.L) * ls, da = lab[i + 1] - bg.a, db = lab[i + 2] - bg.b;
+      const dL = (labS[i] - bg.L) * ls, da = labS[i + 1] - bg.a, db = labS[i + 2] - bg.b;
       const d = 2 * Math.sqrt(dL * dL + da * da + db * db);
-      dd[p] = d > 255 ? 255 : d;
+      dd[p] = valid && !valid[p] ? 0 : d > 255 ? 255 : d;
     }
     mark('dist');
     // Threshold from the cloth's own noise: the background is the large peak
@@ -167,7 +249,7 @@
     let thresh;
     if (lut) {
       // Mixed background: classify each pixel by its color bin.
-      for (let p = 0, i = 0; p < w * h; p++, i += 3) dd[p] = lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], lut.corr)] ? 0 : 255;
+      for (let p = 0, i = 0; p < w * h; p++, i += 3) dd[p] = lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], lut.corr)] || (valid && !valid[p]) ? 0 : 255;
       thresh = 128;
     } else {
       const otsu = cv.threshold(dist, mask, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
@@ -198,6 +280,7 @@
       cv.convertScaleAbs(gx, ax, 1 / 16); cv.convertScaleAbs(gy, ay, 1 / 16);
       cv.addWeighted(ax, 0.5, ay, 0.5, 0, mag);
       cv.threshold(mag, mag, opts.boundaryT || 10, 255, cv.THRESH_BINARY);
+      if (valid) for (let p = 0; p < w * h; p++) if (!valid[p]) mag.data[p] = 0; // no edges in the filled-in corners
       if (opts.boundary === 'fill') {
         // Close the edge rings and keep only what they enclose: a ring that
         // doesn't close adds nothing (no stray edge fragments), a closed one
@@ -315,7 +398,7 @@
     noHier.delete();
     contours.delete(); hier.delete(); dist.delete(); mask.delete(); k3.delete(); k5.delete();
     mark('dets');
-    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, unitArea: unitA, unitOwn, unitN: like.length };
+    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, unitArea: unitA, unitOwn, unitN: like.length, flat: flat && { ref: flat.ref, spread: flat.spread } };
   };
 
   /**

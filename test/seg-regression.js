@@ -23,13 +23,13 @@ const { robustUnit, classify } = require('./seg-metrics');
 //     white-1 20/8/0, white-2 21/10/0, white-close-1 14/8/0, white-close-2 9/4/0
 //   WP1 stable unit + WP2 boundary fill on still frames (2026-10-03):
 //     white-1 31/2/0, white-2 35/1/0, white-close-1 13/4/0, white-close-2 7/2/0
-//   The close-ups lose pieces that sit in a lamp shadow (the shadowed table
-//   becomes one big foreground blob); that is a separate, open issue.
+//   + shadow evening (flattenLight) and plain-board taught colours (2026-10-03):
+//     white-1 35/2/0, white-2 36/2/0, white-close-1 16/4/0, white-close-2 14/4/0
 const CASES = [
-  { file: 'white-1.jpg', minGood: 29, maxFrag: 3, maxMerged: 1 },
-  { file: 'white-2.jpg', minGood: 32, maxFrag: 2, maxMerged: 1 },
-  { file: 'white-close-1.jpg', minGood: 12, maxFrag: 5, maxMerged: 1 },
-  { file: 'white-close-2.jpg', minGood: 6, maxFrag: 3, maxMerged: 1 },
+  { file: 'white-1.jpg', minGood: 32, maxFrag: 3, maxMerged: 1 },
+  { file: 'white-2.jpg', minGood: 33, maxFrag: 3, maxMerged: 1 },
+  { file: 'white-close-1.jpg', minGood: 14, maxFrag: 5, maxMerged: 1 },
+  { file: 'white-close-2.jpg', minGood: 12, maxFrag: 5, maxMerged: 1 },
 ];
 
 (async () => {

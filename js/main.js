@@ -2,9 +2,15 @@
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.7.0';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
+
+// Things under the top bar sit below its real height (it wraps on long messages).
+new ResizeObserver(() => {
+  const r = $('topbar').getBoundingClientRect();
+  document.documentElement.style.setProperty('--top-h', Math.round(r.bottom) + 'px');
+}).observe($('topbar'));
 
 const S = {
   mode: 'scan',
@@ -172,7 +178,16 @@ function scanningWanted() {
   return S.running && !document.hidden && !S.pickerOpen && !S.idle &&
     $('menu').hidden && $('boxModal').hidden && $('start').hidden;
 }
+// Last real camera view, kept when the camera is switched off (menu, idle)
+// so "Send report" can still include what the camera saw.
+function keepLastFrame() {
+  if (!video.videoWidth || !(video.srcObject || video.currentSrc)) return;
+  const c = S.lastFrame || (S.lastFrame = document.createElement('canvas'));
+  c.width = video.videoWidth; c.height = video.videoHeight;
+  try { c.getContext('2d').drawImage(video, 0, 0); S.lastFrameAt = Date.now(); } catch (_) { /* not ready */ }
+}
 function releaseCamera() {
+  keepLastFrame();
   const st = video.srcObject;
   if (st) for (const t of st.getTracks()) t.stop();
   video.srcObject = null;
@@ -784,9 +799,11 @@ minimap.addEventListener('pointerup', () => {
   if (!mmStart) return;
   let [c0, r0, c1, r1] = S.dragCells;
   if (c0 === c1 && r0 === r1) {
-    // Single tap: toggle the large view, or pick a 3x3 block when already large.
-    if (!minimap.classList.contains('big')) { minimap.classList.add('big'); mmStart = null; S.dragCells = null; drawMinimap(); return; }
-    c0 = Math.max(0, c0 - 1); r0 = Math.max(0, r0 - 1); c1 = Math.min(S.box.cols - 1, c1 + 1); r1 = Math.min(S.box.rows - 1, r1 + 1);
+    // Single tap: small -> enlarge; enlarged -> shrink back out of the way.
+    // (Dragging across it, at either size, lights up pieces from that area.)
+    minimap.classList.toggle('big');
+    mmStart = null; S.dragCells = null; drawMinimap();
+    return;
   }
   mmStart = null; S.dragCells = null;
   minimap.classList.remove('big');
@@ -908,10 +925,14 @@ async function finishReport(workerData, analyzed, boxImg) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const files = [];
   try {
-    if (video.videoWidth) {
-      const c = document.createElement('canvas');
+    // Live camera if it's running, otherwise the view saved when it was switched off.
+    let c = null;
+    if (video.videoWidth && (video.srcObject || video.currentSrc)) {
+      c = document.createElement('canvas');
       c.width = video.videoWidth; c.height = video.videoHeight;
       c.getContext('2d').drawImage(video, 0, 0);
+    } else if (S.lastFrame) c = S.lastFrame;
+    if (c) {
       const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.92));
       if (blob) files.push(new File([blob], `puzzle-report-${stamp}-frame.jpg`, { type: 'image/jpeg' }));
     }

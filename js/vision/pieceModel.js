@@ -20,7 +20,18 @@
     if (lut) {
       for (let p = 0, i = 0; p < w * h; p++, i += 3) dd[p] = lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], lut.corr)] ? 0 : 255;
       threshDE = 64;
-    } else for (let p = 0, i = 0; p < w * h; p++, i += 3) {
+    } else {
+      // The board under this crop may be in shadow while `bg` is the (lit,
+      // shadow-evened) board colour. Lighting is ~constant over one crop, so
+      // take the board's lightness here from the crop's border pixels that
+      // have the board's colour.
+      const Ls = [];
+      const take = (x, y) => { const i = (y * w + x) * 3; if (Math.abs(lab[i + 1] - bg.a) < 10 && Math.abs(lab[i + 2] - bg.b) < 10) Ls.push(lab[i]); };
+      for (let x = 0; x < w; x += 2) { take(x, 0); take(x, h - 1); }
+      for (let y = 0; y < h; y += 2) { take(0, y); take(w - 1, y); }
+      if (Ls.length > (w + h) * 0.3) { Ls.sort((a, b) => a - b); bg = Object.assign({}, bg, { L: Ls[Ls.length >> 1] }); }
+    }
+    if (!lut) for (let p = 0, i = 0; p < w * h; p++, i += 3) {
       const dL = (lab[i] - bg.L) * ls, da = lab[i + 1] - bg.a, db = lab[i + 2] - bg.b;
       const d = 2 * Math.sqrt(dL * dL + da * da + db * db);
       dd[p] = d > 255 ? 255 : d;

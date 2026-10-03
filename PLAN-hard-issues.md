@@ -20,7 +20,10 @@ pale-printed pieces (see `reports/*-frame.jpg`).
 | WP1 | **Done** (828a415) | Running `unitLive` + mass-mode own estimate (≥ 3 blobs, else null). Fragments are never catalogued as new pieces. `test/unit-area.js`: unit within 7%, no duplicate entries |
 | WP2 | **Done** (5f7aeaf) | Boundary fill on still frames, open off. good/frag: white-1 20/8 → 31/2, white-2 21/10 → 35/1, close-1 14/8 → 13/4, close-2 9/4 → 7/2 |
 | WP3–WP7, WP9 | Open | — |
-| **Next (from reports)** | Open | 1) black report frame, 2) tilt-border streaks, 3) lighting-robust background (flatten illumination; taught colours compared on flattened lightness), 4) tilt-path slowdown |
+| Report fixes | **Done** (v0.7.0) | Black report frame (last view kept when the camera is released); tilt-border streaks marked out-of-image (alpha 0) and ignored |
+| Lighting | **Done** (v0.7.0) | `PH.flattenLight` evens shadows (board surface by closing/opening/median at ~1/120 scale, ratio correction; skipped when light is even). Near-neutral, alike taught colours = plain board; stale taught colours (< 20% of frame) fall back per frame. Per-crop board lightness from the crop border in `analyzePiece`. Replays: 13:36 2 → 25 good, 13:42 0 → 29 good; close-2 9 → 14 |
+| UI (owner) | **Done** (v0.7.0) | Tap the enlarged box picture to shrink it; Find buttons wrap (all reachable); top message wraps; banner/debug placed below the top bar's real height |
+| Tilt slowdown on phone | Open | `seg_dist`/`seg_thresh` 15–40x slower only with tilt correction; suspect allocation/GC in `rectifiedSource` — WP5 |
 | **New** | Open | **Lamp shadows on the table**: on both close-ups, the shadowed table area becomes one big foreground blob and swallows the pieces in it. Likely fix: flatten illumination (local background lightness from a large-scale closing/blur of L) before the colour distance |
 
 **Phone reports 13:36–13:42 (v0.6.0, before WP1/WP2 shipped)** — replay any report with

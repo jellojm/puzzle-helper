@@ -179,6 +179,18 @@
         const M = mul3([scale, 0, 0, 0, scale, 0, 0, 0, 1], mul3(H, [1 / si, 0, 0, 0, 1 / si, 0, 0, 0, 1]));
         const out = warp(srcImg, M, ow, oh);
         out.scale = scale;
+        // Corners outside the camera image are filled by stretching the edge
+        // pixels (streaks). Mark them (alpha 0, plus a 2 px seam) so the
+        // segmentation treats them as background instead of as objects.
+        const ones = new cv.Mat(srcImg.h, srcImg.w, cv.CV_8UC1, new cv.Scalar(255));
+        const m = cv.matFromArray(3, 3, cv.CV_64F, M), valid = new cv.Mat();
+        cv.warpPerspective(ones, valid, m, new cv.Size(ow, oh), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(0));
+        const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+        cv.erode(valid, valid, k);
+        let invalid = 0;
+        for (let p = 0; p < ow * oh; p++) if (!valid.data[p]) { out.data[4 * p + 3] = 0; invalid++; }
+        out.invalid = invalid > 0;
+        [ones, m, valid, k].forEach((x) => x.delete());
         return out;
       },
       getCrop(x, y, cw, ch) {
