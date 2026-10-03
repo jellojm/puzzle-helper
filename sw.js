@@ -6,7 +6,7 @@ const SHELL = [
   './', 'index.html', 'css/app.css', 'manifest.json',
   'js/main.js', 'js/overlay.js', 'js/boxSetup.js', 'js/worker.js',
   'js/vision/core.js', 'js/vision/segment.js', 'js/vision/pieceModel.js', 'js/vision/box.js',
-  'js/vision/matcher.js', 'js/vision/engine.js',
+  'js/vision/matcher.js', 'js/vision/rectify.js', 'js/vision/engine.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 const OPENCV = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';

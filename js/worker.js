@@ -6,7 +6,7 @@
 'use strict';
 
 const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
-const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'engine'];
+const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'engine'];
 
 let engine = null;
 const recent = []; // recent frame timings
@@ -131,7 +131,7 @@ const handlers = {
   frame(msg) {
     const src = bitmapSource(msg.bitmap);
     const g0 = performance.now();
-    const out = engine.processFrame(src, { still: msg.still });
+    const out = engine.processFrame(src, { still: msg.still, tilt: msg.tilt });
     out.timings.workerTotal = performance.now() - g0;
     msg.bitmap.close();
     out.type = 'frame';
@@ -142,7 +142,7 @@ const handlers = {
   snap(msg) {
     post({ type: 'status', text: 'Cataloging photo…' });
     const src = bitmapSource(msg.bitmap);
-    const res = engine.processSnap(src);
+    const res = engine.processSnap(src, { tilt: msg.tilt });
     msg.bitmap.close();
     post({ type: 'snap', result: res });
     scheduleSave();

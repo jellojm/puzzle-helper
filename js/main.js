@@ -2,7 +2,7 @@
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.4.0';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
 
@@ -19,6 +19,9 @@ const S = {
   lastSend: 0,
   motion: { rot: 0, acc: 0, t: 0 },
   fps: 0,
+  gravity: null,    // smoothed accelerationIncludingGravity (device axes)
+  fov: 66,          // camera field of view across the long side (degrees)
+  tiltOn: true,
   errors: [],       // recent errors, included in reports
   history: [],      // recent frame timings, included in reports
 };
@@ -150,6 +153,11 @@ async function requestMotion() {
     }
   } catch (_) { /* denied: treat as always still */ }
   window.addEventListener('devicemotion', (e) => {
+    const g = e.accelerationIncludingGravity;
+    if (g && g.x != null) {
+      const k = 0.2, v = [g.x, g.y, g.z];
+      S.gravity = S.gravity ? S.gravity.map((x, i) => x * (1 - k) + v[i] * k) : v;
+    }
     const r = e.rotationRate || {}, a = e.acceleration || {};
     const rot = Math.hypot(r.alpha || 0, r.beta || 0, r.gamma || 0);
     const acc = Math.hypot(a.x || 0, a.y || 0, a.z || 0);
@@ -162,6 +170,23 @@ function isStill() {
   if (performance.now() - S.motion.t > 1500) return true; // no sensor data
   return S.motion.rot < 25 && S.motion.acc < 0.7;
 }
+
+// Gravity direction in camera image coordinates (X right, Y down, Z out of
+// the lens) for the current screen orientation. The sign convention of the
+// sensor doesn't matter: the camera is pointed at the table, so "down" is
+// whichever sign has Z > 0.
+function currentTilt() {
+  if (!S.tiltOn || !S.gravity || performance.now() - S.motion.t > 1500) return null;
+  const [dx, dy, dz] = S.gravity;
+  const ang = ((screen.orientation && screen.orientation.angle) || window.orientation || 0) * Math.PI / 180;
+  const sx = dx * Math.cos(ang) - dy * Math.sin(ang), sup = dx * Math.sin(ang) + dy * Math.cos(ang);
+  let down = [sx, -sup, -dz];
+  if (down[2] < 0) down = down.map((v) => -v);
+  const n = Math.hypot(...down);
+  if (!n) return null;
+  return { down: down.map((v) => v / n), fov: S.fov };
+}
+function tiltDegOf(t) { return t ? Math.acos(Math.min(1, t.down[2])) * 180 / Math.PI : 0; }
 
 async function sendFrame() {
   S.busy = true;
@@ -178,7 +203,8 @@ async function sendFrame() {
   }
   S.grabMs = performance.now() - g0;
   S.lastStill = isStill();
-  W.post({ type: 'frame', bitmap: bmp, still: S.lastStill }, [bmp]);
+  S.lastTilt = currentTilt();
+  W.post({ type: 'frame', bitmap: bmp, still: S.lastStill, tilt: S.lastTilt }, [bmp]);
 }
 
 function loop() {
@@ -214,7 +240,12 @@ function updateStats(c, tracking) {
   if (!c) return;
   const parts = [`${c.pieces} pieces`];
   if (S.box) parts.push(`${c.placed} placed`);
+  const tilt = tiltDegOf(S.lastTilt);
+  if (tilt >= 4) parts.push(`${Math.round(tilt)}° tilt`);
   $('stats').textContent = parts.join(' · ');
+  $('stats').classList.toggle('warn', tilt > 50);
+  if (tilt > 50) $('modeHint').textContent = 'Tilt the phone less (under ~45°)';
+  else if (S.ready && $('modeHint').textContent.startsWith('Tilt the phone')) $('modeHint').textContent = modeHint(S.mode);
   $('menuStats').textContent = `${c.pieces} pieces catalogued, ${c.shaped} shapes read, ${c.placed} placed on the box, ${c.located} on the table map.`;
   const dot = $('trackDot');
   if (tracking !== undefined) {
@@ -243,7 +274,7 @@ function showDebug(m) {
     `seg ${t.seg.toFixed(0)}  map ${t.map.toFixed(0)}  work ${t.work.toFixed(0)}  total ${t.total.toFixed(0)} ms`,
     `shapes +${t.t1}  placed +${t.t2}  dets ${m.dets.length}  island ${m.island}`,
     `bg Lab ${m.bg.L.toFixed(0)},${m.bg.a.toFixed(0)},${m.bg.b.toFixed(0)}  thresh ΔE ${m.thresh.toFixed(1)}`,
-    `still ${isStill()}  rot ${S.motion.rot.toFixed(0)}°/s`,
+    `still ${isStill()}  rot ${S.motion.rot.toFixed(0)}°/s  tilt ${tiltDegOf(S.lastTilt).toFixed(0)}° ${m.rect ? '(corrected)' : ''}`,
   ].join('\n');
 }
 
@@ -256,8 +287,8 @@ function showTaught(n) {
 function sampleVideo(clientX, clientY) {
   if (!S.map || !S.last) return null;
   const r = overlay.getBoundingClientRect();
-  const [fx, fy] = S.map.toFrame(clientX - r.left, clientY - r.top);
-  const vx = Math.round(fx / S.last.scale), vy = Math.round(fy / S.last.scale);
+  const [fx, fy] = S.map.toVideo(clientX - r.left, clientY - r.top);
+  const vx = Math.round(fx), vy = Math.round(fy);
   const c = S.sampler || (S.sampler = document.createElement('canvas'));
   c.width = c.height = 9;
   const g = c.getContext('2d', { willReadFrequently: true });
@@ -449,7 +480,7 @@ minimap.addEventListener('pointerup', () => {
 });
 
 // ---------- snap / box / menu ----------
-$('snapBtn').onclick = () => { endTeaching(); $('snapInput').click(); };
+$('snapBtn').onclick = () => { endTeaching(); S.snapTilt = currentTilt(); $('snapInput').click(); };
 $('snapInput').onchange = async (e) => {
   const f = e.target.files[0];
   e.target.value = '';
@@ -459,7 +490,7 @@ $('snapInput').onchange = async (e) => {
   toast('Cataloging photo…', 15000);
   try {
     const bmp = await createImageBitmap(f, { imageOrientation: 'from-image' });
-    W.post({ type: 'snap', bitmap: bmp }, [bmp]);
+    W.post({ type: 'snap', bitmap: bmp, tilt: S.snapTilt }, [bmp]);
   } catch (err) {
     S.snapping = false;
     toast('Could not read that photo.');
@@ -484,6 +515,14 @@ $('torchToggle').onchange = async (e) => {
     toast('This phone/browser does not allow the flashlight from a web page.');
   }
 };
+$('tiltToggle').onchange = (e) => { S.tiltOn = e.target.checked; saveLocal(); };
+$('fovRange').oninput = (e) => { S.fov = +e.target.value; $('fovVal').textContent = S.fov + '°'; saveLocal(); };
+function saveLocal() { try { localStorage.setItem('ph-view', JSON.stringify({ tiltOn: S.tiltOn, fov: S.fov })); } catch (_) { /* private mode */ } }
+try {
+  const v = JSON.parse(localStorage.getItem('ph-view') || 'null');
+  if (v) { S.tiltOn = v.tiltOn !== false; S.fov = v.fov || 66; }
+} catch (_) { /* ignore */ }
+$('tiltToggle').checked = S.tiltOn; $('fovRange').value = S.fov; $('fovVal').textContent = S.fov + '°';
 $('debugToggle').onchange = (e) => { S.debug = e.target.checked; $('debug').hidden = !S.debug; };
 $('newPuzzle').onclick = () => {
   if (confirm('Forget all catalogued pieces? The box picture is kept.')) { W.post({ type: 'reset', keepBox: true }); closeFind(); }
@@ -519,7 +558,9 @@ async function finishReport(workerData) {
     app: APP_VERSION, time: new Date().toISOString(), userAgent: navigator.userAgent,
     screen: { w: screen.width, h: screen.height, dpr: devicePixelRatio, viewW: innerWidth, viewH: innerHeight },
     video: { w: video.videoWidth, h: video.videoHeight, settings: S.track && S.track.getSettings ? S.track.getSettings() : null },
-    mode: S.mode, fps: S.fps, motion: S.motion, history: S.history, errors: S.errors,
+    mode: S.mode, fps: S.fps, motion: S.motion, gravity: S.gravity, tilt: S.lastTilt, tiltOn: S.tiltOn, fov: S.fov,
+    orientation: (screen.orientation && screen.orientation.angle) || window.orientation || 0,
+    history: S.history, errors: S.errors,
     lastFrame: S.last, selected: S.desc, worker: workerData,
   };
   files.push(new File([JSON.stringify(data)], `puzzle-report-${stamp}.json`, { type: 'application/json' }));

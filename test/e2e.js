@@ -148,6 +148,24 @@ function writePng(file, mat) {
     await page.click('#reportBtn');
     await page.waitForTimeout(4000);
     check('send report produces frame + data files', dls.some((n) => n.endsWith('.json')) && dls.some((n) => n.endsWith('frame.jpg')), dls.join(', '));
+    // Phone tilted ~35°: feed gravity readings, then tap a piece through the
+    // corrected mapping (outline -> screen -> tap -> back to the piece).
+    await page.evaluate(() => {
+      window.__fakeTilt = setInterval(() => window.dispatchEvent(new DeviceMotionEvent('devicemotion', {
+        accelerationIncludingGravity: { x: 0, y: -5.6, z: -8.0 }, acceleration: { x: 0, y: 0, z: 0 }, rotationRate: { alpha: 0, beta: 0, gamma: 0 },
+      })), 50);
+    });
+    await page.waitForTimeout(6000);
+    const tiltInfo = await page.evaluate(() => ({ stats: document.getElementById('stats').textContent, dbg: document.getElementById('debug').textContent }));
+    console.log('tilted:', tiltInfo.stats, '|', tiltInfo.dbg.split(String.fromCharCode(10)).pop());
+    check('tilt reading shown and correction applied', /3[0-9]° tilt/.test(tiltInfo.stats) && /corrected/.test(tiltInfo.dbg), tiltInfo.stats);
+    await page.click('#closeFind').catch(() => {});
+    const pt2 = await page.evaluate(() => window.__phPick && window.__phPick());
+    if (pt2) {
+      await page.mouse.click(pt2[0], pt2[1]);
+      const opened = await page.waitForSelector('#findPanel:not([hidden])', { timeout: 8000 }).then(() => true).catch(() => false);
+      check('tapping a piece works with tilt correction', opened, opened ? await page.textContent('#selTitle') : 'panel did not open');
+    } else check('tapping a piece works with tilt correction', false, 'no shaped piece visible');
     check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   } finally {
     await browser.close();

@@ -29,6 +29,7 @@ button { font: inherit; color: inherit; }
   display: flex; gap: 8px; align-items: center; padding: 6px 14px; border-radius: 999px;
   background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   white-space: nowrap; font-size: 14px; max-width: calc(100% - 24px); }
+#stats.warn { color: #ffb347; }
 #modeHint { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.on { background: var(--good); box-shadow: 0 0 8px var(--good); }

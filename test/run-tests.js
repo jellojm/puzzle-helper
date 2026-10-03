@@ -8,7 +8,7 @@ const fs = require('fs');
 const S = require('./synth');
 
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
 
 const args = process.argv.slice(2);
@@ -264,6 +264,29 @@ function savePng(cv, mat, name) {
       console.log('new piece', p.id, 'area', p.area.toFixed(0), 't1', p.t1 && p.t1.code, JSON.stringify(best));
     }
     check('swapped pieces are re-identified, not duplicated', live.pieces.size <= before + 1, `${before} -> ${live.pieces.size}`);
+  }
+
+  // ---------- 6b. Phone held at an angle (tilt correction) ----------
+  {
+    const run = (pitch, roll, correct) => {
+      const v = S.tiltedFrame(cv, scat.table, scat.TW / 2, scat.TH / 2, 1.3, 1080, 1920, pitch, roll, 66);
+      const e = new PH.Engine({ tiltCorrection: correct });
+      const res = e.processSnap(S.matSource(cv, v.mat), { tilt: { down: v.down, fov: 66 } });
+      if (SAVE && correct && pitch) savePng(cv, v.mat, 'tilt');
+      v.mat.delete();
+      // same physical piece in the top-down reference catalog, by outline only
+      let same = 0, n = 0;
+      for (const p of e.pieces.values()) {
+        if (!p.t1) continue; n++;
+        let best = Infinity;
+        for (const q of eng.pieces.values()) if (q.t1) best = Math.min(best, PH.sameShape(p.t1, q.t1));
+        if (best < PH.SAME_SHAPE) same++;
+      }
+      return { found: res.found, n, same };
+    };
+    const TP = +(process.env.TILT || 30); const flat = run(0, 0, true), raw = run(TP, 8, false), fixed = run(TP, 8, true);
+    console.log(`tilt ${TP}°: straight-down ${flat.same}/${flat.n} shapes match reference; tilted raw ${raw.same}/${raw.n}; tilted+corrected ${fixed.same}/${fixed.n}`);
+    check('tilted view is straightened (shapes match top-down)', fixed.n >= 5 && fixed.same / fixed.n >= 0.8 && fixed.same / fixed.n > raw.same / Math.max(1, raw.n), `${pct(fixed.same, fixed.n)} vs ${pct(raw.same, raw.n)} uncorrected`);
   }
 
   // ---------- 6. Persistence round-trip ----------

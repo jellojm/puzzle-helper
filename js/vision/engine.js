@@ -281,9 +281,20 @@
      * @param source {w,h, getProc(maxW)->{w,h,data,scale}, getCrop(x,y,w,h)->{w,h,data}}
      * @param info {still:boolean}
      */
+    // Tilt correction: with the phone's gravity direction, serve a virtual
+    // top-down view of the table instead of the raw (tilted) image.
+    straighten(source, info) {
+      const t = info && info.tilt;
+      if (!t || !t.down || this.opts.tiltCorrection === false || PH.tiltDeg(t.down) < 4) return { source, rect: null };
+      const rect = PH.tiltHomography(source.w, source.h, PH.focalPx(source.w, source.h, t.fov), t.down, 3);
+      return rect ? { source: PH.rectifiedSource(source, rect), rect } : { source, rect: null };
+    }
+
     processFrame(source, info) {
       info = info || {};
       const t0 = now();
+      const st = this.straighten(source, info);
+      source = st.source;
       const proc = source.getProc(this.opts.procW);
       const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25 }));
       this.bg = seg.bg; this.thresh = seg.thresh;
@@ -318,13 +329,16 @@
       const work = this.runQueue(dets, t0 + this.opts.budgetMs);
       this.tracks = dets.map((d) => ({ id: d.id, x: d.cx, y: d.cy, fp: d.fp }));
       const out = this.output(dets, proc);
+      // Lets the page map straightened coordinates back onto the camera view.
+      out.rect = st.rect ? { H: st.rect.H, Hinv: st.rect.Hinv, tilt: PH.tiltDeg(info.tilt.down) } : null;
       out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2 };
       return out;
     }
 
     // A high-resolution photo: catalog everything in it, no time budget.
-    processSnap(source) {
+    processSnap(source, info) {
       const t0 = now();
+      source = this.straighten(source, info).source;
       const saved = { pose: this.pose, island: this.island, tracks: this.tracks, lost: this.lost };
       const proc = source.getProc(this.opts.snapProcW);
       const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.5 }));

@@ -1,0 +1,136 @@
+/* Tilt correction: turn a photo taken at an angle into a virtual top-down
+ * view of the table.
+ *
+ * The pieces lie on one plane (the level table), so rotating a virtual camera
+ * to look straight down undoes the perspective exactly: H = K R K^-1, where
+ * K is the camera intrinsics (focal length from the field of view) and R is
+ * the smallest rotation that turns "down" (from the gravity sensor) into the
+ * optical axis. Everything downstream (segmentation, shapes, matching) then
+ * works on the straightened image.
+ *
+ * Camera/image coordinates: X right, Y down, Z forward (out of the lens).
+ * `down` is the unit gravity direction in those coordinates (Z > 0 when the
+ * camera looks at the table). */
+(function (G) {
+  const PH = G.PH;
+
+  function mul3(A, B) {
+    const C = new Array(9);
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) C[3 * r + c] = A[3 * r] * B[c] + A[3 * r + 1] * B[3 + c] + A[3 * r + 2] * B[6 + c];
+    return C;
+  }
+  function inv3(m) {
+    const [a, b, c, d, e, f, g, h, i] = m;
+    const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+    const det = a * A + b * B + c * C;
+    return [A / det, -(b * i - c * h) / det, (b * f - c * e) / det,
+      B / det, (a * i - c * g) / det, -(a * f - c * d) / det,
+      C / det, -(a * h - b * g) / det, (a * e - b * d) / det];
+  }
+  PH.mul3 = mul3;
+  PH.inv3 = inv3;
+  PH.applyH = function (H, x, y) {
+    const w = H[6] * x + H[7] * y + H[8];
+    return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w, w];
+  };
+
+  // Focal length in pixels for an image whose long side spans fovDeg.
+  PH.focalPx = (w, h, fovDeg) => Math.max(w, h) / 2 / Math.tan(((fovDeg || PH.DEFAULT_FOV) * Math.PI) / 360);
+  // iPhone main (1x) camera: ~69° across the long side of the sensor; video
+  // stabilization crops a little, so default slightly narrower.
+  PH.DEFAULT_FOV = 66;
+
+  // Tilt in degrees from straight down.
+  PH.tiltDeg = (down) => (Math.acos(PH.clamp(down[2] / Math.hypot(down[0], down[1], down[2]), -1, 1)) * 180) / Math.PI;
+
+  /**
+   * Homography (original pixels -> virtual top-down pixels) for an image of
+   * size w x h, focal f (px) and gravity direction `down`. The image center
+   * keeps its scale; the output frame is the bounding box of the warped image,
+   * limited to `maxArea` x the original area (the far, squashed part of a very
+   * tilted view is dropped).
+   */
+  PH.tiltHomography = function (w, h, f, down, maxArea) {
+    let [dx, dy, dz] = down;
+    const n = Math.hypot(dx, dy, dz);
+    dx /= n; dy /= n; dz /= n;
+    // Rotation taking `down` to +Z (Rodrigues; axis = down x Z).
+    let ax = dy, ay = -dx; // (dx,dy,dz) x (0,0,1) = (dy, -dx, 0)
+    const s = Math.hypot(ax, ay), c = dz;
+    let R;
+    if (s < 1e-6) R = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    else {
+      ax /= s; ay /= s;
+      const C = 1 - c;
+      R = [c + ax * ax * C, ax * ay * C, ay * s,
+        ax * ay * C, c + ay * ay * C, -ax * s,
+        -ay * s, ax * s, c];
+    }
+    const cx = w / 2, cy = h / 2;
+    const K = [f, 0, cx, 0, f, cy, 0, 0, 1], Ki = inv3(K);
+    let H = mul3(K, mul3(R, Ki));
+    // Keep the scale at the image center: virtual pixel size = original there.
+    const c0 = PH.applyH(H, cx, cy), c1 = PH.applyH(H, cx + 1, cy), c2 = PH.applyH(H, cx, cy + 1);
+    const sc = 1 / Math.sqrt(Math.abs((c1[0] - c0[0]) * (c2[1] - c0[1]) - (c1[1] - c0[1]) * (c2[0] - c0[0])));
+    H = mul3([sc, 0, 0, 0, sc, 0, 0, 0, 1], H);
+    // Output bounds.
+    const pts = [[0, 0], [w, 0], [w, h], [0, h]].map(([x, y]) => PH.applyH(H, x, y));
+    const mid = PH.applyH(H, cx, cy);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of pts) {
+      if (p[2] <= 0) continue; // corner beyond the horizon
+      x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]);
+    }
+    if (!isFinite(x0)) return null;
+    // Keep at most maxArea x the original area, centered on the image center.
+    const k = Math.sqrt(maxArea || 3) / 2;
+    x0 = Math.max(x0, mid[0] - k * w); x1 = Math.min(x1, mid[0] + k * w);
+    y0 = Math.max(y0, mid[1] - k * h); y1 = Math.min(y1, mid[1] + k * h);
+    H = mul3([1, 0, -x0, 0, 1, -y0, 0, 0, 1], H);
+    return { H, Hinv: inv3(H), w: Math.ceil(x1 - x0), h: Math.ceil(y1 - y0) };
+  };
+
+  /**
+   * Wrap an image source (see Engine.processFrame) so it serves the virtual
+   * top-down view instead. Only the processing-size image and the small
+   * per-piece crops are ever warped, never the whole full-resolution frame.
+   */
+  PH.rectifiedSource = function (base, rect) {
+    const cv = PH.cv;
+    const { H, Hinv } = rect;
+    const warp = (img, M, ow, oh) => {
+      const src = new cv.Mat(img.h, img.w, cv.CV_8UC4); src.data.set(img.data);
+      const m = cv.matFromArray(3, 3, cv.CV_64F, M);
+      const dst = new cv.Mat();
+      cv.warpPerspective(src, dst, m, new cv.Size(ow, oh), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+      const out = { w: ow, h: oh, data: new Uint8ClampedArray(dst.data) };
+      src.delete(); m.delete(); dst.delete();
+      return out;
+    };
+    return {
+      w: rect.w, h: rect.h, rect,
+      getProc(maxW) {
+        const scale = Math.min(1, maxW / Math.max(rect.w, rect.h));
+        const ow = Math.round(rect.w * scale), oh = Math.round(rect.h * scale);
+        // Source at a matching resolution (a bit more, for the stretched far side).
+        const srcImg = base.getProc(Math.min(Math.max(base.w, base.h), maxW * 1.3));
+        const si = srcImg.scale;
+        // proc pixel <- virtual (x/scale) <- original <- source-proc (x/si)
+        const M = mul3([scale, 0, 0, 0, scale, 0, 0, 0, 1], mul3(H, [1 / si, 0, 0, 0, 1 / si, 0, 0, 0, 1]));
+        const out = warp(srcImg, M, ow, oh);
+        out.scale = scale;
+        return out;
+      },
+      getCrop(x, y, cw, ch) {
+        // Original-image region covering this virtual rectangle.
+        const q = [[x, y], [x + cw, y], [x + cw, y + ch], [x, y + ch]].map(([u, v]) => PH.applyH(Hinv, u, v));
+        const ox = Math.max(0, Math.floor(Math.min(...q.map((p) => p[0]))) - 2), oy = Math.max(0, Math.floor(Math.min(...q.map((p) => p[1]))) - 2);
+        const ox1 = Math.min(base.w, Math.ceil(Math.max(...q.map((p) => p[0]))) + 2), oy1 = Math.min(base.h, Math.ceil(Math.max(...q.map((p) => p[1]))) + 2);
+        if (ox1 - ox < 2 || oy1 - oy < 2) return { w: cw, h: ch, data: new Uint8ClampedArray(cw * ch * 4) };
+        const orig = base.getCrop(ox, oy, ox1 - ox, oy1 - oy);
+        const M = mul3([1, 0, -x, 0, 1, -y, 0, 0, 1], mul3(H, [1, 0, ox, 0, 1, oy, 0, 0, 1]));
+        return warp(orig, M, cw, ch);
+      },
+    };
+  };
+})(typeof self !== 'undefined' ? self : globalThis);

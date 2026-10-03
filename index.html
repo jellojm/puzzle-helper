@@ -65,6 +65,12 @@
         <button id="teachBtn">Teach background (<span id="teachCount">auto</span>)</button>
       </div>
       <p class="muted small">If the table isn't one plain color, tap its surfaces once so pieces are separated from it reliably.</p>
+      <label class="row"><input id="tiltToggle" type="checkbox" checked> Correct for phone tilt (hold at an angle to avoid glare)</label>
+      <label class="row">Lens angle
+        <input id="fovRange" type="range" min="50" max="80" step="1" value="66">
+        <span id="fovVal">66°</span>
+      </label>
+      <p class="muted small">Leave at 66° for the iPhone's normal 1× camera. Don't zoom while scanning.</p>
       <label id="torchRow" class="row" hidden><input id="torchToggle" type="checkbox"> Flashlight</label>
       <label class="row"><input id="debugToggle" type="checkbox"> Show timing / debug info</label>
       <div class="menu-actions">

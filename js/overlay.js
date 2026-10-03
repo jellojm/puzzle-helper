@@ -17,16 +17,40 @@ const ROLE = {
 
 // Map processing-frame coordinates to CSS pixels of the overlay, matching the
 // video's object-fit: cover crop.
+function applyH(H, x, y) {
+  const w = H[6] * x + H[7] * y + H[8];
+  return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w, w];
+}
+// Processing coordinates -> CSS pixels on screen (and back). With tilt
+// correction the processing image is a straightened view, so points go
+// through the homography back to the real camera frame first.
 export function frameMapping(video, canvas, res) {
   const vw = res.frameW, vh = res.frameH;
   const cw = canvas.clientWidth, ch = canvas.clientHeight;
   const s = Math.max(cw / vw, ch / vh);
-  const k = s / res.scale; // proc px -> css px
+  const k = s / res.scale; // proc px -> css px (no tilt)
   const ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
+  const R = res.rect;
+  if (!R) {
+    return {
+      k, ox, oy, cw, ch,
+      toVideo: (x, y) => [(x - ox) / s, (y - oy) / s], // screen -> camera frame pixel
+      toScreen: (x, y) => [x * k + ox, y * k + oy],
+      toFrame: (x, y) => [(x - ox) / k, (y - oy) / k],
+    };
+  }
   return {
     k, ox, oy, cw, ch,
-    toScreen: (x, y) => [x * k + ox, y * k + oy],
-    toFrame: (x, y) => [(x - ox) / k, (y - oy) / k],
+    toVideo: (x, y) => [(x - ox) / s, (y - oy) / s],
+    toScreen: (x, y) => {
+      const p = applyH(R.Hinv, x / res.scale, y / res.scale);
+      if (p[2] <= 0) return [NaN, NaN];
+      return [p[0] * s + ox, p[1] * s + oy];
+    },
+    toFrame: (x, y) => {
+      const p = applyH(R.H, (x - ox) / s, (y - oy) / s);
+      return [p[0] * res.scale, p[1] * res.scale];
+    },
   };
 }
 

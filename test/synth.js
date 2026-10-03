@@ -215,6 +215,33 @@ function cameraFrame(cv, table, cx, cy, phi, zoom, W, H, feltRGB) {
   return out;
 }
 
+// View of the table from a TILTED phone. The camera sits above table point
+// (cx, cy); `zoom` is the top-down scale (frame px per table px when looking
+// straight down); pitch/roll (degrees) tilt it. Returns {mat, down} where
+// `down` is gravity in camera coords (X right, Y down, Z forward), i.e. what
+// the phone's sensor would report.
+function tiltedFrame(cv, table, cx, cy, zoom, W, H, pitchDeg, rollDeg, fovDeg, feltRGB) {
+  const f = Math.max(W, H) / 2 / Math.tan((fovDeg * Math.PI) / 360);
+  const p = (pitchDeg * Math.PI) / 180, r = (rollDeg * Math.PI) / 180;
+  const Rx = [1, 0, 0, 0, Math.cos(p), -Math.sin(p), 0, Math.sin(p), Math.cos(p)];
+  const Ry = [Math.cos(r), 0, Math.sin(r), 0, 1, 0, -Math.sin(r), 0, Math.cos(r)];
+  const mul = (A, B) => { const C = []; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) C.push(A[3 * i] * B[j] + A[3 * i + 1] * B[3 + j] + A[3 * i + 2] * B[6 + j]); return C; };
+  const Rc = mul(Rx, Ry); // tilted-camera ray -> straight-down-camera ray
+  const Kti = [1 / f, 0, -W / 2 / f, 0, 1 / f, -H / 2 / f, 0, 0, 1];
+  const Kd = [f, 0, 0, 0, f, 0, 0, 0, 1];
+  // Aim like a person would: the optical axis hits the table at (cx, cy).
+  const ax = Rc[2], ay = Rc[5], az = Rc[8];
+  const A = [1 / zoom, 0, cx - (f * ax) / az / zoom, 0, 1 / zoom, cy - (f * ay) / az / zoom, 0, 0, 1]; // down-view px (centered) -> table px
+  const M = mul(A, mul(Kd, mul(Rc, Kti)));
+  const m = cv.matFromArray(3, 3, cv.CV_64F, M);
+  const out = new cv.Mat();
+  const fe = feltRGB || [38, 92, 60];
+  cv.warpPerspective(table, out, m, new cv.Size(W, H), cv.INTER_LINEAR | cv.WARP_INVERSE_MAP, cv.BORDER_CONSTANT, new cv.Scalar(fe[0], fe[1], fe[2], 255));
+  m.delete();
+  // gravity (down-camera +Z) expressed in tilted-camera coords = Rc^T * (0,0,1)
+  return { mat: out, down: [Rc[6], Rc[7], Rc[8]] };
+}
+
 // Engine "source" wrapping an RGBA Mat.
 function matSource(cv, mat) {
   return {
@@ -236,4 +263,4 @@ function matSource(cv, mat) {
   };
 }
 
-module.exports = { makeRng, makePuzzle, innerBox, boxPhoto, scatter, cameraFrame, matSource };
+module.exports = { makeRng, makePuzzle, innerBox, boxPhoto, scatter, cameraFrame, tiltedFrame, matSource };
