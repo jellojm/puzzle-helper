@@ -1,0 +1,5 @@
+node_modules/
+test/out/
+test/_*
+tools/*.pem
+test/fixtures/

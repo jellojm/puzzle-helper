@@ -1,0 +1,17 @@
+{
+  "name": "puzzle-helper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "iPhone web app that catalogs jigsaw pieces on a table and finds matches.",
+  "scripts": {
+    "test": "node test/run-tests.js",
+    "test:quick": "node test/run-tests.js --quick",
+    "serve": "node tools/serve.js",
+    "serve:https": "node tools/serve.js --https",
+    "cert": "openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj /CN=puzzle-helper -keyout tools/key.pem -out tools/cert.pem"
+  },
+  "devDependencies": {
+    "@techstark/opencv-js": "4.10.0-release.1",
+    "playwright-core": "^1.63.0"
+  }
+}

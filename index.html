@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#111418">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Puzzle Helper">
+  <title>Puzzle Helper</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <main id="app" hidden>
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+
+    <header id="topbar">
+      <span id="trackDot" class="dot" title="Tracking"></span>
+      <span id="stats">0 pieces</span>
+      <span id="modeHint"></span>
+    </header>
+    <div id="banner" hidden></div>
+    <div id="teachBar" hidden>
+      <span id="teachText">Tap bare table in a few spots — every different surface (cloth, wood, tile, glass, shadow).</span>
+      <div class="teach-actions">
+        <button id="teachUndo">Undo</button>
+        <button id="teachClear">Clear</button>
+        <button id="teachDone" class="strong">Done</button>
+      </div>
+    </div>
+    <div id="toast" hidden></div>
+    <pre id="debug" hidden></pre>
+
+    <canvas id="minimap" hidden aria-label="Box picture: drag to highlight pieces from an area"></canvas>
+
+    <section id="findPanel" class="sheet" hidden>
+      <div class="sheet-head">
+        <canvas id="selThumb" width="72" height="72"></canvas>
+        <div class="sel-info">
+          <strong id="selTitle">Piece</strong>
+          <span id="selSub"></span>
+        </div>
+        <button id="closeFind" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="edgeRows"></div>
+    </section>
+
+    <section id="menu" class="sheet" hidden>
+      <div class="sheet-head">
+        <strong>Settings</strong>
+        <button id="closeMenu" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="menuStats" class="muted"></div>
+      <label class="row">Background sensitivity
+        <input id="sens" type="range" min="4" max="24" step="1" value="8">
+        <span id="sensVal">8</span>
+      </label>
+      <p class="muted small">Lower finds faint pieces; raise it if shadows or cloth texture show up as pieces.</p>
+      <div class="menu-actions">
+        <button id="teachBtn">Teach background (<span id="teachCount">auto</span>)</button>
+      </div>
+      <p class="muted small">If the table isn't one plain color, tap its surfaces once so pieces are separated from it reliably.</p>
+      <label id="torchRow" class="row" hidden><input id="torchToggle" type="checkbox"> Flashlight</label>
+      <label class="row"><input id="debugToggle" type="checkbox"> Show timing / debug info</label>
+      <div class="menu-actions">
+        <button id="newPuzzle">New puzzle (keep box picture)</button>
+        <button id="clearAll" class="danger">Clear everything</button>
+      </div>
+      <details>
+        <summary>Tips</summary>
+        <ul class="small">
+          <li>Use a plain cloth or board whose color is <b>not</b> in the puzzle (e.g. black felt for a bright puzzle).</li>
+          <li>Pieces face up, not touching.</li>
+          <li>Light: a lamp off to one side, low over the table, makes every piece cast a thin shadow, which helps separate pieces from a cloth of similar color. Avoid a strong light directly overhead that bleaches the print.</li>
+          <li>Hold the phone flat, 30–40 cm above the table, and sweep slowly. Pause a moment over each area; outlines turn blue then green as pieces are read.</li>
+          <li><b>Snap</b> takes a full-resolution photo and catalogs every piece in it at once.</li>
+          <li>Tap a piece to see where it goes on the box and which pieces fit it. Gold = best match.</li>
+          <li>Drag across the box picture to light up every piece from that area.</li>
+        </ul>
+      </details>
+    </section>
+
+    <nav id="toolbar">
+      <button data-mode="scan" class="active"><span class="ico">◎</span>Scan</button>
+      <button data-mode="find"><span class="ico">⌖</span>Find</button>
+      <button id="snapBtn"><span class="ico">◉</span>Snap</button>
+      <button id="boxBtn"><span class="ico">▣</span>Box</button>
+      <button id="menuBtn"><span class="ico">≡</span>More</button>
+    </nav>
+    <input id="snapInput" type="file" accept="image/*" capture="environment" hidden>
+  </main>
+
+  <section id="start" class="screen">
+    <div class="start-card">
+      <h1>Puzzle Helper</h1>
+      <p>Point your phone at puzzle pieces spread on a table. It catalogs every piece as you sweep, shows where each one goes on the box picture, and highlights pieces that fit together.</p>
+      <button id="startBtn" class="primary">Start camera</button>
+      <p id="startStatus" class="muted small"></p>
+      <p class="muted small">Works best with a plain cloth under the pieces. Everything runs on your phone; nothing is uploaded.</p>
+      <p class="small"><a href="#" id="videoTest">Test with a video file instead</a></p>
+      <input id="videoInput" type="file" accept="video/*" hidden>
+    </div>
+  </section>
+
+  <section id="boxModal" class="screen" hidden>
+    <div class="box-head">
+      <button id="boxCancel" class="link">Cancel</button>
+      <strong>Box picture</strong>
+      <button id="boxUse" class="link strong" disabled>Use</button>
+    </div>
+    <div id="boxBody">
+      <div id="boxEmpty">
+        <p>Take a photo of the picture on the box lid, straight on, filling the frame.</p>
+        <button id="boxPick" class="primary">Take or choose photo</button>
+      </div>
+      <canvas id="boxCanvas" hidden></canvas>
+      <p id="boxHelp" class="muted small" hidden>Drag the 4 corners onto the corners of the <b>picture</b> (not the whole box).</p>
+    </div>
+    <div class="box-controls">
+      <label>Pieces <input id="boxPieces" type="number" inputmode="numeric" min="12" max="10000" value="1000"></label>
+      <label>Grid <input id="boxCols" type="number" inputmode="numeric" min="2" max="200"> × <input id="boxRows" type="number" inputmode="numeric" min="2" max="200"></label>
+      <button id="boxRetake" class="link" hidden>Retake</button>
+    </div>
+    <input id="boxInput" type="file" accept="image/*" hidden>
+  </section>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
