@@ -3,7 +3,7 @@ import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from '.
 import { BoxSetup } from './boxSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.10.1';
+const APP_VERSION = '0.10.2';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });

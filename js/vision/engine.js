@@ -498,6 +498,31 @@
           for (const a of r.assign) a.d.id = a.p.id;
         }
       }
+      // A young scan group (< 3 located pieces) can't fit a pose yet - that
+      // needs 3 anchors. Treating that as "lost" (v0.10.1) skipped cataloguing
+      // for 20 frames, the half-seen pieces expired, and a new group was forked
+      // with nothing in it, over and over (report 19:12: 3 pieces in 4.6 min,
+      // each in its own group). Instead keep the pose, shifted by the pieces
+      // followed from the last frame, until the group has its 3 anchors.
+      if (!ok && this.pose && this.island) {
+        let own = 0;
+        for (const p of this.pieces.values()) if (p.pos && p.kind !== 'section' && p.island === this.island && ++own >= 3) break;
+        if (own < 3) {
+          let dx = 0, dy = 0, n = 0;
+          for (const d of dets) {
+            const p = d.id && this.pieces.get(d.id);
+            if (!p || !p.pos || p.island !== this.island) continue;
+            const q = PH.simApply(this.pose, d.cx, d.cy);
+            dx += p.pos[0] - q[0]; dy += p.pos[1] - q[1]; n++;
+          }
+          // with group pieces known but none of them in view, the camera may
+          // have moved anywhere: don't guess
+          if (n || !own) {
+            if (n) this.pose = Object.assign({}, this.pose, { tx: this.pose.tx + dx / n, ty: this.pose.ty + dy / n });
+            ok = true;
+          }
+        }
+      }
       if (!ok) {
         this.lost++;
         // Is there a map worth waiting for? Only with >= 3 located loose
