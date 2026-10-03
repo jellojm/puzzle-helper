@@ -29,31 +29,38 @@ function applyH(H, x, y) {
 // Processing coordinates -> CSS pixels on screen (and back). With tilt
 // correction the processing image is a straightened view, so points go
 // through the homography back to the real camera frame first.
-export function frameMapping(video, canvas, res) {
+//
+// `shift` = how far the camera image has moved (camera-frame pixels) since the
+// frame `res` was analysed, as measured by the thumbnail tracker
+// (js/vision/flow.js). It is a translation of the camera image, so it is
+// applied exactly in screen space after the mapping — for the tilted path too.
+// toVideo maps to the LIVE video and is deliberately not shifted.
+export function frameMapping(video, canvas, res, shift) {
   const vw = res.frameW, vh = res.frameH;
   const cw = canvas.clientWidth, ch = canvas.clientHeight;
   const s = Math.max(cw / vw, ch / vh);
   const k = s / res.scale; // proc px -> css px (no tilt)
   const ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
+  const sx = shift ? shift.dx * s : 0, sy = shift ? shift.dy * s : 0;
   const R = res.rect;
   if (!R) {
     return {
-      k, ox, oy, cw, ch,
+      k, ox, oy, cw, ch, shiftX: sx, shiftY: sy,
       toVideo: (x, y) => [(x - ox) / s, (y - oy) / s], // screen -> camera frame pixel
-      toScreen: (x, y) => [x * k + ox, y * k + oy],
-      toFrame: (x, y) => [(x - ox) / k, (y - oy) / k],
+      toScreen: (x, y) => [x * k + ox + sx, y * k + oy + sy],
+      toFrame: (x, y) => [(x - sx - ox) / k, (y - sy - oy) / k],
     };
   }
   return {
-    k, ox, oy, cw, ch,
+    k, ox, oy, cw, ch, shiftX: sx, shiftY: sy,
     toVideo: (x, y) => [(x - ox) / s, (y - oy) / s],
     toScreen: (x, y) => {
       const p = applyH(R.Hinv, x / res.scale, y / res.scale);
       if (p[2] <= 0) return [NaN, NaN];
-      return [p[0] * s + ox, p[1] * s + oy];
+      return [p[0] * s + ox + sx, p[1] * s + oy + sy];
     },
     toFrame: (x, y) => {
-      const p = applyH(R.H, (x - ox) / s, (y - oy) / s);
+      const p = applyH(R.H, (x - sx - ox) / s, (y - sy - oy) / s);
       return [p[0] * res.scale, p[1] * res.scale];
     },
   };

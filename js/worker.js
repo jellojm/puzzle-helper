@@ -122,6 +122,13 @@ async function init(msg) {
   post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo() });
 }
 function settingsInfo() { return { minDE: engine.opts.minDE, taught: engine.taught.length }; }
+// Drop the taught table colours AND the background model chosen with them, so
+// the engine re-picks its background on the next frames instead of carrying a
+// "taught" model whose colours are gone.
+function forgetTable() {
+  engine.clearBackground();
+  engine.bgModel = null; engine.bgEval = null; engine.bgModelAt = 0; engine.poorStreak = 0;
+}
 async function saveSettings() {
   if (db) await tx('meta', 'readwrite', (s) => s.put({ minDE: engine.opts.minDE, taught: engine.taught }, 'settings'));
 }
@@ -273,7 +280,7 @@ const handlers = {
     post({ type: 'taught', count: engine.taught.length });
   },
   async clearBg() {
-    engine.clearBackground();
+    forgetTable();
     await saveSettings();
     post({ type: 'taught', count: 0 });
   },
@@ -281,6 +288,9 @@ const handlers = {
     const keepBox = msg.keepBox ? engine.box : null;
     engine.reset();
     if (keepBox) engine.box = keepBox;
+    // A new puzzle is often a new table (or new light): taught colours from the
+    // old one make the board look like a piece. The page asks; this forgets.
+    if (msg.forgetTable) { forgetTable(); await saveSettings(); }
     if (db) {
       await tx('pieces', 'readwrite', (s) => s.clear());
       if (!keepBox) await tx('meta', 'readwrite', (s) => s.delete('box'));

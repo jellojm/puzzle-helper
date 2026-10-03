@@ -105,6 +105,7 @@
       </label>
       <p class="muted small">Lower is faster and much easier on the battery. Raise it only if small pieces are being missed — it does not affect photo (Snap) quality.</p>
       <label class="row"><input id="outlineToggle" type="checkbox"> Draw full piece outlines (slower)</label>
+      <label class="row"><input id="followToggle" type="checkbox" checked> Marks follow the camera between readings</label>
       <p class="muted small">Off by default: pieces are marked with a dot, which keeps the overlay smooth.</p>
       <label class="row"><input id="tiltToggle" type="checkbox" checked> Correct for phone tilt (hold at an angle to avoid glare)</label>
       <label class="row">Lens angle
@@ -183,6 +184,7 @@
     <input id="boxInput" type="file" accept="image/*" hidden>
   </section>
 
+  <script src="js/vision/flow.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>
 </html>

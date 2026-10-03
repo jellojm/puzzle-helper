@@ -2,7 +2,7 @@
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 
-const APP_VERSION = '0.8.0';
+const APP_VERSION = '0.9.0';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
 
@@ -40,6 +40,11 @@ const S = {
   // rendering / analysis cost
   procW: 640,       // live analysis width; see Settings > Scan detail
   outlines: false,  // dots by default, full outlines on request
+  // camera-motion tracker (js/vision/flow.js): marks follow the camera between analyses
+  follow: true,     // Settings > "Marks follow the camera"
+  flow: null,       // {w, h, prev, total:[dx,dy] thumb px, at, steps, lowConf, ms, speed}
+  flowAtSend: null, // flow.total when the frame now being analysed was grabbed
+  drawnShift: null, // shift used for the last overlay draw (css px)
   // find bar
   filter: null,     // 'corner' | 'border' | 'unplaced' | 'unread'
   mapHidden: false,
@@ -75,6 +80,9 @@ worker.onmessage = (e) => {
       const now = performance.now();
       S.fps = S.fps * 0.8 + (1000 / Math.max(1, now - (S.lastResult || now))) * 0.2;
       S.lastResult = now;
+      // Where the tracker stood when this frame was grabbed; marks are drawn
+      // shifted by however far the camera has moved since.
+      m.flowBase = S.flowAtSend;
       S.last = m;
       S.busy = false;
       S.history.push({ t: Math.round(now), grab: Math.round(S.grabMs || 0), ...Object.fromEntries(Object.entries(m.timings).map(([k, v]) => [k, Math.round(v)])), dets: m.dets.length, tracking: m.tracking, island: m.island, still: S.lastStill });
@@ -202,6 +210,10 @@ function applyPower() {
   if (want) {
     acquireWakeLock();
     S.calm = 0; S.lastSend = 0; S.lastActivity = performance.now();
+    // The camera was off: the tracker's last thumbnail is stale, so restart it,
+    // and don't shift the old result's marks until the next one arrives.
+    if (S.flow) S.flow.T.reset();
+    if (S.last) S.last.flowBase = null;
     if (S.usingCamera && (!S.track || S.track.readyState === 'ended')) ensureCamera();
     else video.play().catch(() => {});
     if (!S.rafId) S.rafId = requestAnimationFrame(loop);
@@ -310,8 +322,46 @@ async function requestMotion() {
   });
 }
 function isStill() {
-  if (performance.now() - S.motion.t > 1500) return true; // no sensor data
+  // No motion sensor (permission denied, desktop): judge from the picture. The
+  // tracker's recent per-step shift is a sensor-free blur guard, so shapes are
+  // not read from frames smeared by a sweep.
+  if (performance.now() - S.motion.t > 1500) return !S.follow || !S.flow || S.flow.T.speed < FLOW_STILL;
   return S.motion.rot < 25 && S.motion.acc < 0.7;
+}
+
+// ---------- camera-motion tracker ----------
+// A ~96 px thumbnail of the live video is matched against the frame last
+// handed to the analysis (PH.FlowTracker in js/vision/flow.js: keyframe block
+// matching, ~1 ms). Analysis runs a few times a second; this runs every other
+// display frame, so the marks follow the pieces in between instead of jumping.
+// test/flow-overlay.js checks the whole chain lands marks within ~1 px.
+const FLOW_MAX = 96;        // thumbnail long side, px
+// Thumb px per step (~30 Hz) under which the view counts as still: 0.12 thumb
+// px ≈ 2–3 camera px of smear per frame; the noise floor when still is ~0.05.
+const FLOW_STILL = 0.12;
+function trackStep() {
+  if (!window.PH || !PH.FlowTracker || !video.videoWidth || video.readyState < 2) return false;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const sc = FLOW_MAX / Math.max(vw, vh);
+  const w = Math.max(8, Math.round(vw * sc)), h = Math.max(8, Math.round(vh * sc));
+  let F = S.flow;
+  if (!F || F.w !== w || F.h !== h) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    F = S.flow = { w, h, c, g: c.getContext('2d', { willReadFrequently: true }), T: new PH.FlowTracker(w, h), ms: 0, scale: vw / w };
+    if (S.last) S.last.flowBase = null; // old reference frame belonged to another tracker
+  }
+  const t0 = performance.now();
+  F.g.drawImage(video, 0, 0, w, h);
+  const r = F.T.push(PH.flowGray(F.g.getImageData(0, 0, w, h).data, w, h));
+  F.ms = F.ms * 0.9 + (performance.now() - t0) * 0.1;
+  return r.moved;
+}
+// Camera-frame pixels the image has moved since result `res` was grabbed.
+function shiftSince(res) {
+  if (!S.follow || !S.flow || !res || !res.flowBase) return null;
+  const k = S.flow.scale, t = S.flow.T.total;
+  return { dx: (t[0] - res.flowBase[0]) * k, dy: (t[1] - res.flowBase[1]) * k };
 }
 
 // Gravity direction in camera image coordinates (X right, Y down, Z out of
@@ -345,6 +395,11 @@ async function sendFrame() {
     bmp = await createImageBitmap(c);
   }
   S.grabMs = performance.now() - g0;
+  // Sample the tracker at the grab, so the marks' reference point matches the
+  // frame the worker is about to analyse.
+  if (S.follow) trackStep();
+  if (S.flow) S.flow.T.mark(); // this frame becomes the tracker's keyframe
+  S.flowAtSend = S.flow ? S.flow.T.total.slice() : null;
   S.lastStill = isStill();
   S.lastTilt = currentTilt();
   W.post({ type: 'frame', bitmap: bmp, still: S.lastStill, tilt: S.lastTilt }, [bmp]);
@@ -367,18 +422,28 @@ function loop() {
   // Only auto-pause on a device that actually reports motion, so a desktop
   // test run (or a phone with motion permission denied) never stalls.
   if (S.idleOn && S.hasMotion && t - S.lastActivity > IDLE_MS) { S.idle = true; applyPower(); return; }
-  // Redraw only when there is a new result, a pulsing highlight (capped at
-  // ~20 fps) or something asked for one — not 60 times a second regardless.
+  // Track camera motion every other display frame (~30 Hz): enough to keep
+  // marks on the pieces during a hand sweep, half the cost of every frame.
+  S.rafN = (S.rafN || 0) + 1;
+  if (S.follow && S.rafN % 2 === 0) trackStep();
+  const shift = shiftSince(S.last);
+  // Redraw only when there is a new result, the camera moved the marks by
+  // more than half a pixel, a pulsing highlight (capped at ~20 fps) or
+  // something asked for one — not 60 times a second regardless.
   const pulsing = S.last && S.last.highlights && S.last.highlights.length > 0;
-  if (S.last !== S.drawn || S.needDraw || (pulsing && t - (S.lastPulse || 0) > 50)) {
+  const k = S.last ? Math.max(overlay.clientWidth / S.last.frameW, overlay.clientHeight / S.last.frameH) : 1;
+  const ds = S.drawnShift, sh = shift ? [shift.dx * k, shift.dy * k] : [0, 0];
+  const followMoved = !ds || Math.hypot(sh[0] - ds[0], sh[1] - ds[1]) > 0.5;
+  if (S.last !== S.drawn || S.needDraw || followMoved || (pulsing && t - (S.lastPulse || 0) > 50)) {
     S.needDraw = false;
     S.lastPulse = t;
     const ctx = sizeCanvas(overlay);
     if (S.last && video.videoWidth) {
-      const M = frameMapping(video, overlay, S.last);
+      const M = frameMapping(video, overlay, S.last, shift);
       S.map = M;
       drawOverlay(ctx, S.last, M, { mode: S.mode, marks: !S.outlines });
       S.drawn = S.last;
+      S.drawnShift = sh;
     }
   }
   if (S.ready && !S.busy && !S.snapping && video.readyState >= 2 && t - S.lastSend > frameGap()) {
@@ -473,6 +538,7 @@ function showDebug(m) {
 
 // ---------- teach background ----------
 function showTaught(n) {
+  S.taughtN = n || 0;
   $('teachCount').textContent = n ? `${n} spot${n > 1 ? 's' : ''}` : 'auto';
   if (S.teaching) $('teachText').textContent = n ? `${n} spot${n > 1 ? 's' : ''} learned. Keep tapping any surface that still shows outlines; tap Done when pieces stand out.` : 'Tap bare table in a few spots — every different surface (cloth, wood, tile, glass, shadow).';
 }
@@ -867,18 +933,19 @@ $('detail').oninput = (e) => {
   saveLocal();
 };
 $('outlineToggle').onchange = (e) => { S.outlines = e.target.checked; S.needDraw = true; saveLocal(); };
+$('followToggle').onchange = (e) => { S.follow = e.target.checked; S.flow = null; S.needDraw = true; saveLocal(); };
 $('tiltToggle').onchange = (e) => { S.tiltOn = e.target.checked; saveLocal(); };
 $('fovRange').oninput = (e) => { S.fov = +e.target.value; $('fovVal').textContent = S.fov + '°'; saveLocal(); };
 function saveLocal() {
   try {
-    localStorage.setItem('ph-view', JSON.stringify({ tiltOn: S.tiltOn, fov: S.fov, mapHidden: S.mapHidden, idleOn: S.idleOn, procW: S.procW, outlines: S.outlines }));
+    localStorage.setItem('ph-view', JSON.stringify({ tiltOn: S.tiltOn, fov: S.fov, mapHidden: S.mapHidden, idleOn: S.idleOn, procW: S.procW, outlines: S.outlines, follow: S.follow }));
   } catch (_) { /* private mode */ }
 }
 try {
   const v = JSON.parse(localStorage.getItem('ph-view') || 'null');
   if (v) {
     S.tiltOn = v.tiltOn !== false; S.fov = v.fov || 66; S.mapHidden = !!v.mapHidden;
-    S.idleOn = v.idleOn !== false; S.procW = v.procW || 640; S.outlines = !!v.outlines;
+    S.idleOn = v.idleOn !== false; S.procW = v.procW || 640; S.outlines = !!v.outlines; S.follow = v.follow !== false;
   }
 } catch (_) { /* ignore */ }
 $('tiltToggle').checked = S.tiltOn; $('fovRange').value = S.fov; $('fovVal').textContent = S.fov + '°';
@@ -895,6 +962,7 @@ if (!navigator.wakeLock) {
     : 'This browser can\'t keep the screen awake while scanning.';
 }
 $('outlineToggle').checked = S.outlines;
+$('followToggle').checked = S.follow;
 applyMapVisibility();
 $('debugToggle').onchange = (e) => { S.debug = e.target.checked; $('debug').hidden = !S.debug; };
 function afterReset() {
@@ -903,11 +971,19 @@ function afterReset() {
   $('menu').hidden = true;
   noteActivity(); applyPower();
 }
+// Taught table colours survive a reset unless forgotten here: on a different
+// table (or under different light) they make the board itself look like a
+// piece, which is what happened moving from the white board to the glass table.
 $('newPuzzle').onclick = () => {
-  if (confirm('Forget all catalogued pieces? The box picture is kept.')) { W.post({ type: 'reset', keepBox: true }); afterReset(); }
+  if (!confirm('Forget all catalogued pieces? The box picture is kept.')) return;
+  const forgetTable = S.taughtN > 0 && confirm(`Also forget the ${S.taughtN} table colour${S.taughtN > 1 ? 's' : ''} you taught?\n\n`
+    + 'Choose OK if you moved to a different table or the lighting changed. Choose Cancel to keep them for the same table.');
+  W.post({ type: 'reset', keepBox: true, forgetTable });
+  afterReset();
 };
 $('clearAll').onclick = () => {
-  if (confirm('Forget all pieces and the box picture?')) { W.post({ type: 'reset', keepBox: false }); afterReset(); }
+  const what = S.taughtN > 0 ? 'all pieces, the box picture and the taught table colours' : 'all pieces and the box picture';
+  if (confirm(`Forget ${what}?`)) { W.post({ type: 'reset', keepBox: false, forgetTable: true }); afterReset(); }
 };
 
 // ---------- debug report ----------
@@ -947,6 +1023,10 @@ async function finishReport(workerData, analyzed, boxImg) {
     video: { w: video.videoWidth, h: video.videoHeight, settings: S.track && S.track.getSettings ? S.track.getSettings() : null },
     mode: S.mode, fps: S.fps, motion: S.motion, gravity: S.gravity, tilt: S.lastTilt, tiltOn: S.tiltOn, fov: S.fov,
     power: { active: S.active, idle: S.idle, idleOn: S.idleOn, calm: S.calm, gap: Math.round(frameGap()), wakeLock: !!S.wakeLock },
+    // Camera-motion tracker health: how often it was sure of a step, its cost
+    // on this phone, and the recent motion level it uses for stillness.
+    flow: S.flow ? { on: S.follow, thumb: [S.flow.w, S.flow.h], steps: S.flow.T.steps, lowConf: S.flow.T.lowConf, rekeys: S.flow.T.rekeys,
+      msPerStep: +S.flow.ms.toFixed(2), speed: +S.flow.T.speed.toFixed(3), total: S.flow.T.total.map((v) => +v.toFixed(1)) } : { on: S.follow },
     ui: { filter: S.filter, mapHidden: S.mapHidden, pairs: S.pairs.length, pairsDone: !!S.pairsDone },
     orientation: (screen.orientation && screen.orientation.angle) || window.orientation || 0,
     history: S.history, errors: S.errors,

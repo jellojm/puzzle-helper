@@ -19,7 +19,10 @@ pale-printed pieces (see `reports/*-frame.jpg`).
 | WP8 | **Done** (828a415) | `test/seg-regression.js` on white-1/2, white-close-1/2 (video frames 2 and 881); `--baseline` reproduces the old numbers; in `npm test` |
 | WP1 | **Done** (828a415) | Running `unitLive` + mass-mode own estimate (≥ 3 blobs, else null). Fragments are never catalogued as new pieces. `test/unit-area.js`: unit within 7%, no duplicate entries |
 | WP2 | **Done** (5f7aeaf) | Boundary fill on still frames, open off. good/frag: white-1 20/8 → 31/2, white-2 21/10 → 35/1, close-1 14/8 → 13/4, close-2 9/4 → 7/2 |
-| WP3–WP7, WP9 | Open | — |
+| WP4 + WP9 | **Done** (uncommitted, v0.9.0 candidate) | `PH.FlowTracker` in `js/vision/flow.js`: 96 px thumbnail matched against the last *analysed* frame (keyframe, not chained steps — chaining 12 30-Hz steps drifted ~9 css px from sub-pixel bias), re-key near the search edge, one chained step as fallback. Confidence = best vs *typical* shift cost (vs zero shift rejected every ~1 px step). `frameMapping(..., shift)` applies the camera-image shift in screen space, exact with tilt correction too; taps use the same mapping. Settings toggle; report `flow` block. Stillness falls back to tracker speed when no motion sensor. `test/flow-overlay.js`: marks land within 0.97 css px after a 12-step sweep (67.9 px without following); real video: confident 314/314 steps, 0.67 ms/step in node |
+| WP3, WP5–WP7 | Open | WP7 partly covered by "Corners / duplicates" |
+| Live shape relocalisation | Unverified | `Engine.relocalizeByShape` on the lost-tracking path needs `d.t1` or silently does nothing (`shapeCands` early-returns on `!d.t1`); it reads a few outlines first now, but no real session has shown it firing (glass-table reports: tracking 0–5%). Check in the next report with tracking losses |
+| Taught colours across tables | **Done** (uncommitted) | New puzzle asks whether to forget taught table colours; Clear everything always forgets them; forgetting also drops the background model chosen with them. `test/worker-reset.js` |
 | Report fixes | **Done** (v0.7.0) | Black report frame (last view kept when the camera is released); tilt-border streaks marked out-of-image (alpha 0) and ignored |
 | Lighting | **Done** (v0.7.0) | `PH.flattenLight` evens shadows (board surface by closing/opening/median at ~1/120 scale, ratio correction; skipped when light is even). Near-neutral, alike taught colours = plain board; stale taught colours (< 20% of frame) fall back per frame. Per-crop board lightness from the crop border in `analyzePiece`. Replays: 13:36 2 → 25 good, 13:42 0 → 29 good; close-2 9 → 14 |
 | UI (owner) | **Done** (v0.7.0) | Tap the enlarged box picture to shrink it; Find buttons wrap (all reachable); top message wraps; banner/debug placed below the top bar's real height |
@@ -29,8 +32,7 @@ pale-printed pieces (see `reports/*-frame.jpg`).
 | Tilt slowdown on phone | Partly done | `valid` mask is now always a Uint8Array (all-ones cache when untilted), so segment.js hot loops are monomorphic (JSC deopt hypothesis from open-items-survey); tilt correction skipped under 8 deg (< 1% distortion). Needs a tilted phone report to confirm |
 | Far/steep views | Note | 14:29 (33 deg, far): pieces ~8 px after straightening - too small; hold the phone closer |
 | Tilted report 13:40 | Checked | Straightened image replayed: 27 -> 76 good pieces with v0.7 segmentation |
-| Tilt slowdown on phone | Open | `seg_dist`/`seg_thresh` 15–40x slower only with tilt correction; suspect allocation/GC in `rectifiedSource` — WP5 |
-| **New** | Open | **Lamp shadows on the table**: on both close-ups, the shadowed table area becomes one big foreground blob and swallows the pieces in it. Likely fix: flatten illumination (local background lightness from a large-scale closing/blur of L) before the colour distance |
+| Repo hazard | Note | The repo lives in OneDrive: git intermittently fails with `.git/index: unable to map index file` while OneDrive syncs `.git` (clears on retry within seconds), and OneDrive conflict copies (`*-BBI-NB-*`) appear — now gitignored. Never `git add -A`; stage explicit paths |
 
 **Phone reports 13:36–13:42 (v0.6.0, before WP1/WP2 shipped)** — replay any report with
 `node test/report-replay.js reports/<report>.json --draw` (same taught colours, tilt, Scan detail):
