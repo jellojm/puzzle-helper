@@ -13,10 +13,11 @@ export function chooseGrid(pieces, aspect) {
 }
 
 export class BoxSetup {
-  constructor(worker, onDone, toast) {
+  constructor(worker, onDone, toast, onToggle) {
     this.worker = worker;
     this.onDone = onDone;
     this.toast = toast;
+    this.onToggle = onToggle || (() => {}); // lets the page stop the camera while this is up
     this.file = null;
     this.bitmap = null;
     this.corners = null; // image px, TL TR BR BL
@@ -40,8 +41,9 @@ export class BoxSetup {
   open() {
     $('boxModal').hidden = false;
     if (!this.bitmap) { $('boxEmpty').hidden = false; this.canvas.hidden = true; }
+    this.onToggle();
   }
-  close() { $('boxModal').hidden = true; }
+  close() { $('boxModal').hidden = true; this.onToggle(); }
 
   async load(file) {
     this.file = file;

@@ -36,6 +36,33 @@
     <div id="toast" hidden></div>
     <pre id="debug" hidden></pre>
 
+    <button id="resume" hidden>
+      <strong>Camera paused</strong>
+      <span class="small">Saving battery — tap to carry on scanning</span>
+    </button>
+
+    <div id="findBar" hidden>
+      <button data-filter="corner">Corners</button>
+      <button data-filter="border">Edges</button>
+      <button data-filter="unplaced">Unplaced</button>
+      <button data-filter="unread">Unread</button>
+      <button id="pairsBtn">Matches</button>
+      <button id="mapBtn">Map</button>
+    </div>
+
+    <div id="matchBar" hidden>
+      <button id="matchPrev" aria-label="Previous match">‹</button>
+      <div class="match-mid">
+        <div class="match-pics">
+          <canvas id="matchA" width="120" height="120"></canvas>
+          <canvas id="matchB" width="120" height="120"></canvas>
+        </div>
+        <div id="matchLabel" class="small"></div>
+      </div>
+      <button id="matchNext" aria-label="Next match">›</button>
+      <button id="matchClose" class="icon-btn" aria-label="Close">✕</button>
+    </div>
+
     <canvas id="minimap" hidden aria-label="Box picture: drag to highlight pieces from an area"></canvas>
 
     <section id="findPanel" class="sheet" hidden>
@@ -56,6 +83,13 @@
         <button id="closeMenu" class="icon-btn" aria-label="Close">✕</button>
       </div>
       <div id="menuStats" class="muted"></div>
+      <p id="countWarn" class="warn-note small" hidden></p>
+      <p id="compatNote" class="warn-note small" hidden></p>
+      <div class="menu-actions">
+        <button id="tidyBtn">Tidy up the catalog</button>
+      </div>
+      <p class="muted small">Folds scan groups back together when the same piece was catalogued twice after losing tracking, and drops blobs that never read as pieces.</p>
+      <label class="row"><input id="idleToggle" type="checkbox" checked> Pause the camera when the phone is left still</label>
       <label class="row">Background sensitivity
         <input id="sens" type="range" min="4" max="24" step="1" value="8">
         <span id="sensVal">8</span>
@@ -65,6 +99,13 @@
         <button id="teachBtn">Teach background (<span id="teachCount">auto</span>)</button>
       </div>
       <p class="muted small">If the table isn't one plain color, tap its surfaces once so pieces are separated from it reliably.</p>
+      <label class="row">Scan detail
+        <input id="detail" type="range" min="480" max="1120" step="80" value="640">
+        <span id="detailVal">640</span>
+      </label>
+      <p class="muted small">Lower is faster and much easier on the battery. Raise it only if small pieces are being missed — it does not affect photo (Snap) quality.</p>
+      <label class="row"><input id="outlineToggle" type="checkbox"> Draw full piece outlines (slower)</label>
+      <p class="muted small">Off by default: pieces are marked with a dot, which keeps the overlay smooth.</p>
       <label class="row"><input id="tiltToggle" type="checkbox" checked> Correct for phone tilt (hold at an angle to avoid glare)</label>
       <label class="row">Lens angle
         <input id="fovRange" type="range" min="50" max="80" step="1" value="66">
@@ -91,6 +132,9 @@
           <li><b>Snap</b> takes a full-resolution photo and catalogs every piece in it at once.</li>
           <li>Tap a piece to see where it goes on the box and which pieces fit it. Gold = best match.</li>
           <li>Drag across the box picture to light up every piece from that area.</li>
+          <li>In <b>Find</b>, tap <b>Corners</b> or <b>Edges</b> to light up every border piece on the table — orange for corners, teal for edges. Arrows point to the ones just off screen.</li>
+          <li><b>Matches</b> searches the whole catalog for pairs that fit, with no box picture needed; use ‹ › to step through them.</li>
+          <li><b>Map</b> hides the box picture when it's in the way.</li>
         </ul>
       </details>
     </section>

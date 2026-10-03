@@ -15,6 +15,9 @@ const ROLE = {
   silver: { color: '#c9ced6', width: 3 },
   region: { color: '#ff4fd8', width: 4 },
   section: { color: '#c084fc', width: 5 },
+  border: { color: '#35e0d8', width: 4 },  // edge pieces (one straight side)
+  corner: { color: '#ff8c3a', width: 5 },  // corner pieces (two straight sides)
+  find: { color: '#ff4fd8', width: 4 },    // whatever else the filter bar asked for
 };
 
 // Map processing-frame coordinates to CSS pixels of the overlay, matching the
@@ -74,20 +77,39 @@ function pathFor(ctx, pts, M) {
   ctx.closePath();
 }
 
+// Screen radius of a marker for a detection (proc px -> css px).
+function markRadius(d, M) {
+  return Math.max(4, Math.min(28, (d.r || 10) * M.k * 0.6));
+}
+
 export function drawOverlay(ctx, res, M, opts) {
   ctx.clearRect(0, 0, M.cw, M.ch);
   if (!res) return;
   const t = performance.now() / 1000;
   const byId = new Map();
+  const marks = opts.marks !== false; // fast dots by default; outlines are opt-in
   ctx.lineJoin = 'round';
+  // Marker mode costs one coordinate transform per piece instead of one per
+  // outline point (and with tilt correction each of those is a homography),
+  // which is most of what makes the overlay feel heavy on a phone.
   for (const d of res.dets) {
     if (d.id) byId.set(d.id, d);
     const st = STATUS[d.status] || STATUS.unknown;
+    ctx.globalAlpha = d.border ? 0.5 : 0.9;
+    if (marks) {
+      const [x, y] = M.toScreen(d.cx, d.cy);
+      if (!(x >= -40 && y >= -40 && x <= M.cw + 40 && y <= M.ch + 40)) continue;
+      const r = markRadius(d, M);
+      ctx.beginPath();
+      ctx.arc(x, y, d.status === 'unknown' ? 3 : r * 0.42, 0, Math.PI * 2);
+      ctx.fillStyle = st.stroke;
+      ctx.fill();
+      continue;
+    }
     pathFor(ctx, d.pts, M);
     ctx.setLineDash(st.dash);
     ctx.lineWidth = 2;
     ctx.strokeStyle = st.stroke;
-    ctx.globalAlpha = d.border ? 0.5 : 0.9;
     ctx.stroke();
   }
   ctx.setLineDash([]);
@@ -105,20 +127,38 @@ export function drawOverlay(ctx, res, M, opts) {
     ctx.setLineDash([]);
   }
 
-  // Highlights: on-screen glow, off-screen arrows at the edge.
+  // Highlights: on-screen ring, off-screen arrows at the edge.
+  // No ctx.shadowBlur anywhere — it is re-rasterised per shape and is by far
+  // the most expensive thing a 2D canvas can do on a phone. A translucent
+  // wide ring under a bright thin one reads the same and costs nothing.
   const pulse = 0.6 + 0.4 * Math.sin(t * 5);
   for (const h of res.highlights) {
     const style = ROLE[h.role];
     const d = byId.get(h.id);
     if (h.visible && d) {
-      pathFor(ctx, d.pts, M);
-      if (h.role === 'region') { ctx.fillStyle = 'rgba(255, 79, 216, 0.22)'; ctx.fill(); }
-      ctx.shadowColor = style.color;
-      ctx.shadowBlur = h.role === 'sel' ? 0 : 14 * pulse;
-      ctx.lineWidth = style.width;
-      ctx.strokeStyle = style.color;
-      ctx.stroke();
-      ctx.shadowBlur = 0;
+      if (marks) {
+        const [x, y] = M.toScreen(d.cx, d.cy);
+        const r = markRadius(d, M);
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.globalAlpha = h.role === 'sel' ? 0.3 : 0.18 + 0.16 * pulse;
+        ctx.fillStyle = style.color;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = style.width * 0.7;
+        ctx.strokeStyle = style.color;
+        ctx.stroke();
+      } else {
+        pathFor(ctx, d.pts, M);
+        if (h.role === 'region' || h.role === 'find') { ctx.fillStyle = 'rgba(255, 79, 216, 0.22)'; ctx.fill(); }
+        else if (h.role === 'border') { ctx.fillStyle = 'rgba(53, 224, 216, 0.20)'; ctx.fill(); }
+        else if (h.role === 'corner') { ctx.fillStyle = 'rgba(255, 140, 58, 0.28)'; ctx.fill(); }
+        ctx.globalAlpha = h.role === 'sel' ? 1 : 0.55 + 0.45 * pulse;
+        ctx.lineWidth = style.width;
+        ctx.strokeStyle = style.color;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
       if (h.role === 'gold' || h.role === 'silver') {
         const [x, y] = M.toScreen(d.cx, d.cy);
         badge(ctx, x, y, h.role === 'gold' ? '★' : '·', style.color, EDGE_COLORS[h.edge]);
@@ -127,9 +167,11 @@ export function drawOverlay(ctx, res, M, opts) {
       arrow(ctx, M, h, style.color);
     }
   }
+  ctx.globalAlpha = 1;
 }
 
 function badge(ctx, x, y, text, color, ring) {
+  if (!(x >= -20 && y >= -20 && x <= ctx.canvas.width && y <= ctx.canvas.height)) return;
   ctx.beginPath();
   ctx.arc(x, y, 12, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(0,0,0,0.7)';

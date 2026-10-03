@@ -105,14 +105,23 @@
     const cv = PH.cv;
     opts = opts || {};
     const w = img.w, h = img.h;
+    // Optional per-stage timings (opts.timings = {}) for profiling; and the
+    // experimental knobs below (openK/closeK/boundary) default to the
+    // long-standing behaviour so production output is unchanged.
+    const T = opts.timings;
+    let tm = now();
+    const mark = (k) => { if (T) { const t = now(); T[k] = (T[k] || 0) + (t - tm); tm = t; } };
     const lab = PH.rgbaToLab(img.data, w, h);
+    mark('lab');
     const est = PH.estimateBackground(lab, w, h);
+    mark('bgEst');
     // A plain cloth (one dominant color that isn't a puzzle color) is handled
     // more precisely by the distance model; the palette table is for mixed
     // tables. Taught colors always win.
     const plainCloth = est.frac >= 0.2 && !(opts.taught && opts.taught.length) &&
       (!opts.palette || opts.palette[PH.coarseBin(est.L | 0, est.a | 0, est.b | 0)] * 8 < est.frac);
     const lut = plainCloth ? null : PH.buildBgLut(lab, w * h, opts);
+    mark('lut');
     let bg = est;
     if (opts.bg && opts.bgSmooth) {
       const prev = opts.bg, k = opts.bgSmooth;
@@ -132,6 +141,7 @@
       const d = 2 * Math.sqrt(dL * dL + da * da + db * db);
       dd[p] = d > 255 ? 255 : d;
     }
+    mark('dist');
     // Threshold from the cloth's own noise: the background is the large peak
     // near zero distance, so its median distance measures the cloth texture.
     // (Otsu would split halfway to the average piece color and cut away any
@@ -154,14 +164,60 @@
       thresh = PH.clamp(Math.max(minT, med * 3.5), minT, Math.max(minT, otsu));
     }
     cv.threshold(dist, mask, thresh, 255, cv.THRESH_BINARY);
+    mark('thresh');
 
-    const k3 = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
-    const k5 = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
-    cv.morphologyEx(mask, mask, cv.MORPH_OPEN, k3);
-    cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, k5);
+    // Experimental: a piece has a crisp outline against any plain table even
+    // where its print matches the table's colour. Lightness gradient above
+    // `boundaryT` is added to the mask, so a pale piece becomes a closed ring
+    // and RETR_EXTERNAL returns its outline.
+    if (opts.boundary) {
+      // L plane via cv.split (WASM) rather than a JS strided copy.
+      const lab3 = new cv.Mat(h, w, cv.CV_8UC3); lab3.data.set(lab);
+      const planes = new cv.MatVector(); cv.split(lab3, planes);
+      const Lm = planes.get(0);
+      lab3.delete(); planes.delete();
+      const gx = new cv.Mat(), gy = new cv.Mat(), ax = new cv.Mat(), ay = new cv.Mat(), mag = new cv.Mat();
+      cv.Scharr(Lm, gx, cv.CV_16S, 1, 0); cv.Scharr(Lm, gy, cv.CV_16S, 0, 1);
+      cv.convertScaleAbs(gx, ax, 1 / 16); cv.convertScaleAbs(gy, ay, 1 / 16);
+      cv.addWeighted(ax, 0.5, ay, 0.5, 0, mag);
+      cv.threshold(mag, mag, opts.boundaryT || 10, 255, cv.THRESH_BINARY);
+      if (opts.boundary === 'fill') {
+        // Close the edge rings and keep only what they enclose: a ring that
+        // doesn't close adds nothing (no stray edge fragments), a closed one
+        // yields a solid piece. Enclosed = not reachable from the frame edge.
+        const bk = opts.boundaryClose || 5;
+        const kb = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(bk, bk));
+        cv.morphologyEx(mag, mag, cv.MORPH_CLOSE, kb);
+        const inv = new cv.Mat();
+        cv.bitwise_not(mag, inv); // free space = 255
+        // Paint a 1 px free frame so every outside region touches (0,0), then
+        // ONE flood fill from there empties all the outside; whatever is still
+        // 255 is enclosed by a closed ring.
+        cv.rectangle(inv, new cv.Point(0, 0), new cv.Point(w - 1, h - 1), new cv.Scalar(255), 1);
+        const ff = cv.Mat.zeros(h + 2, w + 2, cv.CV_8UC1);
+        cv.floodFill(inv, ff, new cv.Point(0, 0), new cv.Scalar(0), new cv.Rect(), new cv.Scalar(0), new cv.Scalar(0), 4);
+        // Add interiors and the rings themselves.
+        cv.bitwise_or(mask, inv, mask);
+        cv.bitwise_or(mask, mag, mask);
+        [kb, inv, ff].forEach((m) => m.delete());
+      } else {
+        cv.bitwise_or(mask, mag, mask);
+      }
+      [Lm, gx, gy, ax, ay, mag].forEach((m) => m.delete());
+      mark('boundary');
+    }
+
+    const openK = opts.openK === undefined ? 3 : opts.openK;
+    const closeK = opts.closeK === undefined ? 5 : opts.closeK;
+    const k3 = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(Math.max(1, openK), Math.max(1, openK)));
+    const k5 = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(Math.max(1, closeK), Math.max(1, closeK)));
+    if (openK > 1) cv.morphologyEx(mask, mask, cv.MORPH_OPEN, k3);
+    if (closeK > 1) cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, k5);
+    mark('morph');
     const contours = new cv.MatVector();
     const hier = new cv.Mat();
     cv.findContours(mask, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
+    mark('contours');
 
     const minArea = opts.minArea || 150;
     const maxArea = w * h * 0.2;
@@ -187,6 +243,7 @@
       if (PH.DEBUG_SEG) console.log('piece-like', like.map(Math.round).sort((a, b) => a - b).join(','));
     }
     if (PH.DEBUG_SEG) console.log('blobs', blobs.length, 'solid', blobs.filter((b) => b.solidity > 0.75).map((b) => Math.round(b.area)).sort((a, b) => a - b).join(','), 'unitA', unitA);
+    mark('blobStats');
 
     // Split clusters of touching pieces (watershed from piece centers).
     const parts = [];
@@ -205,6 +262,7 @@
       parts.push({ cnt: b.cnt, split: false });
     }
     if (labMat) labMat.delete();
+    mark('split');
 
     const dets = [];
     const noHier = new cv.Mat();
@@ -237,6 +295,7 @@
     }
     noHier.delete();
     contours.delete(); hier.delete(); dist.delete(); mask.delete(); k3.delete(); k5.delete();
+    mark('dets');
     return { lab, w, h, bg, thresh: thresh / 2, dets, lut, unitArea: unitA };
   };
 

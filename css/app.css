@@ -47,9 +47,47 @@ button { font: inherit; color: inherit; }
 #debug { position: absolute; top: calc(var(--safe-t) + 100px); left: 8px; margin: 0; padding: 6px 8px;
   font: 11px/1.35 ui-monospace, Menlo, monospace; background: rgba(0, 0, 0, 0.6); border-radius: 6px; pointer-events: none; }
 
+/* Camera paused (menu open, or the phone was left sitting still). */
+#resume { position: absolute; inset: 0; z-index: 7; display: flex; flex-direction: column; gap: 6px;
+  align-items: center; justify-content: center; border: 0; background: rgba(10, 13, 17, 0.88); color: var(--text); }
+#resume strong { font-size: 19px; }
+#resume span { color: var(--muted); }
+
+/* Find-mode chips: piece classes to light up, match cycling, map toggle. */
+/* The gaps between chips stay click-through, so the chip row never steals a
+   tap meant for a piece underneath it. */
+#findBar { position: absolute; left: 0; right: 0; bottom: calc(var(--safe-b) + 68px); z-index: 6;
+  display: flex; gap: 8px; padding: 6px 12px; overflow-x: auto; scrollbar-width: none; pointer-events: none; }
+#findBar::-webkit-scrollbar { display: none; }
+#findBar button { pointer-events: auto; flex: none; border: 1px solid var(--line); border-radius: 999px; padding: 7px 14px;
+  background: rgba(0, 0, 0, 0.62); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  color: var(--text); font-size: 13px; }
+#findBar button.on { background: var(--accent); border-color: transparent; font-weight: 600; }
+#findBar button[data-filter=corner].on { background: #ff8c3a; color: #111418; }
+#findBar button[data-filter=border].on { background: #35e0d8; color: #111418; }
+#findBar button:disabled { opacity: 0.45; }
+
+#matchBar { position: absolute; left: 8px; right: 8px; bottom: calc(var(--safe-b) + 112px); z-index: 6;
+  display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 14px;
+  background: rgba(22, 26, 32, 0.94); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5); }
+#matchBar > button { border: 0; background: rgba(255, 255, 255, 0.1); border-radius: 10px;
+  width: 36px; height: 48px; font-size: 24px; line-height: 1; flex: none; }
+#matchBar > button:disabled { opacity: 0.35; }
+#matchBar .icon-btn { height: 32px; width: 32px; font-size: 15px; }
+.match-mid { flex: 1; min-width: 0; text-align: center; }
+.match-pics { display: flex; gap: 8px; justify-content: center; align-items: center; }
+.match-pics canvas { width: 56px; height: 56px; border-radius: 8px; background: #000; border: 2px solid transparent; }
+#matchA { border-color: #ffffff; }
+#matchB { border-color: var(--gold); }
+#matchLabel { margin-top: 4px; color: var(--muted); }
+.warn-note { color: #ffb347; }
+
 #minimap { position: absolute; left: 10px; bottom: calc(var(--safe-b) + 78px); width: 42vw; max-width: 340px;
   border-radius: 8px; border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); touch-action: none; }
 #minimap.big { width: calc(100vw - 20px); max-width: 720px; }
+/* Keep the box picture clear of the chip bar / match cycler stacked above the toolbar. */
+body.findbar #minimap { bottom: calc(var(--safe-b) + 118px); }
+body.findbar.matchbar #minimap { bottom: calc(var(--safe-b) + 230px); }
 
 #toolbar { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-around;
   padding: 8px 6px calc(var(--safe-b) + 8px); background: linear-gradient(transparent, rgba(0, 0, 0, 0.75) 35%); }

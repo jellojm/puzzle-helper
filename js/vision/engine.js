@@ -15,7 +15,11 @@
 
   class Engine {
     constructor(opts) {
-      this.opts = Object.assign({ procW: 960, snapProcW: 1600, minDE: 8, lightW: 0.5, budgetMs: 45 }, opts || {});
+      // procW is the long side the live camera frames are analyzed at. Every
+      // per-pixel pass (Lab conversion, background distance, threshold) scales
+      // with its square, and those passes are what makes a phone sweat, so it
+      // is deliberately well below the camera's own resolution.
+      this.opts = Object.assign({ procW: +(typeof process !== 'undefined' && process.env && process.env.PROCW) || 640, snapProcW: 1600, minDE: 8, lightW: 0.5, budgetMs: 45 }, opts || {});
       this.reset();
     }
 
@@ -37,6 +41,13 @@
       this.rnd = PH.mulberry32(12345);
       this.matchCache = new Map();
       this.taught = this.taught || [];
+      // Cleared too: "Clear everything" used to leave the box picture live in
+      // memory, so the minimap stayed up and old placements kept coming back.
+      this.box = null;
+      this.filter = null;   // 'border' | 'corner' | 'unplaced' | 'unread'
+      this.pairSel = null;  // the pair being cycled through in the Matches bar
+      this.lastProc = null;
+      this.lastReloc = 0;
     }
 
     // ---------- catalog helpers ----------
@@ -59,15 +70,21 @@
       return p;
     }
     counts() {
-      let shaped = 0, placed = 0, located = 0, sections = 0, pieces = 0;
+      let shaped = 0, placed = 0, located = 0, sections = 0, pieces = 0, border = 0, corner = 0;
+      const islands = new Set();
       for (const p of this.pieces.values()) {
         if (p.kind === 'section') { sections++; continue; }
         pieces++;
         if (p.t1) shaped++;
         if (p.t2 && p.t2.conf >= 0.35) placed++;
-        if (p.pos) located++;
+        if (p.pos) { located++; islands.add(p.island); }
+        const f = edgeFlags(p);
+        if (f.corner) corner++; else if (f.border) border++;
       }
-      return { pieces, sections, shaped, placed, located };
+      // `islands` is how many disconnected scan groups the table map is in.
+      // More than a few means tracking keeps breaking and the same physical
+      // pieces are being catalogued more than once.
+      return { pieces, sections, shaped, placed, located, border, corner, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
     }
 
     // ---------- tracking ----------
@@ -299,12 +316,18 @@
       source = st.source;
       const proc = source.getProc(this.opts.procW);
       this.lastProc = proc; // kept for debug reports (what the app actually analyzed)
-      const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25 }));
+      // Per-stage segmentation timings ride along in out.timings (as flat
+      // seg_* numbers) so a phone report shows where the time actually goes.
+      const segT = {};
+      const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25, timings: segT }));
       this.bg = seg.bg; this.thresh = seg.thresh;
       const t1 = now();
       const dets = this.classify(seg.dets, seg.unitArea);
       const unitF = this.unitFrame(dets);
       this.link(dets, unitF);
+      // Set before the pose work so the shape-based fallback below can read
+      // outlines; nothing in it depends on the pose.
+      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs };
       let ok = this.fitPose(dets, unitF);
       if (!ok) {
         const r = this.relocalize(dets, unitF);
@@ -318,15 +341,38 @@
         this.lost++;
         const anyPlaced = [...this.pieces.values()].some((p) => p.pos);
         const goodDets = dets.filter((d) => !d.border && !d.merged).length;
-        // Start the map (first frame) or a new island when lost over fresh pieces.
-        if (goodDets >= 2 && (!anyPlaced || this.lost > 12)) {
+        // Color fingerprints fail under changed light or zoom; outlines don't.
+        // Try the (slower) shape match before giving up, but only on a steady
+        // view and at most once a second. It needs outlines, so read a few
+        // first — capped, because this runs on the slow path already.
+        if (anyPlaced && this.lost > 3 && this.frameCtx.still && now() - this.lastReloc > 1200) {
+          this.lastReloc = now();
+          let budget = 8;
+          for (const d of dets) {
+            if (budget <= 0 || now() > t0 + this.opts.budgetMs * 2) break;
+            if (d.border || d.merged) continue;
+            this.detT1(d); budget--;
+          }
+          const r = this.relocalizeByShape(dets, unitF);
+          if (r) {
+            this.pose = r.T; this.island = r.island; ok = true;
+            for (const d of dets) d.id = null;
+            for (const a of r.assign) a.d.id = a.p.id;
+          }
+        }
+        // Start the map (first frame), or fork a new scan group after a
+        // sustained loss. Forking early is what fragments the catalog (every
+        // piece in view is re-catalogued as new, so the count runs past the
+        // real puzzle size), but refusing to fork stalls cataloguing
+        // altogether, so this is a compromise — `tidy()` folds duplicate
+        // groups back together afterwards.
+        if (!ok && goodDets >= 2 && (!anyPlaced || this.lost > 20)) {
           this.startIsland(unitF);
           ok = true;
-        } else {
+        } else if (!ok) {
           this.pose = null;
         }
       }
-      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs };
       if (ok) { this.lost = 0; this.assign(dets, unitF, proc); }
       const t2 = now();
       const work = this.runQueue(dets, t0 + this.opts.budgetMs);
@@ -335,6 +381,7 @@
       // Lets the page map straightened coordinates back onto the camera view.
       out.rect = st.rect ? { H: st.rect.H, Hinv: st.rect.Hinv, tilt: PH.tiltDeg(info.tilt.down) } : null;
       out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2 };
+      for (const k in segT) out.timings['seg_' + k] = segT[k];
       return out;
     }
 
@@ -398,13 +445,17 @@
       };
     }
 
+    // Tilt estimation and its safety check run once per photo, not per frame,
+    // so they use a fixed good resolution rather than the live scan width
+    // (which is tuned down for speed and costs a degree or two of accuracy).
+    stillProcW() { return Math.max(this.opts.procW, 960); }
     countPieceLike(source) {
-      const proc = source.getProc(this.opts.procW);
+      const proc = source.getProc(this.stillProcW());
       const seg = PH.segment(proc, this.segOpts({ splitBudgetMs: 60 }));
       return seg.dets.filter((d) => !d.border && PH.pieceScore(d.pts, d.area) > PH.MIN_CORNER_SCORE).length;
     }
     estimatePhotoTilt(source) {
-      const proc = source.getProc(this.opts.procW);
+      const proc = source.getProc(this.stillProcW());
       const seg = PH.segment(proc, this.segOpts({ splitBudgetMs: 60 }));
       const unit = seg.unitArea;
       // Pick blobs by shape (4 good corners), not size: the small far-away
@@ -744,6 +795,8 @@
       if (!P) return null;
       this.selection = { id };
       this.region = null;
+      this.filter = null;
+      this.pairSel = null;
       return P.kind === 'section' ? this.describeSection(id) : this.describe(id);
     }
     // Loose pieces that attach to section S (by box placement).
@@ -807,6 +860,135 @@
       this.region = { c0, r0, c1, r1, ids: new Set(ids) };
       return ids.length;
     }
+    /** Highlight a whole class of pieces at once, with no box picture needed.
+     *  'border' = at least one straight edge, 'corner' = two straight edges
+     *  meeting, 'unplaced' = shape read but not found on the box picture,
+     *  'unread' = seen but its shape hasn't been read yet. */
+    setFilter(kind) {
+      this.filter = kind || null;
+      this.selection = null;
+      this.region = null;
+      this.pairSel = null;
+      return this.filterIds().length;
+    }
+    filterIds() {
+      if (!this.filter) return [];
+      const out = [];
+      for (const p of this.pieces.values()) {
+        if (p.kind === 'section') continue;
+        const f = edgeFlags(p);
+        const hit = this.filter === 'corner' ? f.corner
+          : this.filter === 'border' ? f.border && !f.corner
+            : this.filter === 'unplaced' ? !!p.t1 && !(p.t2 && p.t2.conf >= 0.35)
+              : this.filter === 'unread' ? !p.t1
+                : false;
+        if (hit) out.push(p.id);
+      }
+      return out;
+    }
+
+    /** Every confident pair in the catalog, strongest first — "show me any
+     *  matches you have" with no piece selected and no box picture.
+     *  A pair is kept when each piece's best partner on that edge is the other
+     *  piece (mutual best) and the probability clears `minProb`.
+     *
+     *  Matching is O(pieces^2), so this runs against a time budget and is
+     *  resumable: call again with the returned `from` to continue. The per
+     *  piece results land in matchCache, so a second pass over the same
+     *  catalog version is nearly free.
+     */
+    scanPairs(opts) {
+      opts = opts || {};
+      const minProb = opts.minProb || 0.8;
+      const deadline = now() + (opts.budgetMs || 1200);
+      const ids = [];
+      for (const p of this.pieces.values()) if (p.t1 && p.kind !== 'section') ids.push(p.id);
+      ids.sort((a, b) => a - b);
+      const from = opts.from || 0;
+      let i = from;
+      const best = new Map();
+      for (; i < ids.length; i++) {
+        best.set(ids[i], this.matchesFor(ids[i]));
+        if (now() > deadline) { i++; break; }
+      }
+      const scanned = i;
+      // Pair up whatever has been matched so far (both halves must be in the cache).
+      const seen = new Set();
+      const pairs = [];
+      const cached = (id) => { const c = this.matchCache.get(id); return c && c.version === this.version ? c.res : null; };
+      for (const id of ids.slice(0, scanned)) {
+        const res = cached(id);
+        if (!res) continue;
+        for (const r of res) {
+          const m = r.matches[0];
+          if (!m || (m.prob || 0) < minProb) continue;
+          const backRes = cached(m.id);
+          if (!backRes) continue;
+          const back = backRes[m.edge] && backRes[m.edge].matches[0];
+          if (!back || back.id !== id || back.edge !== r.edge) continue;
+          const key = id < m.id ? id + ':' + m.id : m.id + ':' + id;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const A = this.pieces.get(id), B = this.pieces.get(m.id);
+          pairs.push({
+            a: id, b: m.id, edgeA: r.edge, edgeB: m.edge,
+            prob: Math.min(m.prob, back.prob || 0),
+            loopOk: !!m.loopOk,
+            aLocated: !!A.pos && A.island === this.island,
+            bLocated: !!B.pos && B.island === this.island,
+          });
+        }
+      }
+      pairs.sort((x, y) => y.prob - x.prob);
+      return { pairs, from: scanned, total: ids.length, done: scanned >= ids.length };
+    }
+    // Highlight one pair from scanPairs on the camera view.
+    selectPair(a, b) {
+      this.filter = null;
+      this.region = null;
+      this.selection = null;
+      this.pairSel = a && b ? { a, b } : null;
+    }
+
+    /** Housekeeping after a messy session: fold scan groups back together by
+     *  shape and drop entries that never turned out to be pieces. Returns what
+     *  it changed so the UI can say so. */
+    tidy() {
+      const before = this.counts();
+      // 1. Merge islands: a piece whose shape matches a piece in another island
+      //    is the same physical piece seen after tracking broke.
+      const shaped = [...this.pieces.values()].filter((p) => p.t1 && p.kind !== 'section');
+      const dropped = [];
+      for (let i = 0; i < shaped.length; i++) {
+        const A = shaped[i];
+        if (!this.pieces.has(A.id)) continue;
+        for (let j = i + 1; j < shaped.length; j++) {
+          const B = shaped[j];
+          if (!this.pieces.has(B.id) || B.island === A.island) continue;
+          if (!PH.samePiece(A.t1, B.t1, PH.SAME_SHAPE).ok) continue;
+          // Keep the better-observed copy and fold the other one's evidence in.
+          const keep = (A.t1.nObs || 1) >= (B.t1.nObs || 1) ? A : B, drop = keep === A ? B : A;
+          keep.wrong = [...new Set(keep.wrong.concat(drop.wrong))];
+          for (let k = 0; k < 4; k++) keep.joined[k] = keep.joined[k] || drop.joined[k];
+          this.removePiece(drop.id);
+          dropped.push(drop.id);
+          if (drop === A) break;
+        }
+      }
+      // 2. Drop never-identified leftovers: no shape, not on the table map, and
+      //    repeated attempts to read them failed (glare, shadows, crumbs).
+      for (const p of [...this.pieces.values()]) {
+        if (p.kind === 'section') {
+          if (p.sec && p.sec.failed) { this.removePiece(p.id); dropped.push(p.id); }
+          continue;
+        }
+        if (!p.t1 && !p.pos && (p.t1Fail || 0) >= 3) { this.removePiece(p.id); dropped.push(p.id); }
+      }
+      this.matchCache.clear();
+      this.selection = null; this.region = null; this.pairSel = null;
+      return { removed: dropped.length, before, after: this.counts() };
+    }
+
     feedback(f) {
       const A = this.pieces.get(f.a), B = this.pieces.get(f.b);
       if (!A || !B) return;
@@ -827,7 +1009,11 @@
         if (d.merged) status = p && p.kind === 'section' && p.sec && p.sec.cells ? 'section' : 'merged';
         else if (p) status = p.t2 && p.t2.conf >= 0.35 ? 'placed' : p.t1 ? 'shaped' : 'seen';
         if (p) byId.set(p.id, d);
-        return { id: d.id, status, cx: d.cx, cy: d.cy, pts: simplify(d.pts, 1.5), border: d.border };
+        // `r` lets the page draw a marker without walking the outline at all.
+        // The outline itself is simplified harder than it used to be: it is
+        // only used for hit-testing a tap and for the optional outline view,
+        // and every point costs a transform (a homography, with tilt on).
+        return { id: d.id, status, cx: d.cx, cy: d.cy, r: Math.round(Math.sqrt(d.area || 1) / 2), pts: simplify(d.pts, this.opts.outlineEps || 2.5), border: d.border };
       });
       const hl = [];
       const locate = (id, role, extra) => {
@@ -853,6 +1039,27 @@
         if (res) for (const r of res) r.matches.slice(0, 3).forEach((m, i) => locate(m.id, i === 0 && m.prob >= 0.5 ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge }));
       }
       if (this.region) for (const id of this.region.ids) locate(id, 'region');
+      if (this.pairSel) {
+        locate(this.pairSel.a, 'sel');
+        locate(this.pairSel.b, 'gold');
+      }
+      if (this.filter) {
+        // A class filter can match hundreds of pieces. Everything in view is
+        // outlined, but only the nearest few off-screen ones get an arrow,
+        // otherwise the edges of the screen fill up with clutter.
+        const role = this.filter === 'corner' ? 'corner' : this.filter === 'border' ? 'border' : 'find';
+        const off = [];
+        for (const id of this.filterIds()) {
+          if (byId.has(id)) { locate(id, role); continue; }
+          const p = this.pieces.get(id);
+          if (p && p.pos && inv && p.island === this.island) off.push(p);
+        }
+        if (off.length) {
+          const c = PH.simApply(this.pose, proc.w / 2, proc.h / 2);
+          off.sort((x, y) => Math.hypot(x.pos[0] - c[0], x.pos[1] - c[1]) - Math.hypot(y.pos[0] - c[0], y.pos[1] - c[1]));
+          for (const p of off.slice(0, 6)) locate(p.id, role);
+        }
+      }
       // Auto-flag: mutual best matches among visible pieces.
       const links = [];
       const vis = [...byId.keys()].filter((id) => this.pieces.get(id).t1);
@@ -920,6 +1127,23 @@
       };
     }
   }
+
+  /** Flat-edge summary of a piece: how many straight edges it has, and whether
+   * two of them meet (a corner piece). Edges are stored clockwise, so adjacent
+   * flats are neighbours in the array. */
+  function edgeFlags(p) {
+    const t1 = p && p.t1;
+    if (!t1 || !t1.flats) return { n: 0, border: false, corner: false };
+    const f = t1.flats;
+    let n = 0, corner = false;
+    for (let i = 0; i < 4; i++) {
+      if (!f[i]) continue;
+      n++;
+      if (f[(i + 1) % 4]) corner = true;
+    }
+    return { n, border: n > 0, corner };
+  }
+  PH.edgeFlags = edgeFlags;
 
   // Douglas-Peucker on a flat Int32Array outline, returns flat array.
   function simplify(pts, eps) {

@@ -24,7 +24,25 @@ const S = {
   tiltOn: true,
   errors: [],       // recent errors, included in reports
   history: [],      // recent frame timings, included in reports
+  // power
+  running: false,   // the app screen is up
+  active: false,    // camera + vision loop are actually running
+  idle: false,      // auto-paused after the phone was left still
+  idleOn: true,
+  calm: 0,          // consecutive frames that taught us nothing (slows the pump)
+  lastActivity: 0,
+  // rendering / analysis cost
+  procW: 640,       // live analysis width; see Settings > Scan detail
+  outlines: false,  // dots by default, full outlines on request
+  // find bar
+  filter: null,     // 'corner' | 'border' | 'unplaced' | 'unread'
+  mapHidden: false,
+  pairs: [],
+  pairIdx: 0,
 };
+const IDLE_MS = 90000;   // phone left sitting still -> pause the camera
+const BASE_GAP = 110;    // ~9 frames/s while something is happening
+const MAX_GAP = 600;     // ~1.7 frames/s when nothing at all is changing
 window.addEventListener('error', (e) => logError('page: ' + e.message));
 window.addEventListener('unhandledrejection', (e) => logError('promise: ' + (e.reason && e.reason.message || e.reason)));
 function logError(msg) { S.errors.push({ t: new Date().toISOString(), msg: String(msg) }); if (S.errors.length > 50) S.errors.shift(); }
@@ -32,7 +50,7 @@ function logError(msg) { S.errors.push({ t: new Date().toISOString(), msg: Strin
 // ---------- worker ----------
 const worker = new Worker('js/worker.js');
 const W = { post: (m, t) => worker.postMessage(m, t || []) };
-const boxSetup = new BoxSetup(W, () => toast('Preparing box picture…'), toast);
+const boxSetup = new BoxSetup(W, () => toast('Preparing box picture…'), toast, () => applyPower());
 
 worker.onmessage = (e) => {
   const m = e.data;
@@ -44,6 +62,7 @@ worker.onmessage = (e) => {
       $('modeHint').textContent = modeHint(S.mode);
       setBox(m.box);
       if (m.settings) { $('sens').value = m.settings.minDE; $('sensVal').textContent = m.settings.minDE; showTaught(m.settings.taught); }
+      W.post({ type: 'settings', settings: { procW: S.procW } }); // kept on the page, not in the worker's store
       updateStats(m.counts);
       break;
     case 'frame': {
@@ -54,6 +73,21 @@ worker.onmessage = (e) => {
       S.busy = false;
       S.history.push({ t: Math.round(now), grab: Math.round(S.grabMs || 0), ...Object.fromEntries(Object.entries(m.timings).map(([k, v]) => [k, Math.round(v)])), dets: m.dets.length, tracking: m.tracking, island: m.island, still: S.lastStill });
       if (S.history.length > 60) S.history.shift();
+      // Did this frame change anything? If not, ease off the frame pump.
+      const c = m.counts, pc = S.prevCounts;
+      const changed = !pc || c.pieces !== pc.pieces || c.shaped !== pc.shaped || c.placed !== pc.placed || c.sections !== pc.sections;
+      S.prevCounts = c;
+      // The view itself moving must also wake the pump, and it has to be
+      // judged from the picture, not the motion sensor: on iOS Chrome the
+      // motion permission is often off, and then isStill() is always true.
+      let sx = 0, sy = 0;
+      for (const d of m.dets) { sx += d.cx; sy += d.cy; }
+      const sig = m.dets.length ? [m.dets.length, sx / m.dets.length, sy / m.dets.length] : null;
+      const moved = !sig || !S.sig || sig[0] !== S.sig[0] ||
+        Math.hypot(sig[1] - S.sig[1], sig[2] - S.sig[2]) > m.procW * 0.01;
+      S.sig = sig;
+      if (changed || moved || !S.lastStill || m.timings.t1 || m.timings.t2) { if (changed) noteActivity(); S.calm = 0; }
+      else S.calm++;
       updateStats(m.counts, m.tracking);
       if (S.debug) showDebug(m);
       break;
@@ -72,7 +106,25 @@ worker.onmessage = (e) => {
     case 'boxCorners': if (m.corners) boxSetup.setCorners(m.corners); break;
     case 'selected': showFind(m.desc); break;
     case 'region': S.region = m.cells; toast(m.count ? `${m.count} catalogued pieces belong in that area.` : 'No catalogued pieces placed in that area yet.'); drawMinimap(); break;
-    case 'report': finishReport(m.data, m.analyzed); break;
+    case 'filter': {
+      const label = { corner: 'corner pieces', border: 'edge pieces', unplaced: 'pieces not placed on the box', unread: 'pieces whose shape is unread' }[m.kind];
+      if (m.kind) toast(m.count ? `${m.count} ${label} highlighted. Arrows point to the nearest ones off screen.` : `No ${label} found yet — read more shapes first.`, 3500);
+      S.needDraw = true;
+      break;
+    }
+    case 'pairs':
+      S.pairs = m.pairs;
+      S.pairsDone = m.done;
+      if (!m.done) { toast(`Looking for matches… ${m.from} of ${m.total}`, 20000); W.post({ type: 'pairs', from: m.from }); }
+      else $('toast').hidden = true;
+      showMatches();
+      break;
+    case 'tidied':
+      toast(m.removed ? `Tidied up: removed ${m.removed} duplicate or leftover entries. ${m.counts.pieces} pieces now.`
+        : 'Nothing to tidy — no duplicates found.', 5000);
+      updateStats(m.counts);
+      break;
+    case 'report': finishReport(m.data, m.analyzed, m.boxImg); break;
     case 'error':
       S.busy = false; S.snapping = false;
       logError(`worker(${m.where}): ${m.message}`);
@@ -102,20 +154,89 @@ async function openCamera() {
 // iOS hands the camera to the photo picker (Box/Snap) or another app and
 // doesn't give it back; reopen it whenever we come back to a dead stream.
 async function ensureCamera() {
-  if (!S.usingCamera || S.reopening || document.hidden || S.pickerOpen) return;
+  if (!S.usingCamera || S.reopening || !scanningWanted()) return;
   const dead = !S.track || S.track.readyState === 'ended' || S.track.muted || video.paused;
   if (!dead) return;
   S.reopening = true;
   try { await openCamera(); } catch (e) { logError('camera reopen: ' + e.message); }
   S.reopening = false;
+  applyPower();
 }
+
+// ---------- power ----------
+// The camera and the vision loop are the whole battery budget, so both stop
+// the moment nothing is looking at the camera view: Settings or the box editor
+// open, the app in the background, or the phone left sitting still. The camera
+// is released outright (not just paused) so the recording indicator goes out.
+function scanningWanted() {
+  return S.running && !document.hidden && !S.pickerOpen && !S.idle &&
+    $('menu').hidden && $('boxModal').hidden && $('start').hidden;
+}
+function releaseCamera() {
+  const st = video.srcObject;
+  if (st) for (const t of st.getTracks()) t.stop();
+  video.srcObject = null;
+  S.track = null;
+  try { video.pause(); } catch (_) { /* already paused */ }
+}
+function applyPower() {
+  const want = scanningWanted();
+  $('resume').hidden = !(S.idle && S.running && !document.hidden && $('menu').hidden && $('boxModal').hidden);
+  if (want === S.active) return;
+  S.active = want;
+  if (want) {
+    acquireWakeLock();
+    S.calm = 0; S.lastSend = 0; S.lastActivity = performance.now();
+    if (S.usingCamera && (!S.track || S.track.readyState === 'ended')) ensureCamera();
+    else video.play().catch(() => {});
+    if (!S.rafId) S.rafId = requestAnimationFrame(loop);
+  } else {
+    releaseWakeLock();
+    if (S.usingCamera) releaseCamera();
+    else try { video.pause(); } catch (_) { /* test video */ }
+    if (S.rafId) { cancelAnimationFrame(S.rafId); S.rafId = null; }
+    S.busy = false;
+  }
+}
+// The screen must stay on while sweeping, but not while a menu is up.
+async function acquireWakeLock() {
+  if (!navigator.wakeLock || S.wakeLock) return;
+  try {
+    S.wakeLock = await navigator.wakeLock.request('screen');
+    S.wakeLock.addEventListener('release', () => { S.wakeLock = null; });
+  } catch (_) { /* not supported, or denied while hidden */ }
+}
+function releaseWakeLock() {
+  if (!S.wakeLock) return;
+  S.wakeLock.release().catch(() => {});
+  S.wakeLock = null;
+}
+// Anything that means "the user is still working" postpones the idle pause.
+function noteActivity() {
+  S.lastActivity = performance.now();
+  S.calm = 0;
+  if (S.idle) { S.idle = false; applyPower(); }
+}
+document.addEventListener('pointerdown', noteActivity, true);
+$('resume').onclick = noteActivity;
+// Whatever hides or shows a full-screen panel, the camera follows it. Watching
+// the attribute is more reliable than remembering to call applyPower() from
+// every button that opens or closes one.
+const powerWatch = new MutationObserver(() => applyPower());
+['menu', 'boxModal', 'start'].forEach((id) => powerWatch.observe($(id), { attributes: true, attributeFilter: ['hidden'] }));
+$('idleToggle').onchange = (e) => { S.idleOn = e.target.checked; noteActivity(); saveLocal(); };
 // While a photo picker has the camera, don't fight it for the camera.
-document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('#snapBtn, #boxPick, #boxRetake')) S.pickerOpen = true; }, true);
-const pickerDone = () => { S.pickerOpen = false; setTimeout(ensureCamera, 300); };
+document.addEventListener('click', (e) => {
+  if (e.target.closest && e.target.closest('#snapBtn, #boxPick, #boxRetake')) { S.pickerOpen = true; applyPower(); }
+}, true);
+const pickerDone = () => { S.pickerOpen = false; noteActivity(); applyPower(); setTimeout(ensureCamera, 300); };
 ['snapInput', 'boxInput'].forEach((id) => { $(id).addEventListener('change', pickerDone); $(id).addEventListener('cancel', pickerDone); });
-document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(pickerDone, 800); });
+document.addEventListener('visibilitychange', () => {
+  applyPower(); // backgrounded: drop the camera and the loop straight away
+  if (!document.hidden) setTimeout(pickerDone, 800);
+});
 window.addEventListener('focus', () => setTimeout(pickerDone, 800));
-setInterval(ensureCamera, 2000);
+setInterval(() => { if (S.active) ensureCamera(); }, 2000);
 
 async function startCamera() {
   $('startBtn').disabled = true;
@@ -142,9 +263,10 @@ function enterApp() {
   $('start').hidden = true;
   $('app').hidden = false;
   if (!S.workerStarted) { S.workerStarted = true; W.post({ type: 'init' }); }
-  if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {});
+  S.running = true;
+  noteActivity();
   setMode('scan');
-  requestAnimationFrame(loop);
+  applyPower();
 }
 
 // Device motion -> "still" flag so blurry frames aren't used for shape reading.
@@ -166,6 +288,10 @@ async function requestMotion() {
     S.motion.rot = S.motion.rot * 0.7 + rot * 0.3;
     S.motion.acc = S.motion.acc * 0.7 + acc * 0.3;
     S.motion.t = performance.now();
+    S.hasMotion = true;
+    // Picking the phone up or sweeping it counts as "still working"; the small
+    // wobble of a phone propped on the table does not.
+    if (rot > 12 || acc > 0.4) noteActivity();
   });
 }
 function isStill() {
@@ -209,16 +335,38 @@ async function sendFrame() {
   W.post({ type: 'frame', bitmap: bmp, still: S.lastStill, tilt: S.lastTilt }, [bmp]);
 }
 
+// Frames are only worth sending while something is changing. Each frame that
+// teaches the engine nothing (same counts, nothing read, phone held still)
+// backs the pump off, down to about 1 frame/s; any movement or new piece
+// snaps it straight back to full rate.
+function frameGap() {
+  // While something is highlighted the user is hunting for it on the table, so
+  // keep the view responsive however long they hold still.
+  const cap = S.last && S.last.highlights && S.last.highlights.length ? 250 : MAX_GAP;
+  return Math.min(cap, BASE_GAP * Math.pow(1.5, Math.min(S.calm, 6)));
+}
+
 function loop() {
-  requestAnimationFrame(loop);
-  const ctx = sizeCanvas(overlay);
-  if (S.last && video.videoWidth) {
-    const M = frameMapping(video, overlay, S.last);
-    S.map = M;
-    drawOverlay(ctx, S.last, M, { mode: S.mode });
+  S.rafId = requestAnimationFrame(loop);
+  const t = performance.now();
+  // Only auto-pause on a device that actually reports motion, so a desktop
+  // test run (or a phone with motion permission denied) never stalls.
+  if (S.idleOn && S.hasMotion && t - S.lastActivity > IDLE_MS) { S.idle = true; applyPower(); return; }
+  // Redraw only when there is a new result, a pulsing highlight (capped at
+  // ~20 fps) or something asked for one — not 60 times a second regardless.
+  const pulsing = S.last && S.last.highlights && S.last.highlights.length > 0;
+  if (S.last !== S.drawn || S.needDraw || (pulsing && t - (S.lastPulse || 0) > 50)) {
+    S.needDraw = false;
+    S.lastPulse = t;
+    const ctx = sizeCanvas(overlay);
+    if (S.last && video.videoWidth) {
+      const M = frameMapping(video, overlay, S.last);
+      S.map = M;
+      drawOverlay(ctx, S.last, M, { mode: S.mode, marks: !S.outlines });
+      S.drawn = S.last;
+    }
   }
-  const minGap = 110; // ~8 frames/s is plenty and saves battery
-  if (S.ready && !S.busy && !S.snapping && video.readyState >= 2 && !document.hidden && performance.now() - S.lastSend > minGap) {
+  if (S.ready && !S.busy && !S.snapping && video.readyState >= 2 && t - S.lastSend > frameGap()) {
     sendFrame().catch(() => { S.busy = false; });
   }
 }
@@ -230,26 +378,52 @@ function setMode(mode) {
   S.mode = mode;
   document.querySelectorAll('#toolbar [data-mode]').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
   $('modeHint').textContent = S.ready ? modeHint(mode) : $('modeHint').textContent;
-  if (mode === 'scan') { closeFind(); W.post({ type: 'clearHighlights' }); S.region = null; drawMinimap(); }
+  $('findBar').hidden = mode !== 'find';
+  document.body.classList.toggle('findbar', mode === 'find');
+  if (mode === 'scan') {
+    closeFind(); closeMatches(); clearFilter();
+    W.post({ type: 'clearHighlights' });
+    S.region = null; S.needDraw = true;
+    drawMinimap();
+  }
 }
 document.querySelectorAll('#toolbar [data-mode]').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
 
 function modeHint(mode) {
-  return mode === 'scan' ? 'Sweep slowly over the pieces' : 'Tap a piece to find its matches';
+  return mode === 'scan' ? 'Sweep slowly over the pieces' : 'Tap a piece, or pick a group below';
 }
 
 function updateStats(c, tracking) {
   if (!c) return;
+  S.counts = c;
   const parts = [`${c.pieces} pieces`];
   if (c.sections) parts.push(`${c.sections} section${c.sections > 1 ? 's' : ''}`);
   if (S.box) parts.push(`${c.placed} placed`);
   const tilt = tiltDegOf(S.lastTilt);
   if (tilt >= 4) parts.push(`${Math.round(tilt)}° tilt`);
+  const over = c.expected && c.pieces > c.expected;
   $('stats').textContent = parts.join(' · ');
-  $('stats').classList.toggle('warn', tilt > 50);
+  $('stats').classList.toggle('warn', tilt > 50 || over);
   if (tilt > 50) $('modeHint').textContent = 'Tilt the phone less (under ~45°)';
   else if (S.ready && $('modeHint').textContent.startsWith('Tilt the phone')) $('modeHint').textContent = modeHint(S.mode);
-  $('menuStats').textContent = `${c.pieces} pieces catalogued, ${c.shaped} shapes read, ${c.placed} placed on the box, ${c.located} on the table map.`;
+  $('menuStats').textContent = `${c.pieces} pieces catalogued, ${c.shaped} shapes read, ${c.placed} placed on the box, ${c.located} on the table map`
+    + (c.islands > 1 ? `, in ${c.islands} scan groups.` : '.');
+  // The catalog can't honestly hold more pieces than the puzzle has. When it
+  // does, tracking broke and the same pieces were catalogued twice.
+  const warn = $('countWarn');
+  warn.hidden = !over && !(c.islands > 3);
+  if (!warn.hidden) {
+    warn.textContent = over
+      ? `That's more than the ${c.expected} pieces this puzzle has — the same pieces were probably catalogued more than once after tracking was lost. Tidy up to fold them back together.`
+      : `${c.islands} separate scan groups: tracking keeps breaking, so pieces may be catalogued twice. Tidy up to fold them back together.`;
+  }
+  // Chip counts, so you know whether it's worth tapping.
+  const chip = (k, n, label) => { const b = $('findBar').querySelector(`[data-filter=${k}]`); b.textContent = n ? `${label} (${n})` : label; b.disabled = !n; };
+  chip('corner', c.corner, 'Corners');
+  chip('border', c.border, 'Edges');
+  chip('unplaced', Math.max(0, c.shaped - c.placed), 'Unplaced');
+  chip('unread', Math.max(0, c.pieces - c.shaped), 'Unread');
+  $('pairsBtn').disabled = c.shaped < 2;
   const dot = $('trackDot');
   if (tracking !== undefined) {
     dot.className = 'dot ' + (tracking ? 'on' : 'lost');
@@ -340,10 +514,13 @@ function pointInPoly(x, y, pts) {
 const SIDE = { T: 'tab', B: 'blank', F: 'flat edge' };
 function showFind(desc) {
   S.desc = desc;
+  S.needDraw = true;
   drawMinimap();
   if (!desc) { closeFind(); return; }
+  closeMatches(); clearFilter();
   $('findPanel').hidden = false;
   $('menu').hidden = true;
+  applyPower();
   if (desc.section) { showSection(desc); return; }
   const p = desc.piece;
   drawThumb($('selThumb'), p, null);
@@ -456,19 +633,88 @@ function closeFind() {
 }
 $('closeFind').onclick = closeFind;
 
+// ---------- find bar: piece groups, match cycling, map toggle ----------
+// Light up a whole class of pieces at once — corners and edges first, since
+// that's where most people start a puzzle. Needs no box picture.
+function clearFilter() {
+  S.filter = null;
+  $('findBar').querySelectorAll('[data-filter]').forEach((b) => b.classList.remove('on'));
+}
+function setFilter(kind) {
+  const next = S.filter === kind ? null : kind;
+  clearFilter();
+  S.filter = next;
+  $('findBar').querySelectorAll('[data-filter]').forEach((b) => b.classList.toggle('on', b.dataset.filter === next));
+  if (next) { closeFind(); closeMatches(); }
+  W.post({ type: 'filter', kind: next });
+}
+$('findBar').querySelectorAll('[data-filter]').forEach((b) => (b.onclick = () => setFilter(b.dataset.filter)));
+
+// "Matches": scan the whole catalog for pairs that fit and step through them.
+$('pairsBtn').onclick = () => {
+  if (!$('matchBar').hidden) { closeMatches(); return; }
+  clearFilter();
+  closeFind();
+  S.pairs = []; S.pairIdx = 0; S.pairsDone = false;
+  toast('Looking for matches…', 20000);
+  W.post({ type: 'filter', kind: null });
+  W.post({ type: 'pairs', from: 0 });
+};
+function showMatches() {
+  if (!S.pairs.length) {
+    if (S.pairsDone) { toast('No confident matches in the catalog yet — read more piece shapes first.', 4000); closeMatches(); }
+    return;
+  }
+  $('matchBar').hidden = false;
+  $('pairsBtn').classList.add('on');
+  document.body.classList.add('matchbar');
+  S.pairIdx = Math.max(0, Math.min(S.pairIdx, S.pairs.length - 1));
+  const p = S.pairs[S.pairIdx];
+  drawThumb($('matchA'), p.A, p.edgeA, '#ffffff');
+  drawThumb($('matchB'), p.B, p.edgeB, EDGE_COLORS[p.edgeA]);
+  const where = p.aLocated && p.bLocated ? '' : ' · not both on the table map';
+  $('matchLabel').textContent = `${S.pairIdx + 1} of ${S.pairs.length}${S.pairsDone ? '' : '+'} · #${p.a} + #${p.b} · ${Math.round(p.prob * 100)}%${p.loopOk ? ' · 2×2 ✓' : ''}${where}`;
+  $('matchPrev').disabled = S.pairIdx === 0;
+  $('matchNext').disabled = S.pairIdx >= S.pairs.length - 1;
+  W.post({ type: 'showPair', a: p.a, b: p.b });
+  S.needDraw = true;
+}
+function stepMatch(n) { S.pairIdx += n; showMatches(); }
+$('matchPrev').onclick = () => stepMatch(-1);
+$('matchNext').onclick = () => stepMatch(1);
+$('matchClose').onclick = () => closeMatches();
+function closeMatches() {
+  if ($('matchBar').hidden) return;
+  $('matchBar').hidden = true;
+  $('pairsBtn').classList.remove('on');
+  document.body.classList.remove('matchbar');
+  W.post({ type: 'showPair', a: null, b: null });
+  S.needDraw = true;
+}
+
+// The box picture is useful but it covers a third of the view; let it go away.
+$('mapBtn').onclick = () => { S.mapHidden = !S.mapHidden; saveLocal(); applyMapVisibility(); };
+function applyMapVisibility() {
+  const show = !!S.box && !S.mapHidden;
+  minimap.hidden = !show;
+  $('mapBtn').disabled = !S.box;
+  $('mapBtn').classList.toggle('on', show);
+  $('mapBtn').textContent = S.box ? (show ? 'Hide map' : 'Show map') : 'Map';
+  if (show) drawMinimap();
+}
+
 // ---------- minimap ----------
 function setBox(box) {
   S.box = box;
-  if (!box) { minimap.hidden = true; return; }
+  if (!box) { S.boxImg = null; S.region = null; applyMapVisibility(); return; }
   const c = document.createElement('canvas');
   c.width = box.preview.w; c.height = box.preview.h;
   c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(box.preview.data), box.preview.w, box.preview.h), 0, 0);
   S.boxImg = c;
-  minimap.hidden = false;
-  drawMinimap();
+  applyMapVisibility();
 }
 function drawMinimap() {
-  if (!S.box || !S.boxImg) return;
+  if (!S.box || !S.boxImg || minimap.hidden) return;
   const b = S.box, img = S.boxImg;
   const cssW = minimap.clientWidth || 200;
   const cssH = Math.round((cssW * img.height) / img.width);
@@ -568,8 +814,19 @@ $('snapInput').onchange = async (e) => {
 };
 $('boxBtn').onclick = () => { endTeaching(); boxSetup.open(); };
 $('menuBtn').onclick = () => {
-  endTeaching(); $('menu').hidden = !$('menu').hidden; $('findPanel').hidden = true; };
-$('closeMenu').onclick = () => ($('menu').hidden = true);
+  endTeaching();
+  $('menu').hidden = !$('menu').hidden;
+  $('findPanel').hidden = true;
+  applyPower(); // Settings is a full-screen read: no reason to hold the camera
+};
+$('closeMenu').onclick = () => { $('menu').hidden = true; noteActivity(); applyPower(); };
+$('tidyBtn').onclick = () => {
+  $('menu').hidden = true;
+  noteActivity(); applyPower();
+  closeFind(); closeMatches(); clearFilter();
+  toast('Tidying up…', 30000);
+  W.post({ type: 'tidy' });
+};
 $('sens').oninput = (e) => {
   const v = parseInt(e.target.value, 10);
   $('sensVal').textContent = v;
@@ -585,20 +842,54 @@ $('torchToggle').onchange = async (e) => {
     toast('This phone/browser does not allow the flashlight from a web page.');
   }
 };
+$('detail').oninput = (e) => {
+  S.procW = +e.target.value;
+  $('detailVal').textContent = S.procW;
+  W.post({ type: 'settings', settings: { procW: S.procW } });
+  saveLocal();
+};
+$('outlineToggle').onchange = (e) => { S.outlines = e.target.checked; S.needDraw = true; saveLocal(); };
 $('tiltToggle').onchange = (e) => { S.tiltOn = e.target.checked; saveLocal(); };
 $('fovRange').oninput = (e) => { S.fov = +e.target.value; $('fovVal').textContent = S.fov + '°'; saveLocal(); };
-function saveLocal() { try { localStorage.setItem('ph-view', JSON.stringify({ tiltOn: S.tiltOn, fov: S.fov })); } catch (_) { /* private mode */ } }
+function saveLocal() {
+  try {
+    localStorage.setItem('ph-view', JSON.stringify({ tiltOn: S.tiltOn, fov: S.fov, mapHidden: S.mapHidden, idleOn: S.idleOn, procW: S.procW, outlines: S.outlines }));
+  } catch (_) { /* private mode */ }
+}
 try {
   const v = JSON.parse(localStorage.getItem('ph-view') || 'null');
-  if (v) { S.tiltOn = v.tiltOn !== false; S.fov = v.fov || 66; }
+  if (v) {
+    S.tiltOn = v.tiltOn !== false; S.fov = v.fov || 66; S.mapHidden = !!v.mapHidden;
+    S.idleOn = v.idleOn !== false; S.procW = v.procW || 640; S.outlines = !!v.outlines;
+  }
 } catch (_) { /* ignore */ }
 $('tiltToggle').checked = S.tiltOn; $('fovRange').value = S.fov; $('fovVal').textContent = S.fov + '°';
+$('idleToggle').checked = S.idleOn;
+$('detail').value = S.procW; $('detailVal').textContent = S.procW;
+// Chrome/Firefox on iOS are WKWebView: no Wake Lock API, so the screen sleeps
+// mid-sweep however long you hold the phone still. Safari (16.4+) has it.
+if (!navigator.wakeLock) {
+  const iOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const n = $('compatNote');
+  n.hidden = false;
+  n.textContent = iOS
+    ? 'This browser can\'t keep the screen awake, so it will dim mid-scan. Open the app in Safari (and Share → Add to Home Screen) to avoid that.'
+    : 'This browser can\'t keep the screen awake while scanning.';
+}
+$('outlineToggle').checked = S.outlines;
+applyMapVisibility();
 $('debugToggle').onchange = (e) => { S.debug = e.target.checked; $('debug').hidden = !S.debug; };
+function afterReset() {
+  closeFind(); closeMatches(); clearFilter();
+  S.region = null; S.prevCounts = null; S.pairs = []; S.needDraw = true;
+  $('menu').hidden = true;
+  noteActivity(); applyPower();
+}
 $('newPuzzle').onclick = () => {
-  if (confirm('Forget all catalogued pieces? The box picture is kept.')) { W.post({ type: 'reset', keepBox: true }); closeFind(); }
+  if (confirm('Forget all catalogued pieces? The box picture is kept.')) { W.post({ type: 'reset', keepBox: true }); afterReset(); }
 };
 $('clearAll').onclick = () => {
-  if (confirm('Forget all pieces and the box picture?')) { W.post({ type: 'reset', keepBox: false }); closeFind(); }
+  if (confirm('Forget all pieces and the box picture?')) { W.post({ type: 'reset', keepBox: false }); afterReset(); }
 };
 
 // ---------- debug report ----------
@@ -608,10 +899,12 @@ $('clearAll').onclick = () => {
 // can be saved to Files/OneDrive or sent anywhere.
 $('reportBtn').onclick = () => {
   $('menu').hidden = true;
+  noteActivity(); applyPower(); // the camera was off behind the menu; let it come back
   toast('Preparing report…', 10000);
-  W.post({ type: 'report' });
+  // Give the stream a moment so the report still carries a live camera frame.
+  setTimeout(() => W.post({ type: 'report' }), 900);
 };
-async function finishReport(workerData, analyzed) {
+async function finishReport(workerData, analyzed, boxImg) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const files = [];
   try {
@@ -624,12 +917,15 @@ async function finishReport(workerData, analyzed) {
     }
   } catch (e) { logError('report frame: ' + e.message); }
   if (analyzed) files.push(new File([analyzed], `puzzle-report-${stamp}-analyzed.jpg`, { type: 'image/jpeg' }));
+  if (boxImg) files.push(new File([boxImg], `puzzle-report-${stamp}-box.jpg`, { type: 'image/jpeg' }));
   if (S.lastSnapFile) files.push(new File([S.lastSnapFile], `puzzle-report-${stamp}-snap.jpg`, { type: S.lastSnapFile.type || 'image/jpeg' }));
   const data = {
     app: APP_VERSION, time: new Date().toISOString(), userAgent: navigator.userAgent,
     screen: { w: screen.width, h: screen.height, dpr: devicePixelRatio, viewW: innerWidth, viewH: innerHeight },
     video: { w: video.videoWidth, h: video.videoHeight, settings: S.track && S.track.getSettings ? S.track.getSettings() : null },
     mode: S.mode, fps: S.fps, motion: S.motion, gravity: S.gravity, tilt: S.lastTilt, tiltOn: S.tiltOn, fov: S.fov,
+    power: { active: S.active, idle: S.idle, idleOn: S.idleOn, calm: S.calm, gap: Math.round(frameGap()), wakeLock: !!S.wakeLock },
+    ui: { filter: S.filter, mapHidden: S.mapHidden, pairs: S.pairs.length, pairsDone: !!S.pairsDone },
     orientation: (screen.orientation && screen.orientation.angle) || window.orientation || 0,
     history: S.history, errors: S.errors,
     lastFrame: S.last, lastSnap: S.lastSnapResult || null, snapTilt: S.snapTilt || null, selected: S.desc, worker: workerData,
@@ -677,6 +973,8 @@ window.__phPick = (want) => {
 };
 
 window.__phSelectStatus = (want) => { const d = S.last && S.last.dets.find((x) => x.id && x.status === want); if (!d) return false; setMode('find'); W.post({ type: 'select', id: d.id }); return true; };
+// Select a catalogued piece/section even when it isn't in view right now.
+window.__phSelectKind = (kind) => { setMode('find'); W.post({ type: 'selectKind', kind }); return true; };
 window.__phStatuses = () => S.last && S.last.dets.map((d) => d.status + (d.border ? '/border' : ''));
 
 // ?video=URL plays a recorded sweep instead of the camera (desktop testing).

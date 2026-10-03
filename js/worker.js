@@ -170,11 +170,45 @@ const handlers = {
   select(msg) {
     post({ type: 'selected', desc: msg.id ? engine.select(msg.id) : (engine.select(null), null) });
   },
+  // Select a catalogued piece of a given kind without needing it on screen
+  // (the off-screen arrows then point the way to it).
+  selectKind(msg) {
+    let pick = null;
+    for (const p of engine.pieces.values()) {
+      if (msg.kind === 'section' ? (p.kind === 'section' && p.sec && p.sec.cells) : p.kind !== 'section' && p.t1) { pick = p; break; }
+    }
+    post({ type: 'selected', desc: pick ? engine.select(pick.id) : null });
+  },
   region(msg) {
     const n = engine.selectRegion(msg.c0, msg.r0, msg.c1, msg.r1);
     post({ type: 'region', count: n, cells: [msg.c0, msg.r0, msg.c1, msg.r1] });
   },
-  clearHighlights() { engine.selection = null; engine.region = null; },
+  clearHighlights() { engine.selection = null; engine.region = null; engine.filter = null; engine.pairSel = null; },
+  // Highlight a whole class of pieces (border / corner / unplaced / unread).
+  filter(msg) {
+    const n = engine.setFilter(msg.kind);
+    post({ type: 'filter', kind: msg.kind || null, count: n });
+  },
+  // "Any matches?" — scan the whole catalog for confident pairs. Resumable:
+  // the page calls again with `from` until `done`.
+  pairs(msg) {
+    const r = engine.scanPairs({ from: msg.from || 0, budgetMs: msg.budgetMs || 1200, minProb: msg.minProb });
+    const brief = (id) => {
+      const Q = engine.pieces.get(id);
+      return { id, code: Q.t1 ? Q.t1.code : null, thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null,
+        sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, located: !!Q.pos };
+    };
+    post({ type: 'pairs', from: r.from, total: r.total, done: r.done,
+      pairs: r.pairs.slice(0, 60).map((p) => Object.assign({}, p, { A: brief(p.a), B: brief(p.b) })) });
+  },
+  showPair(msg) { engine.selectPair(msg.a, msg.b); },
+  // Fold duplicate scan groups together and drop entries that never read as pieces.
+  async tidy() {
+    const r = engine.tidy();
+    const { put, del } = engine.takeDirty();
+    if (db) await tx('pieces', 'readwrite', (s) => { for (const p of put) s.put(p); for (const id of del) s.delete(id); });
+    post({ type: 'tidied', removed: r.removed, counts: engine.counts() });
+  },
   // Diagnostic snapshot for "Send report".
   async report() {
     // The (straightened) image the vision code analyzed last, as a JPEG.
@@ -186,14 +220,31 @@ const handlers = {
         analyzed = await c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
       } catch (e) { analyzed = null; }
     }
+    // The rectified box picture as the engine actually holds it: placement
+    // problems are usually visible in it (wrong corners, skew, bad grid).
+    let boxImg = null;
+    if (engine.box && engine.box.preview && typeof OffscreenCanvas !== 'undefined') {
+      try {
+        const b = engine.box.preview, c = new OffscreenCanvas(b.w, b.h);
+        const g = c.getContext('2d');
+        g.putImageData(new ImageData(new Uint8ClampedArray(b.data), b.w, b.h), 0, 0);
+        // Draw the piece grid over it, so a mis-sized grid is obvious at a glance.
+        g.strokeStyle = 'rgba(255,0,128,0.55)';
+        g.lineWidth = 1;
+        for (let i = 1; i < engine.box.cols; i++) { const x = (i * b.w) / engine.box.cols; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, b.h); g.stroke(); }
+        for (let j = 1; j < engine.box.rows; j++) { const y = (j * b.h) / engine.box.rows; g.beginPath(); g.moveTo(0, y); g.lineTo(b.w, y); g.stroke(); }
+        boxImg = await c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+      } catch (e) { boxImg = null; }
+    }
     const pieces = [...engine.pieces.values()].map((p) => ({
-      id: p.id, island: p.island, pos: p.pos && p.pos.map(Math.round), area: Math.round(p.area || 0),
+      id: p.id, kind: p.kind || 'piece', island: p.island, pos: p.pos && p.pos.map(Math.round), area: Math.round(p.area || 0),
+      sec: p.sec ? (p.sec.failed ? 'failed' : (p.sec.cells || []).length + ' cells') : null,
       code: p.t1 ? p.t1.code : null, cornerScore: p.t1 ? +p.t1.cornerScore.toFixed(3) : null, nObs: p.t1 ? p.t1.nObs || 1 : 0,
       meanSide: p.t1 ? Math.round(p.t1.meanSide) : null, t1Fail: p.t1Fail || 0,
       box: p.t2 && p.t2.cands.length ? { col: p.t2.cands[0].col, row: p.t2.cands[0].row, conf: +p.t2.conf.toFixed(2) } : null,
       wrong: p.wrong, joined: p.joined,
     }));
-    post({ type: 'report', analyzed, data: {
+    post({ type: 'report', analyzed, boxImg, data: {
       opts: engine.opts, taught: engine.taught, counts: engine.counts(), bg: engine.bg, thresh: engine.thresh,
       box: engine.box ? { cols: engine.box.cols, rows: engine.box.rows, white: engine.box.white } : null,
       island: engine.island, tracking: !!engine.pose, pieces,
