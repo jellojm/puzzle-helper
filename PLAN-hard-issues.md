@@ -12,6 +12,24 @@ pale-printed pieces (see `reports/*-frame.jpg`).
 
 ---
 
+## Status (2026-10-03)
+
+| WP | State | Result |
+|---|---|---|
+| WP8 | **Done** (828a415) | `test/seg-regression.js` on white-1/2, white-close-1/2 (video frames 2 and 881); `--baseline` reproduces the old numbers; in `npm test` |
+| WP1 | **Done** (828a415) | Running `unitLive` + mass-mode own estimate (≥ 3 blobs, else null). Fragments are never catalogued as new pieces. `test/unit-area.js`: unit within 7%, no duplicate entries |
+| WP2 | **Done** (5f7aeaf) | Boundary fill on still frames, open off. good/frag: white-1 20/8 → 31/2, white-2 21/10 → 35/1, close-1 14/8 → 13/4, close-2 9/4 → 7/2 |
+| WP3–WP7, WP9 | Open | — |
+| **New** | Open | **Lamp shadows on the table**: on both close-ups, the shadowed table area becomes one big foreground blob and swallows the pieces in it. Likely fix: flatten illumination (local background lightness from a large-scale closing/blur of L) before the colour distance |
+
+**Correction to §1.1 / WP2 step 2:** measured on all four frames, close 3 beat 5/7/9
+at unit ~1000–2000 px² (larger kernels fuse neighbours; close 9 also lost pieces
+on the close-up). The engine uses `clamp(odd(0.07·√unit), 3, 7)`, not 0.18·√unit.
+Also: score segmentation against the result's *own* robust unit. The colour-only
+unit under-sizes pale pieces, so complete pieces would look "merged".
+
+---
+
 ## 0. How to work in this repo
 
 **Node is not on PATH on this machine.** VS Code's bundled Node works:
