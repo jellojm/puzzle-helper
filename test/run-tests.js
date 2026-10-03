@@ -377,7 +377,9 @@ function savePng(cv, mat, name) {
     }
     const TP = +(process.env.TILT || 30); const flat = run(0, 0, true), raw = run(TP, 8, false), fixed = run(TP, 8, true);
     console.log(`tilt ${TP}°: straight-down ${flat.same}/${flat.n} shapes match reference; tilted raw ${raw.same}/${raw.n}; tilted+corrected ${fixed.same}/${fixed.n}`);
-    check('tilted view is straightened (shapes match top-down)', fixed.n >= 5 && fixed.same / fixed.n >= 0.8 && fixed.same / fixed.n > raw.same / Math.max(1, raw.n), `${pct(fixed.same, fixed.n)} vs ${pct(raw.same, raw.n)} uncorrected`);
+    // Benefit = more correctly-read pieces (uncorrected, stretched pieces now
+    // mostly fail the "looks like a piece" gate instead of being misread).
+    check('tilted view is straightened (shapes match top-down)', fixed.n >= 5 && fixed.same / fixed.n >= 0.8 && fixed.same > raw.same * 1.5, `${fixed.same} correct pieces (${pct(fixed.same, fixed.n)}) vs ${raw.same} uncorrected`);
   }
 
   // ---------- 6. Persistence round-trip ----------

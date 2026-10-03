@@ -33,6 +33,23 @@
     return { L: sL / n, a: sa / n, b: sb / n, frac: (n * step * step) / (w * h) };
   };
 
+  // Mass-weighted mode of log2(area), quarter-octave bins: the size that most
+  // of the piece-like *area* belongs to.
+  PH.massMode = function (areas) {
+    const bins = new Map();
+    for (const a of areas) { const k = Math.round(Math.log2(a) * 4); bins.set(k, (bins.get(k) || 0) + a); }
+    let best = null;
+    for (const [k, m] of bins) {
+      // smooth with the neighbouring bins so a split peak isn't missed
+      const sm = m + 0.5 * ((bins.get(k - 1) || 0) + (bins.get(k + 1) || 0));
+      if (!best || sm > best.m) best = { k, m: sm };
+    }
+    // refine: area-weighted mean of the blobs within half an octave of the peak
+    let s = 0, w = 0;
+    for (const a of areas) if (Math.abs(Math.log2(a) * 4 - best.k) <= 2) { s += a * a; w += a; }
+    return w ? s / w : Math.pow(2, best.k / 4);
+  };
+
   // Coarse Lab bin (8 L x 32 a x 32 b) used by the background lookup table.
   PH.coarseBin = (L, a, b) => ((L >> 5) << 10) | ((a >> 3) << 5) | (b >> 3);
 
@@ -233,15 +250,17 @@
       blobs.push({ cnt, area, solidity: area / Math.max(1, cv.contourArea(hull)) });
     }
     hull.delete();
-    // Typical single-piece area: median of blobs that actually look like a
-    // jigsaw piece (4 good corners). Fragments and merged groups don't, so
-    // they can't skew it.
-    let unitA = opts.unitArea;
-    if (!unitA) {
-      const like = blobs.filter((b) => b.solidity > 0.6 && b.area < maxArea && PH.pieceScore(b.cnt.data32S, b.area) > PH.MIN_CORNER_SCORE).map((b) => b.area);
-      unitA = like.length >= 2 ? PH.median(like) : PH.median(blobs.map((b) => b.area));
-      if (PH.DEBUG_SEG) console.log('piece-like', like.map(Math.round).sort((a, b) => a - b).join(','));
-    }
+    // This frame's own "one piece" area: mass-weighted mode of log2(area) over
+    // blobs that look like a jigsaw piece (4 good corners). Fragments are many
+    // but small, so they carry little mass and can't drag it down. Needs at
+    // least 3 such blobs; otherwise there is no estimate (null), never a
+    // median of everything (that once picked up a 578k px background blob).
+    const like = blobs.filter((b) => b.solidity > 0.6 && b.area < maxArea && PH.pieceScore(b.cnt.data32S, b.area) > PH.MIN_CORNER_SCORE).map((b) => b.area);
+    const unitOwn = like.length >= 3 ? PH.massMode(like) : null;
+    if (PH.DEBUG_SEG) console.log('piece-like', like.map(Math.round).sort((a, b) => a - b).join(','), 'own', unitOwn);
+    // A caller-supplied unit (live scanning keeps one across frames) wins.
+    // null = unknown: nothing gets split (and the engine calls nothing merged).
+    const unitA = opts.unitArea || unitOwn;
     if (PH.DEBUG_SEG) console.log('blobs', blobs.length, 'solid', blobs.filter((b) => b.solidity > 0.75).map((b) => Math.round(b.area)).sort((a, b) => a - b).join(','), 'unitA', unitA);
     mark('blobStats');
 
@@ -296,7 +315,7 @@
     noHier.delete();
     contours.delete(); hier.delete(); dist.delete(); mask.delete(); k3.delete(); k5.delete();
     mark('dets');
-    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, unitArea: unitA };
+    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, unitArea: unitA, unitOwn, unitN: like.length };
   };
 
   /**

@@ -319,8 +319,11 @@
       // Per-stage segmentation timings ride along in out.timings (as flat
       // seg_* numbers) so a phone report shows where the time actually goes.
       const segT = {};
-      const seg = PH.segment(proc, this.segOpts({ bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25, timings: segT }));
+      if (this.unitLiveW !== proc.w) { this.unitLive = null; this.unitLiveW = proc.w; } // Scan detail changed
+      const seg = PH.segment(proc, this.liveSegOpts(info, { timings: segT }));
       this.bg = seg.bg; this.thresh = seg.thresh;
+      this.updateUnitLive(seg);
+      this.lastSegUnit = seg.unitArea; // the unit actually used this frame (for tests/reports)
       const t1 = now();
       const dets = this.classify(seg.dets, seg.unitArea);
       const unitF = this.unitFrame(dets);
@@ -457,7 +460,7 @@
     estimatePhotoTilt(source) {
       const proc = source.getProc(this.stillProcW());
       const seg = PH.segment(proc, this.segOpts({ splitBudgetMs: 60 }));
-      const unit = seg.unitArea;
+      const unit = seg.unitArea || PH.median(seg.dets.map((d) => d.area));
       // Pick blobs by shape (4 good corners), not size: the small far-away
       // pieces are exactly the ones that reveal the tilt.
       const blobs = seg.dets.filter((d) => !d.border && d.area > unit * 0.1 && d.area < unit * 4 && PH.pieceScore(d.pts, d.area) > PH.MIN_CORNER_SCORE)
@@ -467,6 +470,35 @@
 
     // Segmentation options: taught background colors win, then the box palette,
     // then the single-color-cloth model.
+    // Options for a live camera frame. One place, so tests run exactly what
+    // the app runs (test/seg-regression.js).
+    liveSegOpts(info, extra) {
+      const unitArea = this.opts.stableUnit === false ? null : this.unitLive || null;
+      return this.segOpts(Object.assign({ bg: this.bg, bgSmooth: 0.3, splitBudgetMs: 25, unitArea }, extra));
+    }
+
+    /**
+     * WP1: one stable "one piece" area for live scanning. A frame's own
+     * estimate (from >= 3 piece-like blobs) is blended in slowly when it is
+     * within 1.5x of the running value. Frames far off are ignored, unless 4
+     * in a row agree with each other (the phone really moved up/down), then
+     * the running value jumps to them. Seeded by the first good frame.
+     */
+    updateUnitLive(seg) {
+      const own = seg.unitOwn;
+      if (!own || seg.unitN < 3) return;
+      if (!this.unitLive) { this.unitLive = own; this.unitOff = []; return; }
+      const r = own / this.unitLive;
+      if (r < 1.5 && r > 1 / 1.5) {
+        this.unitLive = this.unitLive * 0.8 + own * 0.2;
+        this.unitOff = [];
+        return;
+      }
+      this.unitOff = (this.unitOff || []).concat(own).slice(-4);
+      const o = this.unitOff;
+      if (o.length === 4 && Math.max(...o) / Math.min(...o) < 1.5) { this.unitLive = PH.median(o); this.unitOff = []; }
+    }
+
     segOpts(extra) {
       return Object.assign({
         minDE: this.opts.minDE, lightW: this.opts.lightW,
@@ -479,10 +511,12 @@
 
     classify(dets, unitArea) {
       const areas = dets.filter((d) => !d.border).map((d) => d.area);
+      // Unknown unit: call nothing merged (a bad guess would turn single
+      // pieces into "sections"); the median still filters out crumbs.
       const medA = unitArea || PH.median(areas.length ? areas : dets.map((d) => d.area));
       const out = [];
       for (const d of dets) {
-        d.merged = d.area > medA * 1.9;
+        d.merged = !!unitArea && d.area > unitArea * 1.9;
         if (d.area < medA * 0.3) continue; // crumbs, glare, fingers' edges
         d.id = null;
         out.push(d);
@@ -568,6 +602,10 @@
           continue;
         }
         if (!this.frameCtx.still && this.pieces.size) continue; // wait for a steady view before cataloging
+        // Never catalogue a fragment (a pale piece broken into its colourful
+        // islands): a new entry must be piece-sized and piece-shaped.
+        const unitP = this.frameCtx.unitArea;
+        if (unitP && (d.area < unitP * 0.6 || PH.pieceScore(d.pts, d.area) <= PH.MIN_CORNER_SCORE)) continue;
         const p = this.newPiece(d, q, this.island, d.area * s * s);
         d.id = p.id; claimed.add(p.id);
         this.version++;
