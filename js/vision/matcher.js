@@ -8,8 +8,13 @@
   const PH = G.PH;
   const DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]]; // top, right, bottom, left
 
+  // Effective type for matching: an uncertain flat edge (shallow tab or blank
+  // near the threshold) is matched as the type its shape leans to.
+  const mType = (e) => (e.type === 'F' && e.unc ? e.alt : e.type);
+  PH.UNCERTAIN_PENALTY = 0.4; // score cost of matching an edge read as flat
   PH.edgeScore = function (eA, eB) {
-    if (!((eA.type === 'T' && eB.type === 'B') || (eA.type === 'B' && eB.type === 'T'))) return null;
+    const ta = mType(eA), tb = mType(eB);
+    if (!((ta === 'T' && tb === 'B') || (ta === 'B' && tb === 'T'))) return null;
     const lr = Math.log(eA.lenRel / eB.lenRel);
     if (Math.abs(lr) > 0.15) return null;
     const a = eA.sig, b = eB.sig, n = a.length / 2;
@@ -45,7 +50,8 @@
       color += PH.dE(sa[3 * s], sa[3 * s + 1], sa[3 * s + 2], sb[3 * r], sb[3 * r + 1], sb[3 * r + 2], 0.7);
     }
     color /= m;
-    return { shape, color, score: shape * 12 + color / 15 + Math.abs(lr) * 4 };
+    const unsure = (eA.type === 'F' ? 1 : 0) + (eB.type === 'F' ? 1 : 0); // matched through an uncertain flat
+    return { shape, color, score: shape * 12 + color / 15 + Math.abs(lr) * 4 + unsure * PH.UNCERTAIN_PENALTY };
   };
 
   // Bonus (0..1) when box placements put B's edge kB right against A's edge kA.
@@ -90,7 +96,7 @@
     for (let k = 0; k < 4; k++) {
       const eA = P.t1.edges[k];
       const list = [];
-      if (eA.type !== 'F') {
+      if (eA.type !== 'F' || eA.unc) {
         for (const Q of all) {
           if (Q === P || !Q.t1 || (opts.skip && opts.skip(P, Q))) continue;
           for (let m = 0; m < 4; m++) {
@@ -122,7 +128,7 @@
           var pNone = zNull / z;
         }
       }
-      out.push({ edge: k, type: eA.type, matches: list.slice(0, topN), pNone: eA.type === 'F' ? 0 : list.length ? pNone : 1 });
+      out.push({ edge: k, type: eA.type, matches: list.slice(0, topN), pNone: eA.type === 'F' && !eA.unc ? 0 : list.length ? pNone : 1 });
     }
     return out;
   };

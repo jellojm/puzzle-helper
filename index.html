@@ -58,6 +58,7 @@
           <canvas id="matchB" width="120" height="120"></canvas>
         </div>
         <div id="matchLabel" class="small"></div>
+        <div class="match-acts"><button id="matchFits" class="yes">Fits</button><button id="matchNo">No</button></div>
       </div>
       <button id="matchNext" aria-label="Next match">›</button>
       <button id="matchClose" class="icon-btn" aria-label="Close">✕</button>
@@ -84,6 +85,7 @@
       </div>
       <div id="menuStats" class="muted"></div>
       <p id="countWarn" class="warn-note small" hidden></p>
+      <p id="accuracyNote" class="muted small" hidden></p>
       <p id="compatNote" class="warn-note small" hidden></p>
       <div class="menu-actions">
         <button id="snapBtn">Catalog from a photo</button>
@@ -137,6 +139,8 @@
           <li>Drag across the box picture to light up every piece from that area.</li>
           <li>In <b>Find</b>, tap <b>Corners</b> or <b>Edges</b> to light up every border piece on the table — orange for corners, teal for edges. Arrows point to the ones just off screen.</li>
           <li><b>Matches</b> searches the whole catalog for pairs that fit, with no box picture needed; use ‹ › to step through them.</li>
+          <li><b>Check the matches:</b> try each suggested pair and tap <b>Fits</b> or <b>No</b> (in Matches or in a piece's panel). The app keeps score — More shows how often it was right — and Send report shares the answers so the matching can be tuned. A quick way: separate pieces you have already fitted together, scan them, then judge the suggestions.</li>
+          <li>A piece is catalogued only after the camera has seen it clearly a few frames in a row, and its shape counts as <b>confirmed</b> once a second, later view agrees. Matches between confirmed shapes can turn gold; a dashed frame or "?" means a shape read only once.</li>
           <li><b>Map</b> hides the box picture when it's in the way.</li>
         </ul>
       </details>
@@ -181,6 +185,7 @@
     <div class="box-controls">
       <label>Pieces <input id="boxPieces" type="number" inputmode="numeric" min="12" max="10000" value="1000"></label>
       <label>Grid <input id="boxCols" type="number" inputmode="numeric" min="2" max="200"> × <input id="boxRows" type="number" inputmode="numeric" min="2" max="200"></label>
+      <label title="Printed on most boxes, e.g. 69 x 51 cm. Optional: without it a typical size for the piece count is used.">Finished size <input id="boxW" type="number" inputmode="decimal" min="5" max="300" placeholder="cm"> × <input id="boxH" type="number" inputmode="decimal" min="5" max="300" placeholder="cm"></label>
       <button id="boxRetake" class="link" hidden>Retake</button>
     </div>
     <input id="boxInput" type="file" accept="image/*" hidden>

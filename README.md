@@ -5,10 +5,10 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
 - **Scan:** sweep slowly over the table. Each piece gets a catalog entry and a dot, grey → blue (shape read) → green (placed on the box picture). The dots follow the camera between readings, so they stay on the pieces while you move. Gold dashed lines link loose pieces that very likely fit together.
 - **Border:** one tap lights up the whole frame of the puzzle — corner pieces orange, edge pieces teal — with arrows to the nearest ones off screen. Tap again to turn it off.
 - **More → Catalog from a photo:** take a full-resolution photo to catalog every piece in it at once.
-- **Box:** photograph the box picture. The app splits it into the puzzle's grid and works out where each piece belongs.
+- **Box:** photograph the box picture. The app splits it into the puzzle's grid and works out where each piece belongs. Enter the **finished size** printed on the box (optional): with the real piece size the app can tell you how close to hold the phone.
 - **Find:** tap a piece to see its spot on the box and its best partners for each edge, with a percentage likelihood. A partner marked **2×2 ✓** is confirmed by a closed 2×2 block: the app found two more pieces that fit both this piece and the partner. These confirmed matches were right about 94% of the time in testing. Matching pieces glow on the table (gold = best). Pieces off-screen get an arrow pointing toward them.
   - **Corners / Edges:** light up every corner piece (orange) or edge piece (teal) on the table, with counts. **Unplaced** and **Unread** light up pieces not yet found on the box, or whose shape hasn't been read.
-  - **Matches:** search the whole catalog for pairs that fit, with no box picture needed, and step through them with ‹ ›.
+  - **Matches:** search the whole catalog for pairs that fit, with no box picture needed, and step through them with ‹ ›. Tap **Fits** or **No** on each: the app keeps an answer key and shows its running accuracy under **More**.
   - **Map:** hide or show the box picture.
 - **Area search:** tap the small box picture to enlarge it, then drag across a region (e.g. sky). Every piece from that area lights up. Tap the enlarged picture to shrink it again.
 
@@ -52,6 +52,7 @@ Open that address on the iPhone. Safari shows a certificate warning once: tap *S
 - A lamp low and to one side makes each piece cast a thin shadow, which helps on cloths close in color to the pieces. **More → Flashlight** (iOS 17.5+) helps in dim rooms.
 - Hold the phone flat, 30–40 cm up, and pause briefly over each area. Shapes are only read while the phone is steady. Holding it at an angle to avoid glare is fine (the app straightens the view), but closer is better: far-away pieces become too small to read.
 - If the dot at the top turns red ("lost my place"), hold still over pieces you've already scanned. The app finds its position again from them.
+- Only good shots make pieces: a piece is catalogued after the camera has seen it clearly in a few steady frames in a row, and not from a blurred, too-distant or partial view. Its shape is **confirmed** when a second, later look agrees; gold matches need confirmed shapes. If the top says "Too far to read pieces", move closer — the distance it suggests depends on the puzzle's piece size.
 - If the piece count goes past the puzzle's size, the same pieces were catalogued twice after tracking was lost. **More → Tidy up the catalog** folds the duplicates back together.
 - **More → Scan detail** trades sensitivity for speed and battery; **More → Send report** saves the camera view, the box picture and diagnostic data (share it to Files/OneDrive) when something looks wrong. The data covers speed per stage for the whole session, how smooth the screen was, the motion tracker's cost, the vision engine's state and settings — `python tools/report-summary.py` prints it.
 
@@ -89,6 +90,9 @@ node test/worker-reset.js    # New puzzle / Clear everything forget taught table
 node test/seg-regression.js  # segmentation on real white-table frames doesn't regress
 node test/leak-check.js      # the live pipeline doesn't leak OpenCV (WebAssembly) memory
 node test/dupes.js           # pieces that drop out of detection aren't catalogued twice
+node test/quality-gate.js    # blurred, distant or one-off views never become pieces
+node test/answer-key.js      # Fits/No answers are logged with what was claimed; accuracy stats
+node test/speed.js           # per-stage timing (VISION=<dir> runs another copy of js/vision to compare)
 ```
 
 Working from real data (the phone's **Send report** files in `reports/`):

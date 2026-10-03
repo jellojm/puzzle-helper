@@ -75,7 +75,8 @@ async function loadState() {
   const pieces = await tx('pieces', 'readonly', (s) => s.getAll());
   const box = await tx('meta', 'readonly', (s) => s.get('box'));
   const settings = await tx('meta', 'readonly', (s) => s.get('settings'));
-  return { pieces: pieces || [], box: box || null, settings: settings || null };
+  const feedback = await tx('meta', 'readonly', (s) => s.get('feedback'));
+  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [] };
 }
 function scheduleSave() {
   if (saveTimer || !db) return;
@@ -135,6 +136,7 @@ async function init(msg) {
     db = await openDb();
     const st = await loadState();
     engine.importState(st);
+    engine.fbLog = Array.isArray(st.feedback) ? st.feedback : [];
     if (st.settings) {
       if (st.settings.minDE) engine.opts.minDE = st.settings.minDE;
       engine.taught = st.settings.taught || [];
@@ -143,6 +145,7 @@ async function init(msg) {
     post({ type: 'error', message: 'Storage unavailable; the catalog will not be saved (' + e.message + ')' });
   }
   post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo() });
+  post({ type: 'feedbackStats', stats: engine.feedbackStats() }); // running match accuracy in More
 }
 function settingsInfo() { return { minDE: engine.opts.minDE, taught: engine.taught.length }; }
 // Drop the taught table colours AND the background model chosen with them, so
@@ -186,6 +189,8 @@ const handlers = {
     post({ type: 'status', text: 'Preparing box image…' });
     const src = bitmapSource(msg.bitmap);
     const box = PH.createBox(src.rgba(), msg.corners, { pieces: msg.pieces, cols: msg.cols, rows: msg.rows });
+    // Real piece side (mm) from the finished size; else Engine.pieceMM() uses a typical one.
+    if (msg.sizeCm) box.pieceMM = Math.sqrt((msg.sizeCm[0] * 10 * msg.sizeCm[1] * 10) / (box.cols * box.rows));
     msg.bitmap.close();
     engine.setBox(box);
     if (db) await tx('meta', 'readwrite', (s) => s.put(box, 'box'));
@@ -281,6 +286,8 @@ const handlers = {
       rot: p.t2 && p.t2.cands.length ? p.t2.cands[0].rot : undefined,
       seenSecAgo: p.lastSeen ? Math.round((Date.now() - p.lastSeen) / 1000) : null,
       color: p.fp ? [p.fp.L, p.fp.a, p.fp.b].map((v) => Math.round(v)) : null,
+      views: p.t1 ? p.t1.nObs || 1 : 0, q: p.t1 && p.t1.quality ? p.t1.quality.q : null, sharp: p.t1 && p.t1.quality ? p.t1.quality.sharp : null,
+      unc: p.t1 ? p.t1.edges.map((e) => (e.unc ? 1 : 0)).join('') : null, conflicts: p.conflicts || 0, missing: !!p.missing,
     }));
     // Engine state that explains behaviour but isn't in any frame result.
     const bm = engine.bgModel;
@@ -310,12 +317,19 @@ const handlers = {
       opts: engine.opts, taught: engine.taught, counts: engine.counts(), bg: engine.bg, thresh: engine.thresh,
       box: engine.box ? { cols: engine.box.cols, rows: engine.box.rows, white: engine.box.white } : null,
       island: engine.island, tracking: !!engine.pose, engine: engineState, catalog, session: sessionSummary(), pieces,
+      // Fits/No answers (ground truth) and what the app had claimed: match accuracy on the real puzzle.
+      feedback: { stats: engine.feedbackStats(), log: (engine.fbLog || []).slice(-300) },
+      // Why detections did not become pieces (shot-quality gate), and provisional pieces waiting.
+      gate: { rejects: engine.rejects || {}, candidates: engine.cands ? engine.cands.size : 0, pieceMM: engine.pieceMM ? engine.pieceMM() : null },
       cvInfo: PH.cv && PH.cv.getBuildInformation ? String(PH.cv.getBuildInformation()).slice(0, 3000) : null,
     } });
   },
-  feedback(msg) {
+  async feedback(msg) {
     engine.feedback(msg);
     scheduleSave();
+    // The answer key is small and precious: save it right away.
+    if (db) await tx('meta', 'readwrite', (s) => s.put(engine.fbLog, 'feedback'));
+    post({ type: 'feedbackStats', stats: engine.feedbackStats() });
     if (engine.selection) post({ type: 'selected', desc: engine.describe(engine.selection.id) });
   },
   async settings(msg) {
@@ -348,9 +362,11 @@ const handlers = {
     if (msg.forgetTable) { forgetTable(); await saveSettings(); }
     if (db) {
       await tx('pieces', 'readwrite', (s) => s.clear());
+      await tx('meta', 'readwrite', (s) => s.delete('feedback')); // the answer key belongs to the old catalog
       if (!keepBox) await tx('meta', 'readwrite', (s) => s.delete('box'));
     }
     post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo() });
+    post({ type: 'feedbackStats', stats: engine.feedbackStats() });
   },
 };
 

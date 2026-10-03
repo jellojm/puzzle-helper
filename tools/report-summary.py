@@ -52,4 +52,17 @@ for f in sys.argv[1:]:
         print('  whole session', {k: ss.get(k) for k in ('minutes', 'frames', 'totalP50', 'totalP90', 'totalP99')}, '| slowest stages (mean/max)', [(k, v['mean'], v['max']) for k, v in top])
     if h and any(r.get('lag') is not None for r in h):
         print('  send->result lag ms median', st.median([r['lag'] for r in h if r.get('lag') is not None]), '| worker queue wait median', st.median([r.get('wait', 0) for r in h]))
+    fb = (w.get('feedback') or {}).get('stats')
+    if fb and fb.get('judged'):
+        print('  ANSWER KEY', fb['judged'], 'judged |', fb['fits'], 'fit /', fb['no'], 'no | accuracy', fb.get('accuracy'))
+        print('    by app probability', {k: f"{v['fits']}/{v['n']}" for k, v in fb.get('byProb', {}).items()},
+              '| by rank', {k: f"{v['fits']}/{v['n']}" for k, v in fb.get('byRank', {}).items()},
+              '| both shapes confirmed', {k: f"{v['fits']}/{v['n']}" for k, v in fb.get('byConfirmed', {}).items()},
+              '| 2x2 loop', f"{fb['loopOk']['fits']}/{fb['loopOk']['n']}")
+    gate = w.get('gate')
+    if gate: print('  quality gate: rejected', gate.get('rejects'), '| provisional now', gate.get('candidates'), '| piece size', gate.get('pieceMM') and round(gate['pieceMM'], 1), 'mm')
+    if pcs and any('views' in p for p in pcs):
+        views = [p.get('views', 0) for p in pcs]
+        print('  shapes: confirmed (>=2 views)', sum(1 for v in views if v >= 2), 'of', len(views), '| uncertain edges', sum((p.get('unc') or '').count('1') for p in pcs),
+              '| read conflicts', sum(p.get('conflicts', 0) for p in pcs), '| quality median', sorted(p.get('q') or 0 for p in pcs)[len(pcs) // 2] if pcs else None)
     print('  errors', (d.get('errors') or [])[-3:] or None)

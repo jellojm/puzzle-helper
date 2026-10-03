@@ -216,7 +216,10 @@ function savePng(cv, mat, name) {
   let frames = 0, tTot = 0, worst = 0;
   const flagged = new Map();
   const times = { seg: 0, map: 0, work: 0 };
-  path_.forEach(([x, y], i) => {
+  // Sweep, then come back over the table (as people do): shapes are only
+  // trusted - and pairs only flagged - once a second, later view agrees.
+  const sweep = path_.concat(path_.slice().reverse());
+  sweep.forEach(([x, y], i) => {
     const phi = Math.sin(i * 0.15) * 0.08;
     const fr = S.cameraFrame(cv, scat.table, x, y, phi, zoom, FW, FH);
     const out = live.processFrame(S.matSource(cv, fr), { still: true });

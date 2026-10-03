@@ -19,7 +19,7 @@
       // per-pixel pass (Lab conversion, background distance, threshold) scales
       // with its square, and those passes are what makes a phone sweat, so it
       // is deliberately well below the camera's own resolution.
-      this.opts = Object.assign({ procW: +(typeof process !== 'undefined' && process.env && process.env.PROCW) || 640, snapProcW: 1600, minDE: 8, lightW: 0.5, budgetMs: 45 }, opts || {});
+      this.opts = Object.assign({ procW: +(typeof process !== 'undefined' && process.env && process.env.PROCW) || 640, snapProcW: 1600, minDE: 8, lightW: 0.5, budgetMs: 45 , minSidePx: 40, confirmSightings: 2, fov: 66}, opts || {});
       this.reset();
     }
 
@@ -48,6 +48,13 @@
       this.pairSel = null;  // the pair being cycled through in the Matches bar
       this.lastProc = null;
       this.lastReloc = 0;
+      // Provisional pieces (live scanning): detections followed frame to
+      // frame until seen often enough to catalogue. Kept apart from
+      // this.pieces, so the per-frame catalog loops don't grow with them.
+      this.cands = new Map();
+      this.nextCid = 1;
+      this.fbLog = [];   // Fits/No answers with what was claimed (answer key)
+      this.rejects = {}; // why detections were not catalogued (reports)
     }
 
     // ---------- catalog helpers ----------
@@ -255,6 +262,7 @@
         usedD.add(p.i); usedT.add(p.j);
         const t = prev[p.j];
         if (t.id && this.pieces.has(t.id)) { dets[p.i].id = t.id; dets[p.i].linkSim = p.s; }
+        else if (t.cid && this.cands.has(t.cid)) dets[p.i].cid = t.cid; // still a provisional piece
         dets[p.i].tracked = true;
       }
     }
@@ -468,7 +476,7 @@
       }
       const seg = PH.segment(proc, this.liveSegOpts(info, { timings: segT }));
       this.bg = seg.bg; this.thresh = seg.thresh;
-      this.updateUnitLive(seg);
+      this.updateUnitLive(seg, proc, source);
       this.lastSegUnit = seg.unitArea; // the unit actually used this frame (for tests/reports)
       const t1 = now();
       const dets = this.classify(seg.dets, seg.unitArea);
@@ -477,7 +485,9 @@
       this.link(dets, unitF);
       // Set before the pose work so the shape-based fallback below can read
       // outlines; nothing in it depends on the pose.
-      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs };
+      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs, live: true };
+      this.frameCtx.view = this.viewGeometry(this.unitLive || seg.unitArea, proc.scale, source.w, source.h);
+      for (const [k, c] of this.cands) if (this.fNo - c.last > 6) this.cands.delete(k); // lost from view
       let ok = this.fitPose(dets, unitF);
       if (!ok) {
         const r = this.relocalize(dets, unitF);
@@ -528,8 +538,14 @@
       const work = this.runQueue(dets, t0 + this.opts.budgetMs);
       // Background duplicate clean-up, a few ms every ~20 frames.
       if ((this.frameNo = (this.frameNo || 0) + 1) % 20 === 0) this.dedupeByCell(3);
-      this.tracks = dets.map((d) => ({ id: d.id, x: d.cx, y: d.cy, fp: d.fp }));
+      this.tracks = dets.map((d) => ({ id: d.id, cid: d.cid, x: d.cx, y: d.cy, fp: d.fp }));
       const out = this.output(dets, proc);
+      // How far the camera is, for the page's "move closer" hint.
+      const v = this.frameCtx.view;
+      if (v) {
+        out.view = { sidePx: Math.round(v.sidePx), distCm: v.distMM ? Math.round(v.distMM / 10) : null, tooFar: v.sidePx < this.opts.minSidePx,
+          needCm: v.f && this.pieceMM() ? Math.round((v.f * this.pieceMM()) / this.opts.minSidePx / 10) : null, candidates: this.cands.size };
+      }
       // Lets the page map straightened coordinates back onto the camera view.
       out.rect = st.rect ? { H: st.rect.H, Hinv: st.rect.Hinv, tilt: PH.tiltDeg(info.tilt.down) } : null;
       out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2 };
@@ -726,6 +742,51 @@
       return true;
     }
 
+    /** Why detection `d` is not good enough to become a new piece (null = OK).
+     *  'moving' blurred frame, 'far' too few pixels per piece to read its shape,
+     *  'size' not one piece's area (fragment or clump), 'shape' not piece-shaped. */
+    shotQuality(d) {
+      const F = this.frameCtx;
+      if (!F.still) return 'moving';
+      if (Math.sqrt(d.area) / F.scale < this.opts.minSidePx) return 'far';
+      const u = F.unitArea;
+      if (u && (d.area < u * 0.6 || d.area > u * 1.7)) return 'size';
+      if (PH.pieceScore(d.pts, d.area) <= PH.MIN_CORNER_SCORE) return 'shape';
+      return null;
+    }
+    /** Provisional pieces: count a good sighting of `d` (followed from the
+     *  previous frame via its candidate id); true once it has been seen in
+     *  `confirmSightings` steady frames in a row with a consistent size. */
+    promote(d) {
+      const need = this.opts.confirmSightings;
+      let c = d.cid && this.cands.get(d.cid);
+      if (c && Math.abs(Math.log(d.area / c.area)) > 0.25) { this.cands.delete(c.id); c = null; } // size jumped: not the same thing
+      if (!c) { c = { id: this.nextCid++, n: 0, area: d.area, last: -1 }; this.cands.set(c.id, c); }
+      d.cid = c.id;
+      if (c.last !== this.fNo) c.n++;
+      c.area = c.area * 0.5 + d.area * 0.5; c.last = this.fNo;
+      if (c.n < need) return false;
+      this.cands.delete(c.id); d.cid = null;
+      return true;
+    }
+    /** The puzzle's piece side in mm: from the box's finished size when given,
+     *  else typical for its piece count (a 1000-piece puzzle's pieces are much
+     *  smaller than a 300's). null without a box picture. */
+    pieceMM() {
+      if (!this.box) return null;
+      return this.box.pieceMM || PH.typicalPieceMM(this.box.cols * this.box.rows);
+    }
+    /** Camera geometry from a piece area (proc px^2): piece side in source px,
+     *  and - with the real piece size and the lens's field of view - the
+     *  camera's distance from the table (mm). */
+    viewGeometry(unitProcArea, scale, srcW, srcH) {
+      if (!unitProcArea) return null;
+      const sidePx = Math.sqrt(unitProcArea / 1.2) / scale; // piece area includes tabs: ~1.2x the square core
+      const f = PH.focalPx(srcW, srcH, this.opts.fov);
+      const mm = this.pieceMM();
+      return { sidePx, f, distMM: mm ? (f * mm) / sidePx : null };
+    }
+
     /**
      * WP1: one stable "one piece" area for live scanning. A frame's own
      * estimate (from >= 3 piece-like blobs) is blended in slowly when it is
@@ -733,9 +794,15 @@
      * in a row agree with each other (the phone really moved up/down), then
      * the running value jumps to them. Seeded by the first good frame.
      */
-    updateUnitLive(seg) {
+    updateUnitLive(seg, proc, source) {
       const own = seg.unitOwn;
       if (!own || seg.unitN < 3) return;
+      // With the puzzle's real piece size, an estimate implying the camera is
+      // closer than 6 cm or further than 2 m is wrong (a wall or a pile, not a piece).
+      if (proc && source && this.pieceMM()) {
+        const g = this.viewGeometry(own, proc.scale, source.w, source.h);
+        if (g && g.distMM && (g.distMM < 60 || g.distMM > 2000)) { this.rejects.unitImplausible = (this.rejects.unitImplausible || 0) + 1; return; }
+      }
       if (!this.unitLive) { this.unitLive = own; this.unitOff = []; return; }
       const r = own / this.unitLive;
       if (r < 1.5 && r > 1 / 1.5) {
@@ -852,11 +919,14 @@
           moved.pos = q; moved.island = this.island; moved.miss = 0; moved.missing = false; d.id = moved.id; claimed.add(moved.id); this.touch(moved);
           continue;
         }
-        if (!this.frameCtx.still && this.pieces.size) continue; // wait for a steady view before cataloging
-        // Never catalogue a fragment (a pale piece broken into its colourful
-        // islands): a new entry must be piece-sized and piece-shaped.
-        const unitP = this.frameCtx.unitArea;
-        if (unitP && (d.area < unitP * 0.6 || PH.pieceScore(d.pts, d.area) <= PH.MIN_CORNER_SCORE)) continue;
+        // Only good shots make new pieces: steady, close enough to read, piece-
+        // sized, piece-shaped (never a fragment of a pale piece). On live frames
+        // the detection is then provisional until seen in a few such frames in
+        // a row - one-off blur smears, shadow blobs and fragments never reach
+        // the catalog.
+        const why = this.shotQuality(d);
+        if (why) { this.rejects[why] = (this.rejects[why] || 0) + 1; continue; }
+        if (this.frameCtx.live && !this.promote(d)) continue;
         const p = this.newPiece(d, q, this.island, d.area * s * s);
         d.id = p.id; claimed.add(p.id);
         this.version++;
@@ -952,24 +1022,56 @@
           if (!d.id || d.border || d.merged) continue;
           const p = this.pieces.get(d.id);
           const sidePx = Math.sqrt(d.area) / scale;
-          if (p.t1 && sidePx < p.t1.meanSide * 1.4) continue; // only redo when much closer
+          let pri = 0;
+          if (p.t1) {
+            // A shape is trusted once two independent views agree. Until then
+            // re-read it from a later view (not the next few frames: those are
+            // the same view); after that only from a much closer one.
+            const confirmed = (p.t1.nObs || 1) >= 2;
+            if (confirmed && sidePx < p.t1.meanSide * 1.4) continue;
+            if (!confirmed && this.fNo - (p.t1Frame || 0) < 8) continue;
+            pri = confirmed ? 2 : 1;
+          }
           if (!p.t1 && p.t1Fail > 0 && (p.t1Fail++ % 8) !== 0) continue;
-          jobs.push({ d, p, pri: p.t1 ? 1 : 0 });
+          jobs.push({ d, p, pri });
         }
         jobs.sort((a, b) => a.pri - b.pri);
+        let confirms = 0;
         for (const j of jobs) {
           // Always read at least 2 shapes per steady frame: when segmentation
           // alone overruns the budget (dense views on a slow phone), shape
           // reading would otherwise never run and nothing gets matched.
-          if (j.d.t1 === undefined && n1 >= 2 && now() > t1Deadline) break;
+          if (j.pri === 0 && j.d.t1 === undefined && n1 >= 2 && now() > t1Deadline) break;
+          // Confirmation re-reads (a second, later view of an already-read
+          // piece): free when the frame has spare budget; when it doesn't (a
+          // slow phone, where a read costs ~50-100 ms) at most one every other
+          // frame, so revisiting costs about half a read per frame and only
+          // until the pieces in view are confirmed (one re-read each).
+          if (j.pri > 0 && j.d.t1 === undefined && now() > t1Deadline && (confirms >= 1 || this.fNo % 2)) break;
+          if (j.pri > 0) confirms++;
           const t1 = this.detT1(j.d);
           if (!t1) {
             j.p.t1Fail = (j.p.t1Fail || 0) + 1;
             if (!j.p.t1 && j.d.notPiece && j.p.t1Fail >= 4) { this.removePiece(j.p.id); j.d.id = null; }
             continue;
           }
-          if (j.p.t1) this.uncalibrate(j.p.t1);
+          if (j.p.t1) {
+            const old = j.p.t1;
+            j.p.t1Frame = this.fNo;
+            const m = PH.samePiece(t1, old);
+            if (m.ok) { // two views agree: the shape is confirmed (averaged)
+              if ((old.nObs || 1) < 8) PH.fuseShapes(old, t1, m.r);
+              this.touch(j.p); this.version++; n1++;
+              continue;
+            }
+            // They disagree: keep the better-quality read.
+            j.p.conflicts = (j.p.conflicts || 0) + 1;
+            const qn = t1.quality ? t1.quality.q : 0, qo = old.quality ? old.quality.q : 0;
+            if (qn <= qo * 1.15) { n1++; continue; }
+            this.uncalibrate(old);
+          }
           j.p.t1 = t1;
+          j.p.t1Frame = this.fNo;
           j.p.t1Fail = 0;
           j.p.t2 = null;
           this.calibrate(t1);
@@ -1143,12 +1245,13 @@
     describe(id) {
       const P = this.pieces.get(id);
       const res = this.matchesFor(id, { loops: true });
-      const brief = (Q) => ({ id: Q.id, code: Q.t1 ? Q.t1.code : null, thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, t2: Q.t2 ? { cands: Q.t2.cands.slice(0, 3), conf: Q.t2.conf } : null, located: !!Q.pos });
+      const brief = (Q) => ({ id: Q.id, code: Q.t1 ? Q.t1.code : null, thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, t2: Q.t2 ? { cands: Q.t2.cands.slice(0, 3), conf: Q.t2.conf } : null, located: !!Q.pos,
+        confirmed: shapeConfirmed(Q), views: Q.t1 ? Q.t1.nObs || 1 : 0, quality: Q.t1 && Q.t1.quality ? Q.t1.quality.q : null, unc: Q.t1 ? Q.t1.edges.map((e) => !!e.unc) : null });
       return {
         piece: brief(P),
         attach: this.attachmentsOf(P),
         status: !P.t1 ? 'Hold steady over this piece to read its shape' : null,
-        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
+        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, unc: !!(P.t1.edges[r.edge] && P.t1.edges[r.edge].unc), joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
       };
     }
     selectRegion(c0, r0, c1, r1) {
@@ -1298,9 +1401,43 @@
       return { removed: dropped.length + dd.merged, before, after: this.counts(), joinedIslands: dd.islands };
     }
 
+    /** Match accuracy from the answer key: share of judged suggestions that
+     *  fit, overall and by the app's own probability, by rank, and by whether
+     *  both shapes were confirmed. Well-calibrated: ~70% of the 0.6-0.8
+     *  bucket should fit. */
+    feedbackStats() {
+      const L = this.fbLog || [];
+      const bucket = (pr) => (pr === null ? 'not listed' : pr < 0.5 ? '<0.5' : pr < 0.8 ? '0.5-0.8' : pr < 0.95 ? '0.8-0.95' : '>=0.95');
+      const add = (o, k, fit) => { const b = o[k] || (o[k] = { n: 0, fits: 0 }); b.n++; if (fit) b.fits++; };
+      const out = { judged: L.length, fits: 0, no: 0, byProb: {}, byRank: {}, byConfirmed: {}, loopOk: { n: 0, fits: 0 } };
+      for (const e of L) {
+        const fit = e.kind === 'joined';
+        if (fit) out.fits++; else out.no++;
+        add(out.byProb, bucket(e.prob), fit);
+        add(out.byRank, e.rank ? (e.rank > 3 ? '4+' : String(e.rank)) : 'not listed', fit);
+        add(out.byConfirmed, e.confirmed && e.confirmed[0] && e.confirmed[1] ? 'both' : 'not both', fit);
+        if (e.loopOk) { out.loopOk.n++; if (fit) out.loopOk.fits++; }
+      }
+      out.accuracy = L.length ? +(out.fits / L.length).toFixed(3) : null;
+      return out;
+    }
     feedback(f) {
       const A = this.pieces.get(f.a), B = this.pieces.get(f.b);
       if (!A || !B) return;
+      // The answer key: what the app claimed about this pair when the owner
+      // judged it. Fits/No taps are ground truth, so the log measures match
+      // accuracy on the real puzzle, by confidence (see feedbackStats).
+      if (f.kind === 'joined' || f.kind === 'wrong') {
+        let prob = null, rank = null, loopOk = false, adj = null;
+        const res = A.t1 ? this.matchesFor(f.a) : null;
+        const list = res && res[f.ka] ? res[f.ka].matches : [];
+        const i = list.findIndex((m) => m.id === f.b && m.edge === f.kb);
+        if (i >= 0) { rank = i + 1; prob = +list[i].prob.toFixed(3); loopOk = !!list[i].loopOk; adj = +(list[i].adj || 0).toFixed(2); }
+        this.fbLog.push({ t: Date.now(), kind: f.kind, a: f.a, ka: f.ka, b: f.b, kb: f.kb, prob, rank, loopOk, adj,
+          confirmed: [shapeConfirmed(A), shapeConfirmed(B)], q: [A.t1 && A.t1.quality ? A.t1.quality.q : null, B.t1 && B.t1.quality ? B.t1.quality.q : null],
+          source: f.source || 'panel' });
+        if (this.fbLog.length > 2000) this.fbLog.shift();
+      }
       if (f.kind === 'wrong') { A.wrong.push(B.id); B.wrong.push(A.id); }
       if (f.kind === 'joined') { A.joined[f.ka] = true; B.joined[f.kb] = true; }
       this.touch(A); this.touch(B);
@@ -1345,7 +1482,13 @@
         if (P) for (const a of this.attachmentsOf(P)) locate(a.section, 'section');
         const res = this.matchesFor(sid);
         // Gold only for a likely match; otherwise candidates are just "maybe".
-        if (res) for (const r of res) r.matches.slice(0, 3).forEach((m, i) => locate(m.id, i === 0 && m.prob >= 0.5 ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge }));
+        // Gold = a likely match between two confirmed shapes (or one closed into
+        // a 2x2 block); anything resting on a single, possibly bad read is a
+        // "maybe" (silver), however good its score looks.
+        if (res) for (const r of res) r.matches.slice(0, 3).forEach((m, i) => {
+          const gold = i === 0 && m.prob >= 0.5 && (m.loopOk || (shapeConfirmed(P) && shapeConfirmed(this.pieces.get(m.id))));
+          locate(m.id, gold ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge });
+        });
       }
       if (this.region) for (const id of this.region.ids) locate(id, 'region');
       if (this.pairSel) {
@@ -1384,6 +1527,7 @@
         for (const [id, res] of best) for (const r of res) {
           const m = r.matches[0];
           if (!m || m.prob < 0.8 || !best.has(m.id) || id > m.id) continue;
+          if (!shapeConfirmed(this.pieces.get(id)) || !shapeConfirmed(this.pieces.get(m.id))) continue; // both shapes seen twice
           // Both confidently placed on the box but not side by side: not a pair.
           const P = this.pieces.get(id), Q = this.pieces.get(m.id);
           // With a box picture, wait until both are placed so it can veto the pair.
@@ -1443,18 +1587,39 @@
     return { a: A.a * B.a - A.b * B.b, b: A.a * B.b + A.b * B.a, tx: A.a * B.tx - A.b * B.ty + A.tx, ty: A.b * B.tx + A.a * B.ty + A.ty };
   }
 
+  /** Typical piece side (mm) for a puzzle of n pieces, from common finished
+   *  sizes (1000 pcs ~ 69x51 cm -> ~19 mm; 500 ~ 61x46 -> ~24; 300 ~ 30 mm;
+   *  big-piece 100-200 ~ 31-33). Interpolated on log(n). */
+  PH.typicalPieceMM = function (n) {
+    const T = [[100, 33], [200, 31], [300, 30], [500, 24], [1000, 19], [1500, 18], [2000, 18], [3000, 17]];
+    if (!n || n <= T[0][0]) return T[0][1];
+    for (let i = 1; i < T.length; i++) if (n <= T[i][0]) {
+      const [n0, m0] = T[i - 1], [n1, m1] = T[i];
+      const t = Math.log(n / n0) / Math.log(n1 / n0);
+      return m0 + (m1 - m0) * t;
+    }
+    return T[T.length - 1][1];
+  };
+
+  /** A shape is trusted once two independent views agreed on it. */
+  function shapeConfirmed(p) { return !!(p && p.t1 && (p.t1.nObs || 1) >= 2); }
+  PH.shapeConfirmed = shapeConfirmed;
+
   /** Flat-edge summary of a piece: how many straight edges it has, and whether
    * two of them meet (a corner piece). Edges are stored clockwise, so adjacent
    * flats are neighbours in the array. */
   function edgeFlags(p) {
     const t1 = p && p.t1;
     if (!t1 || !t1.flats) return { n: 0, border: false, corner: false };
-    const f = t1.flats;
+    // Only certain flats count: an edge near the flat/tab threshold may be a
+    // shallow tab, and calling it border is how "Edges (108)" happened.
+    const f = t1.flats, e = t1.edges || [];
+    const flat = (i) => f[i] && !(e[i] && e[i].unc);
     let n = 0, corner = false;
     for (let i = 0; i < 4; i++) {
-      if (!f[i]) continue;
+      if (!flat(i)) continue;
       n++;
-      if (f[(i + 1) % 4]) corner = true;
+      if (flat((i + 1) % 4)) corner = true;
     }
     return { n, border: n > 0, corner };
   }

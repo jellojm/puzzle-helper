@@ -324,6 +324,12 @@
       }
       const amp = Math.max(maxY, -minY);
       const type = amp < 0.12 ? 'F' : maxY > -minY ? 'T' : 'B';
+      // Near the flat/tab threshold the call is a coin toss (a shallow tab, a
+      // blurred or foreshortened view): mark the edge uncertain and keep the
+      // other reading. Uncertain flats don't count as border, still get match
+      // candidates as their other type, and a later clear view settles them.
+      const unc = Math.abs(amp - 0.12) < 0.035;
+      const alt = type === 'F' ? (maxY > -minY ? 'T' : 'B') : 'F';
 
       // Color strip just inside the outline, using the local tangent for the inward normal.
       const strip = new Float32Array(STRIP * 3);
@@ -336,7 +342,7 @@
         const c = sampleLab(lab, w, h, P[2 * i] - ty * off, P[2 * i + 1] + tx * off);
         strip[3 * s] = c[0]; strip[3 * s + 1] = c[1]; strip[3 * s + 2] = c[2];
       }
-      edges.push({ type, sig, strip, len: L, amp });
+      edges.push({ type, sig, strip, len: L, amp, unc, alt });
     }
     const meanSide = edges.reduce((t, e) => t + e.len, 0) / 4;
     for (const e of edges) e.lenRel = e.len / meanSide;
@@ -375,12 +381,29 @@
     cv.resize(rgba, tm, new cv.Size(tw, th), 0, 0, cv.INTER_AREA);
     const thumb = { w: tw, h: th, data: new Uint8ClampedArray(tm.data), ox: ctx.ox || 0, oy: ctx.oy || 0, s: ts };
 
+    // Read quality: how crisp the piece's own outline is (Laplacian spread in
+    // a thin band around its mask - blur flattens it, print inside doesn't
+    // count), times resolution and corner clarity. Used to keep the best of
+    // several reads of a piece and to rank shapes.
+    let edgeSharp = 0;
+    try {
+      const band = new cv.Mat(), bk = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+      cv.morphologyEx(seg.filled, band, cv.MORPH_GRADIENT, bk);
+      const g = new cv.Mat(), lp = new cv.Mat(), mu = new cv.Mat(), sg = new cv.Mat();
+      cv.cvtColor(rgba, g, cv.COLOR_RGBA2GRAY);
+      cv.Laplacian(g, lp, cv.CV_16S, 3);
+      cv.meanStdDev(lp, mu, sg, band);
+      edgeSharp = sg.data64F[0];
+      [band, bk, g, lp, mu, sg].forEach((m) => m.delete());
+    } catch (e) { edgeSharp = 0; }
+    const quality = { sharp: +edgeSharp.toFixed(1), q: +((edgeSharp / (edgeSharp + 25)) * Math.min(1, meanSide / 90) * Math.min(1, cr.score / 0.15)).toFixed(3) };
+
     [src, dst, M, labMat, sq, sqm, ek, Lm, lap, mean, sd, rgba, tm, seg.filled].forEach((m) => m.delete());
 
     const ox = ctx.ox || 0, oy = ctx.oy || 0;
     return {
       corners: corners.map((c) => [c[0] + ox, c[1] + oy]),
-      edges, code, flats, meanSide, square, sharp, thumb,
+      edges, code, flats, meanSide, square, sharp, thumb, quality,
       cornerScore: cr.score,
     };
   };
@@ -397,7 +420,7 @@
       let ok = true, d = 0;
       for (let k = 0; k < 4 && ok; k++) {
         const ea = a.edges[k], eb = b.edges[(k + r) % 4];
-        if (ea.type !== eb.type || Math.abs(ea.lenRel - eb.lenRel) > 0.08) { ok = false; break; }
+        if ((ea.type !== eb.type && !ea.unc && !eb.unc) || Math.abs(ea.lenRel - eb.lenRel) > 0.08) { ok = false; break; }
         const n = ea.sig.length / 2;
         let s = 0;
         for (let i = 0; i < n; i++) s += Math.hypot(ea.sig[2 * i] - eb.sig[2 * i], ea.sig[2 * i + 1] - eb.sig[2 * i + 1]);
@@ -467,14 +490,24 @@
    */
   PH.fuseShapes = function (base, obs, r) {
     const n = base.nObs || 1;
+    let retyped = false;
     for (let j = 0; j < 4; j++) {
       const eb = base.edges[j], eo = obs.edges[(j - r + 4) % 4];
+      // An uncertain edge is settled by a view that reads it clearly.
+      if (eb.unc && !eo.unc && eb.type !== eo.type) {
+        eb.type = eo.type; eb.unc = false; eb.alt = eo.alt; eb.sig = Float32Array.from(eo.sig); eb.amp = eo.amp; retyped = true;
+        continue;
+      }
       if (eb.type !== eo.type) continue;
+      if (eb.unc && !eo.unc) eb.unc = false;
       for (let i = 0; i < eb.sig.length; i++) eb.sig[i] = (eb.sig[i] * n + eo.sig[i]) / (n + 1);
       eb.lenRel = (eb.lenRel * n + eo.lenRel) / (n + 1);
       eb.amp = (eb.amp * n + eo.amp) / (n + 1);
     }
     base.nObs = n + 1;
+    if (retyped) { base.code = base.edges.map((e) => e.type).join(''); base.flats = base.edges.map((e) => e.type === 'F'); }
+    // keep the best read's quality
+    if (obs.quality && (!base.quality || obs.quality.q > base.quality.q)) base.quality = obs.quality;
   };
 
   PH.MIN_CORNER_SCORE = 0.03; // real pieces ~0.05-0.3, fragments ~0.01-0.02 // below this an outline isn't a jigsaw piece

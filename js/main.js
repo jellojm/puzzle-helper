@@ -2,7 +2,7 @@
 import { frameMapping, sizeCanvas, drawOverlay, drawThumb, EDGE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 
-const APP_VERSION = '0.9.2';
+const APP_VERSION = '0.10.0';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), overlay = $('overlay'), minimap = $('minimap');
 
@@ -111,6 +111,7 @@ worker.onmessage = (e) => {
       if (changed || moved || !S.lastStill || m.timings.t1 || m.timings.t2) { if (changed) noteActivity(); S.calm = 0; }
       else S.calm++;
       updateStats(m.counts, m.tracking);
+      showDistanceHint(m.view);
       if (S.debug) showDebug(m);
       break;
     }
@@ -141,6 +142,7 @@ worker.onmessage = (e) => {
       else $('toast').hidden = true;
       showMatches();
       break;
+    case 'feedbackStats': showAccuracy(m.stats); break;
     case 'tidied':
       toast(m.removed ? `Tidied up: removed ${m.removed} duplicate or leftover entries. ${m.counts.pieces} pieces now.`
         : 'Nothing to tidy — no duplicates found.', 5000);
@@ -587,6 +589,22 @@ function showDebug(m) {
 }
 
 // ---------- teach background ----------
+// "Move closer" when the pieces are too small in the picture to read their
+// shapes (the shot-quality gate rejects them), with the distance that would
+// work for THIS puzzle's piece size when it is known.
+function showDistanceHint(v) {
+  if (!v || S.mode !== 'scan' || !S.ready) return;
+  const far = $('modeHint').textContent.startsWith('Too far');
+  if (v.tooFar) $('modeHint').textContent = v.needCm ? `Too far to read pieces — hold the phone about ${v.needCm} cm above the table` : 'Too far to read pieces — hold the phone closer';
+  else if (far) $('modeHint').textContent = modeHint(S.mode);
+}
+// Running match accuracy from Fits/No answers (the answer key).
+function showAccuracy(st) {
+  const el = $('accuracyNote');
+  if (!st || !st.judged) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = `Match answers: ${st.fits} fit, ${st.no} didn't — ${Math.round(st.accuracy * 100)}% of judged suggestions were right. Send report to share them.`;
+}
 function showTaught(n) {
   S.taughtN = n || 0;
   $('teachCount').textContent = n ? `${n} spot${n > 1 ? 's' : ''}` : 'auto';
@@ -662,6 +680,8 @@ function showFind(desc) {
     const c = p.t2.cands[0];
     sub = `Box: column ${c.col + 1}, row ${c.row + 1} · ${Math.round(p.t2.conf * 100)}% sure`;
   } else if (!sub) sub = S.box ? 'Not placed on the box yet' : 'Add a box picture to see where it goes';
+  // A shape is trusted once two separate views agreed on it.
+  if (p.code) sub += p.confirmed ? ' · shape confirmed' : ' · shape read once — look at it again later to confirm';
   $('selSub').textContent = sub;
   const rows = $('edgeRows');
   rows.innerHTML = '';
@@ -682,11 +702,11 @@ function showFind(desc) {
     const sw = document.createElement('canvas');
     sw.width = sw.height = 44; sw.style.width = sw.style.height = '22px';
     drawThumb(sw, p, e.edge, EDGE_COLORS[e.edge]);
-    h.append(sw, document.createTextNode(` Edge ${e.edge + 1}: ${SIDE[e.type]}`));
+    h.append(sw, document.createTextNode(` Edge ${e.edge + 1}: ${SIDE[e.type]}${e.unc ? ' (unsure — shallow)' : ''}`));
     row.append(h);
     const list = document.createElement('div');
     list.className = 'cands';
-    if (e.type === 'F') list.innerHTML = '<span class="empty">Border edge — nothing attaches here.</span>';
+    if (e.type === 'F' && !e.unc) list.innerHTML = '<span class="empty">Border edge — nothing attaches here.</span>';
     else if (e.joined) list.innerHTML = '<span class="empty">Marked as joined.</span>';
     else if (!e.matches.length) list.innerHTML = '<span class="empty">No candidates yet — scan more pieces.</span>';
     const likely = e.matches[0] && e.matches[0].prob >= 0.5;
@@ -700,13 +720,14 @@ function showFind(desc) {
     }
     e.matches.slice(0, 4).forEach((m, i) => {
       const c = document.createElement('div');
-      c.className = 'cand ' + (i === 0 && likely ? 'gold' : i < 3 ? 'silver' : '');
+      const trusted = m.loopOk || (p.confirmed && m.confirmed);
+      c.className = 'cand ' + (i === 0 && likely && trusted ? 'gold' : i < 3 ? 'silver' : '') + (m.confirmed ? '' : ' unconfirmed');
       const cv = document.createElement('canvas');
       cv.width = cv.height = 144;
       drawThumb(cv, m, m.edgeB, EDGE_COLORS[e.edge]);
       const label = document.createElement('div');
-      label.textContent = `#${m.id} · ${Math.round((m.prob || 0) * 100)}%${m.loopOk ? ' · 2×2 ✓' : m.adj > 0.3 ? ' · box ✓' : ''}`;
-      label.title = m.located ? '' : 'Not on the table map right now';
+      label.textContent = `#${m.id} · ${Math.round((m.prob || 0) * 100)}%${m.loopOk ? ' · 2×2 ✓' : m.adj > 0.3 ? ' · box ✓' : ''}${m.confirmed ? '' : ' · ?'}`;
+      label.title = (m.located ? '' : 'Not on the table map right now. ') + (m.confirmed ? '' : 'Its shape has been read only once (dashed frame).');
       const acts = document.createElement('div');
       acts.className = 'acts';
       const yes = document.createElement('button'); yes.className = 'yes'; yes.textContent = 'Fits';
@@ -822,6 +843,15 @@ function showMatches() {
 function stepMatch(n) { S.pairIdx += n; showMatches(); }
 $('matchPrev').onclick = () => stepMatch(-1);
 $('matchNext').onclick = () => stepMatch(1);
+// Judge the pair shown, then move on: the quickest way to build the answer key.
+const judgePair = (kind) => {
+  const p = S.pairs[S.pairIdx];
+  if (!p) return;
+  W.post({ type: 'feedback', kind, a: p.a, ka: p.edgeA, b: p.b, kb: p.edgeB, source: 'pairs' });
+  if (kind === 'wrong') { S.pairs.splice(S.pairIdx, 1); showMatches(); } else stepMatch(1);
+};
+$('matchFits').onclick = () => judgePair('joined');
+$('matchNo').onclick = () => judgePair('wrong');
 $('matchClose').onclick = () => closeMatches();
 function closeMatches() {
   if ($('matchBar').hidden) return;

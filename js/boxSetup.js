@@ -167,7 +167,11 @@ export class BoxSetup {
     const pieces = parseInt($('boxPieces').value, 10) || 1000;
     if (!(cols >= 2 && rows >= 2)) { this.toast('Enter the grid size (columns × rows).'); return; }
     const bmp = await createImageBitmap(this.file, { imageOrientation: 'from-image' });
-    this.worker.post({ type: 'box', bitmap: bmp, corners: this.corners, pieces, cols, rows }, [bmp]);
+    // Finished size (cm), optional: gives the real piece size, used for the
+    // camera-distance hint and to reject impossible piece-size estimates.
+    const wcm = parseFloat($('boxW').value), hcm = parseFloat($('boxH').value);
+    const sizeCm = wcm > 0 && hcm > 0 ? [wcm, hcm] : null;
+    this.worker.post({ type: 'box', bitmap: bmp, corners: this.corners, pieces, cols, rows, sizeCm }, [bmp]);
     this.close();
     this.onDone && this.onDone();
   }
