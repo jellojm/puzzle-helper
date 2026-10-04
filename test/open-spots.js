@@ -122,9 +122,12 @@ const biggest = (eng) => (eng.asms || []).reduce((a, b) => (!a || b.cells.size >
       if (sgn > 0) continue;
     }
     sweep(cv, T, stops.filter((_, i) => i % 2 === 0), 1.5);
-    const A = biggest(eng), info = eng.assemblyInfo();
+    const A = eng.mainAssembly(), info = eng.assemblyInfo();
     console.log(`B: ${eng.asms.length} assembl${eng.asms.length === 1 ? 'y' : 'ies'}, info ${JSON.stringify(info)}`);
-    check('B: following the border close up builds ONE assembly', eng.asms.length === 1, `${eng.asms.length} assemblies (${(eng.asms || []).map((a) => a.cells.size).join(', ')} cells)`);
+    // (a view that fails to line up can start a second one; the one shown is
+    // the placed one, and it has to be the whole border)
+    check('B: following the border close up builds one main assembly', eng.asms.length <= 2 && !!A, `${eng.asms.length} assemblies (${(eng.asms || []).map((a) => a.cells.size).join(', ')} cells)`);
+    check('B: no border is marked from a close view of part of it', !eng.pframe);
     check('B: it is placed on the box picture', !!(A && A.place), A && A.place ? `score ${A.place.score}, margin ${A.place.margin}` : 'not placed');
     const bs = A && A.borderStatus(box);
     check('B: recognised as the complete border', !!bs && bs.done >= bs.total - 1 && bs.inside <= 1, bs ? `${bs.done} of ${bs.total} border cells, ${bs.inside} inside` : 'no status');

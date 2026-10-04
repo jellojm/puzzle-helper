@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.18.2';
+const APP_VERSION = '0.19.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -121,6 +121,12 @@ function onWorkerMessage(e) {
       const changed = !pc || c.pieces !== pc.pieces || c.shaped !== pc.shaped || c.placed !== pc.placed;
       // The assembled part's box cells (sent only when they change): shaded on the box picture.
       if (m.assembly && m.assembly.boxCells) { S.asmCells = m.assembly.boxCells; drawMinimap(); }
+      // The finished border was found by itself (js/vision/border.js): marked
+      // as if its corners had been tapped.
+      if (m.borderFound) {
+        S.border = true; $('frameForget').hidden = false;
+        toast('Found the finished border. Open spots now come from reading the puzzle against the box picture. (More → Forget the marked border if this is wrong.)', 7000);
+      }
       // The assembled part is in view but too small to read its pieces' tabs.
       const FAR = 'Move closer to read the assembled part (its pieces are too small to see their tabs)';
       if (m.asmFar && S.mode === 'scan') $('modeHint').textContent = FAR;

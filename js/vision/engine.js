@@ -24,7 +24,7 @@
     }
 
     reset() {
-      this.pframe = null; this.pfLoc = null; this.asms = []; this.asmLast = null; this.spotView = null; this.asmSentKey = null;
+      this.pframe = null; this.pfLoc = null; this.asms = []; this.asmLast = null; this.spotView = null; this.asmSentKey = null; this.cellVotes = null;
       this.pieces = new Map();
       this.nextId = 1;
       this.pose = null;
@@ -600,11 +600,21 @@
       const t2 = now();
       const work = this.runQueue(dets, t0 + this.opts.budgetMs);
       const ts = now();
-      this.findSpots(dets, seg, proc, info.still !== false);
+      if (this.pframe) {
+        // The border is marked: open spots come from reading the puzzle cell
+        // by cell against the box (js/vision/border.js) in every view where
+        // the border was just found again.
+        this.spotView = null;
+        if (pfFound && info.still !== false) this.voteCells(proc, seg);
+      } else {
+        this.findSpots(dets, seg, proc, info.still !== false);
+        if (this.box && info.still !== false) this.autoBorder(proc, seg);
+      }
       segT.spots = now() - ts;
       // Background duplicate clean-up, a few ms every ~20 frames.
       if ((this.frameNo = (this.frameNo || 0) + 1) % 20 === 0) this.dedupeByCell(3);
       this.tracks = dets.map((d) => ({ id: d.id, cid: d.cid, x: d.cx, y: d.cy, fp: d.fp }));
+      const pfOut = this.puzzleFrameOut(proc, pfFound); // (also sets this.pfViewH for the spots)
       const out = this.output(dets, proc);
       // How far the camera is, for the page's "move closer" hint.
       const v = this.frameCtx.view;
@@ -614,7 +624,8 @@
       }
       // Lets the page map straightened coordinates back onto the camera view.
       out.rect = st.rect ? { H: st.rect.H, Hinv: st.rect.Hinv, tilt: PH.tiltDeg(info.tilt.down) } : null;
-      out.pframe = this.puzzleFrameOut(proc, pfFound);
+      out.pframe = pfOut;
+      if (this.borderFoundNow) { out.borderFound = true; this.borderFoundNow = false; }
       out.coach = this.coachNow;
       if (this.cellsDirty && now() - (this.cellsAt || 0) > 2000) this.assignCellsNow();
       out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2, border: this.pfMs || 0 };
@@ -1441,7 +1452,99 @@
       this.pfLoc = { H: this.pframe.Hbox, t: 0, fNo: this.fNo || 0, w: proc.w, h: proc.h, inliers: this.pframe.feat.n };
       return { ok: true, features: this.pframe.feat.n };
     }
-    clearPuzzleFrame() { this.pframe = null; this.pfLoc = null; }
+    clearPuzzleFrame() { this.pframe = null; this.pfLoc = null; this.pfViewH = null; }
+    /** No border marked yet: look for the finished border in a steady view
+     *  (js/vision/border.js) - a small copy of the view (480 px: ~0.1 s on a
+     *  PC), at most every 4 s, backing off to 30 s while it isn't found.
+     *  Found: marked exactly as if its 4 corners had been tapped. */
+    autoBorder(proc, seg) {
+      if (this.opts.autoBorder === false || !PH.findBorderQuad) return;
+      const wait = Math.min(30000, 4000 * 2 ** (this.borderFails || 0));
+      if (this.borderAt !== undefined && now() - this.borderAt < wait) return; // (the first try right away)
+      if (this.lastSharp && this.lastSharp.sh < this.lastSharp.ref * 0.6) return; // a blurred view
+      this.borderAt = now();
+      const cv = PH.cv, k = Math.min(1, 480 / Math.max(proc.w, proc.h));
+      let small = proc;
+      if (k < 1) {
+        const a = new cv.Mat(proc.h, proc.w, cv.CV_8UC4); a.data.set(proc.data);
+        const b = new cv.Mat(); cv.resize(a, b, new cv.Size(Math.round(proc.w * k), Math.round(proc.h * k)), 0, 0, cv.INTER_AREA);
+        small = { w: b.cols, h: b.rows, data: new Uint8ClampedArray(b.data) };
+        a.delete(); b.delete();
+      }
+      const dbgQ = PH.DEBUG_BORDER ? {} : null;
+      const q = PH.findBorderQuad(small, this.box, dbgQ);
+      if (dbgQ) PH.DEBUG_BORDER('autoBorder', small.w, small.h, q ? 'found ' + q.score.toFixed(2) : dbgQ.why);
+      if (!q) { this.borderFails = Math.min(3, (this.borderFails || 0) + 1); return; }
+      const corners = q.corners.map(([x, y]) => [x / k, y / k]);
+      const pf = new PH.PuzzleFrame(proc, corners, this.box.cols, this.box.rows);
+      if (PH.DEBUG_BORDER) PH.DEBUG_BORDER('features', pf.feat.n);
+      if (pf.feat.n < 60) { this.borderFails = Math.min(3, (this.borderFails || 0) + 1); return; }
+      this.pframe = pf;
+      this.pfLoc = { H: pf.Hbox, t: now(), fNo: this.fNo || 0, w: proc.w, h: proc.h, inliers: pf.feat.n, pose: this.pose ? Object.assign({}, this.pose) : null, island: this.island };
+      this.borderFails = 0;
+      this.borderFoundNow = true; // the page says so
+      this.pframeDirty = true;    // the worker saves it
+      this.voteCells(proc, seg);
+    }
+    /** Read the puzzle cell by cell in this view (the border just found
+     *  again here) and add a vote per visible cell. */
+    voteCells(proc, seg) {
+      if (!this.box || !PH.readCells || !this.pfLoc || !this.pfLoc.H) return;
+      // only sharp views: a blurred one reads every printed cell as "open"
+      const sh = this.frameSharpness(seg.lab, proc.w, proc.h);
+      const hist = this.sharpHist || (this.sharpHist = []);
+      hist.push(sh); if (hist.length > 40) hist.shift();
+      const ref = hist.slice().sort((a, b) => a - b)[Math.floor(hist.length * 0.75)];
+      this.lastSharp = { sh: +sh.toFixed(1), ref: +ref.toFixed(1) };
+      if (hist.length >= 5 && sh < ref * 0.6) { this.rejects.blurView = (this.rejects.blurView || 0) + 1; return; }
+      const n = this.box.cols * this.box.rows;
+      if (!this.cellVotes || this.cellVotes.f.length !== n) this.cellVotes = { f: new Uint16Array(n), o: new Uint16Array(n), views: 0 };
+      const V = this.cellVotes, r = PH.readCells(proc, this.pfLoc.H, this.box);
+      for (let i = 0; i < n; i++) {
+        if (r.cells[i] > 0) V.f[i]++; else if (r.cells[i] < 0) V.o[i]++;
+        if (V.f[i] + V.o[i] > 40) { V.f[i] >>= 1; V.o[i] >>= 1; } // later views (pieces added since) still count
+      }
+      V.views++;
+      this.cellVotesV = (this.cellVotesV || 0) + 1;
+      this.cellVotesDirty = true;
+    }
+    /** A box cell by its votes: 1 a piece is in place, -1 open, 0 not known.
+     *  Open needs 2+ open readings and twice as many as filled ones. */
+    cellState(i) {
+      const V = this.cellVotes;
+      if (!V) return 0;
+      const f = V.f[i], o = V.o[i];
+      if (o >= 2 && o > 2 * f) return -1;
+      if (f >= 1 && f >= o) return 1;
+      return 0;
+    }
+    /** Open cells of the marked puzzle: [{col, row, n (pieces around it)}]. */
+    cellSpots() {
+      if (!this.cellVotes || !this.box) return [];
+      const { cols, rows } = this.box, out = [];
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+        if (this.cellState(r * cols + c) !== -1) continue;
+        let n = 0;
+        for (const [dc, dr] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
+          const cc = c + dc, rr = r + dr;
+          if (cc >= 0 && rr >= 0 && cc < cols && rr < rows && this.cellState(rr * cols + cc) === 1) n++;
+        }
+        out.push({ col: c, row: r, n });
+      }
+      return out;
+    }
+    /** Box cells the votes call filled. */
+    cellFilledSet() {
+      const out = new Set();
+      if (!this.cellVotes) return out;
+      for (let i = 0; i < this.cellVotes.f.length; i++) if (this.cellState(i) === 1) out.add(i);
+      return out;
+    }
+    exportCellVotes() { const V = this.cellVotes; return V ? { f: Array.from(V.f), o: Array.from(V.o), views: V.views, cols: this.box && this.box.cols, rows: this.box && this.box.rows } : null; }
+    importCellVotes(o) {
+      this.cellVotes = o && this.box && o.cols === this.box.cols && o.rows === this.box.rows ? { f: Uint16Array.from(o.f), o: Uint16Array.from(o.o), views: o.views || 0 } : null;
+      this.cellVotesV = (this.cellVotesV || 0) + 1;
+    }
     // Re-find the marked border in this view, at most every frameEveryMs
     // (ORB matching is ~60-90 ms on a PC). Returns true when found now.
     findPuzzleFrame(proc) {
@@ -1461,6 +1564,7 @@
      *  the last fix is carried along with the table map's camera pose. */
     puzzleFrameOut(proc, foundNow) {
       const L = this.pfLoc;
+      this.pfViewH = null;
       if (!this.pframe || !L || !L.H || L.w !== proc.w) return this.pframe ? { marked: true, visible: false } : null;
       let H = null;
       if (foundNow) { H = L.H; if (this.pose) { L.pose = Object.assign({}, this.pose); L.island = this.island; } }
@@ -1469,6 +1573,7 @@
         const S = (T) => [T.a, -T.b, T.tx, T.b, T.a, T.ty, 0, 0, 1];
         H = PH.homMul(S(PH.simInvert(this.pose)), PH.homMul(S(L.pose), L.H));
       } else if ((this.fNo || 0) - L.fNo <= 2) H = L.H; // just found: the page's motion tracker covers the rest
+      this.pfViewH = H;
       if (!H) return { marked: true, visible: false };
       const { cols, rows } = this.pframe;
       const out = { marked: true, visible: true, quad: PH.PuzzleFrame.cellQuad(H, 0, 0, cols, rows), cols, rows };
@@ -1559,6 +1664,7 @@
       this.box = box;
       for (const p of this.pieces.values()) { p.t2 = null; this.touch(p); }
       for (const A of this.asms || []) { A.place = null; A.placeAt = -1e9; A.version++; A.locate(box, true); } // placed again on the new grid
+      this.cellVotes = null; this.cellVotesDirty = true; // cell votes are on the old grid
       this.asmDirty = true;
       this.version++;
     }
@@ -1728,6 +1834,10 @@
     asmSpotOf(P) {
       if (!this.box || !P.t2 || !P.t2.cands.length || P.t2.conf < 0.2 || !P.t1) return null;
       const c = P.t2.cands[0];
+      if (this.pframe && this.cellVotes) {
+        const sp = this.cellSpots().find((x) => x.col === c.col && x.row === c.row);
+        return sp ? { col: c.col, row: c.row, n: sp.n, fit: true } : null;
+      }
       for (const A of this.asms || []) {
         if (!A.place) continue;
         const sp = A.spots(this.box).find((x) => x.cell && x.cell[0] === c.col && x.cell[1] === c.row);
@@ -1955,6 +2065,7 @@
       const borderDone = !!(asm && asm.border && asm.border.done >= asm.border.total);
       const filled = new Set();
       for (const A of this.asms || []) for (const id of A.filledBoxCells(this.box)) filled.add(id);
+      for (const id of this.cellFilledSet()) filled.add(id);
       for (const p of [...this.pieces.values()]) {
         if (p.inPuzzle || !p.t1) continue;
         const f = edgeFlags(p);
@@ -2249,6 +2360,15 @@
     }
     /** The main assembly's state, for the page and reports. */
     assemblyInfo(withCells) {
+      if (this.pframe && this.cellVotes && this.box) {
+        const filled = this.cellFilledSet(), spots = this.cellSpots();
+        const { cols, rows } = this.box;
+        const out = { n: 1, cells: filled.size, views: this.cellVotes.views, place: { k: 0, marked: true },
+          border: { total: 2 * (cols + rows) - 4, done: 2 * (cols + rows) - 4, inside: 0, cells: filled.size }, spots: spots.length, fromBorder: true };
+        const key = 'cells:' + this.cellVotesV;
+        if (withCells && key !== this.asmSentKey) { this.asmSentKey = key; out.boxCells = { filled: [...filled], open: spots.map((s) => s.row * cols + s.col) }; }
+        return out;
+      }
       const A = this.mainAssembly();
       if (!A) return null;
       let filled = 0;
@@ -2291,6 +2411,7 @@
      *  and the best loose pieces) drawn through the grid this view lined up
      *  with. Piece suggestions are cached per assembly/catalogue version. */
     spotsOut(inv, byId) {
+      if (this.pframe) return this.cellSpotsOut(inv, byId);
       const V = this.spotView;
       if (!V || !this.asmShown(V.A)) return [];
       const A = V.A, g = V.g;
@@ -2323,6 +2444,28 @@
           return { id: b.id, x: at ? at[0] : null, y: at ? at[1] : null, visible: !!d };
         });
         return { poly: poly.map((v) => Math.round(v * 10) / 10), cx, cy, n: sp.n, need, cell: sp.cell, best };
+      });
+    }
+
+    /** Open spots of the marked puzzle, drawn through where the border is in
+     *  this view, with the best loose pieces (cached per votes/catalogue). */
+    cellSpotsOut(inv, byId) {
+      const H = this.pfViewH;
+      if (!H || !this.cellVotes) return [];
+      if (!this.cellCache || this.cellCache.v !== this.cellVotesV || this.cellCache.pieces !== this.version) {
+        const list = this.cellSpots().sort((a, b) => b.n - a.n);
+        let budget = 12;
+        for (const sp of list) sp.best = budget-- > 0 ? this.spotPieces(sp.col, sp.row, ['?', '?', '?', '?'], 3) : [];
+        this.cellCache = { v: this.cellVotesV, pieces: this.version, list };
+      }
+      return this.cellCache.list.map((sp) => {
+        const q = PH.PuzzleFrame.cellQuad(H, sp.col, sp.row), [cx, cy] = PH.applyHom(H, sp.col + 0.5, sp.row + 0.5);
+        const best = sp.best.map((b) => {
+          const d = byId.get(b.id), P = this.pieces.get(b.id);
+          const at = d ? [d.cx, d.cy] : P && P.pos && inv && P.island === this.island ? PH.simApply(inv, P.pos[0], P.pos[1]) : null;
+          return { id: b.id, x: at ? at[0] : null, y: at ? at[1] : null, visible: !!d };
+        });
+        return { poly: q.flat().map((v) => Math.round(v * 10) / 10), cx, cy, n: sp.n, need: ['?', '?', '?', '?'], cell: [sp.col, sp.row], best };
       });
     }
 

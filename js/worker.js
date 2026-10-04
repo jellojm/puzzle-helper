@@ -13,7 +13,7 @@ const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-rel
 const OPENCV_SIMD_URL = '../vendor/opencv-4.10.0-simd.js';
 // A tiny module using one SIMD instruction: does this browser accept SIMD?
 const simdOk = (() => { try { return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])); } catch (_) { return false; } })();
-const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'engine'];
+const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'border', 'engine'];
 
 let engine = null;
 const recent = []; // recent frame timings
@@ -154,7 +154,8 @@ async function loadState() {
   const feedback = await tx('meta', 'readonly', (s) => s.get('feedback'));
   const pframe = await tx('meta', 'readonly', (s) => s.get('pframe'));
   const asm = await tx('meta', 'readonly', (s) => s.get('asm'));
-  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null, asm: asm || [] };
+  const cellVotes = await tx('meta', 'readonly', (s) => s.get('cellVotes'));
+  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null, asm: asm || [], cellVotes: cellVotes || null };
 }
 function scheduleSave() {
   if (saveTimer || !db) return;
@@ -163,6 +164,11 @@ function scheduleSave() {
     if (engine.asmDirty) { // the assembled part, built up from close views
       engine.asmDirty = false;
       try { await tx('meta', 'readwrite', (s) => s.put(engine.exportAsms(), 'asm')); } catch (e) { post({ type: 'error', message: 'Saving failed: ' + e.message }); }
+    }
+    if (engine.cellVotesDirty || engine.pframeDirty) { // the puzzle read cell by cell; a border found by itself
+      const pf = engine.pframeDirty && engine.pframe ? engine.pframe.toJSON() : null;
+      engine.cellVotesDirty = false; engine.pframeDirty = false;
+      try { await tx('meta', 'readwrite', (s) => { s.put(engine.exportCellVotes(), 'cellVotes'); if (pf) s.put(pf, 'pframe'); }); } catch (e) { post({ type: 'error', message: 'Saving failed: ' + e.message }); }
     }
     const { put, del } = engine.takeDirty();
     if (!put.length && !del.length) return;
@@ -194,7 +200,7 @@ async function saveCurrentToLibrary(name) {
   const nm = name || (cur && cur.name) || `Puzzle ${new Date().toLocaleDateString()}${engine.box ? ` (${engine.box.cols * engine.box.rows} pieces)` : ''}`;
   const entry = { key, name: nm, savedAt: Date.now(), counts: engine.counts(),
     pieces: [...engine.pieces.values()].map((p) => engine.exportPiece(p)), box: engine.box || null,
-    feedback: engine.fbLog || [], pframe: engine.pframe ? engine.pframe.toJSON() : null, asm: engine.exportAsms() };
+    feedback: engine.fbLog || [], pframe: engine.pframe ? engine.pframe.toJSON() : null, asm: engine.exportAsms(), cellVotes: engine.exportCellVotes() };
   await tx('library', 'readwrite', (s) => s.put(entry));
   await tx('meta', 'readwrite', (s) => s.put({ key, name: nm }, 'current'));
   return { key, name: nm, pieces: entry.pieces.length };
@@ -255,6 +261,7 @@ async function init(msg) {
     const st = await loadState();
     engine.importState(st);
     engine.importAsms(st.asm);
+    engine.importCellVotes(st.cellVotes);
     engine.fbLog = Array.isArray(st.feedback) ? st.feedback : [];
     engine.refitCalib(); // the match-probability model learns from saved Fits/No answers
     // the marked border, if it was marked on this box's grid
@@ -549,6 +556,7 @@ const handlers = {
     if (engine.pieces.size) await saveCurrentToLibrary();
     engine.importState({ pieces: e.pieces || [], box: e.box || null });
     engine.importAsms(e.asm);
+    engine.importCellVotes(e.cellVotes);
     engine.fbLog = Array.isArray(e.feedback) ? e.feedback : [];
     engine.refitCalib();
     engine.pframe = null;
@@ -561,6 +569,7 @@ const handlers = {
       s.put(engine.fbLog, 'feedback');
       if (e.pframe) s.put(e.pframe, 'pframe'); else s.delete('pframe');
       s.put(e.asm || [], 'asm');
+      s.put(e.cellVotes || null, 'cellVotes');
       s.put({ key: e.key, name: e.name }, 'current');
     });
     post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo(), border: !!engine.pframe, opened: e.name });
@@ -586,7 +595,7 @@ const handlers = {
       await tx('meta', 'readwrite', (s) => s.delete('feedback')); // the answer key belongs to the old catalog
       if (!keepBox) await tx('meta', 'readwrite', (s) => s.delete('box'));
       await tx('meta', 'readwrite', (s) => s.delete('pframe')); // a new puzzle has its own border
-      await tx('meta', 'readwrite', (s) => s.delete('asm')); // and its own assembled part
+      await tx('meta', 'readwrite', (s) => { s.delete('asm'); s.delete('cellVotes'); }); // and its own assembled part
     }
     post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo() });
     post({ type: 'feedbackStats', stats: engine.feedbackStats() });

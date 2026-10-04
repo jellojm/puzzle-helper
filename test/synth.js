@@ -145,7 +145,8 @@ function scatter(cv, P, opts) {
   const spacing = core * (opts.spacing || 1.85);
   const order = (opts.subset || P.pieces.map((p, i) => i)).slice().sort(() => rnd() - 0.5);
   const perRow = opts.perRow || Math.ceil(Math.sqrt(order.length * 1.5));
-  const TW = Math.ceil(perRow * spacing + spacing), TH = Math.ceil(Math.ceil(order.length / perRow) * spacing + spacing);
+  let TW = Math.ceil(perRow * spacing + spacing);
+  const TH = Math.ceil(Math.ceil(order.length / perRow) * spacing + spacing);
   const table = new cv.Mat(TH, TW, cv.CV_8UC4);
   const td = table.data;
   const felt = opts.felt || [38, 92, 60];
@@ -202,10 +203,13 @@ function scatter(cv, P, opts) {
   const blockGt = [];
   if (opts.blocks && opts.blocks.length) {
     const bandH = Math.ceil(Math.max(...opts.blocks.map((b) => Math.hypot(b.rows, b.cols))) * P.cs * k * 1.15);
+    // wide enough for the blocks too (a whole-puzzle block is wider than a few loose pieces' table)
+    const TW0 = TW;
+    TW = Math.max(TW, Math.ceil(bandH / 2 + opts.blocks.reduce((a, b) => a + Math.hypot(b.rows * P.cs + P.cs, b.cols * P.cs + P.cs) * k * 1.05 * 1.1, 0)));
     const big = new cv.Mat(TH + bandH, TW, cv.CV_8UC4);
     const bd = big.data;
     for (let i = 0; i < bd.length; i += 4) { const n = (rnd() - 0.5) * 10; bd[i] = felt[0] + n; bd[i + 1] = felt[1] + n; bd[i + 2] = felt[2] + n; bd[i + 3] = 255; }
-    table.copyTo(big.roi(new cv.Rect(0, 0, TW, TH)));
+    { const v = big.roi(new cv.Rect(0, 0, TW0, TH)); table.copyTo(v); v.delete(); }
     let x = bandH / 2;
     for (const b of opts.blocks) {
       // b.missing = [[row, col], ...]: pieces left out of the block (holes, pockets)
