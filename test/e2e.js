@@ -318,6 +318,31 @@ function writePng(file, mat) {
     await page.waitForTimeout(1500);
     const back = await page.evaluate(() => window.__phMapState());
     check('Scan again: camera back on, map hidden', back.hidden && back.active, `hidden ${back.hidden}, camera ${back.active}`);
+    // ---- v0.16.0: in-app photo, puzzle library, camera path ----
+    page.on('dialog', (d) => d.accept(d.type() === 'prompt' ? 'E2E puzzle' : undefined));
+    const camPath = await page.evaluate(() => window.__phCamPath && window.__phCamPath());
+    console.log('camera path:', camPath);
+    // "Catalog from a photo" from the menu: in the app when ImageCapture works
+    await page.click('#menuBtn');
+    await page.click('#snapBtn');
+    const photoOk = await page.waitForFunction(() => /^Photo: \d+ pieces found/.test(document.getElementById('toast').textContent) || /inside the app/.test(document.getElementById('toast').textContent), null, { timeout: 30000 }).then(() => true).catch(() => false);
+    const photoMsg = await page.textContent('#toast');
+    check('Catalog from a photo, inside the app (or the camera app if it can\'t)', photoOk, photoMsg.slice(0, 100));
+    await page.waitForTimeout(1500);
+    const n0 = await page.evaluate(() => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1]);
+    await page.click('#menuBtn');
+    await page.click('#libSave');
+    const saved = await page.waitForFunction(() => /E2E puzzle/.test(document.getElementById('libList').textContent), null, { timeout: 8000 }).then(() => true).catch(() => false);
+    await page.click('#newPuzzle');
+    await page.waitForFunction(() => /^0 pieces/.test(document.getElementById('stats').textContent), null, { timeout: 8000 }).catch(() => {});
+    const afterNew = await page.textContent('#stats');
+    await page.click('#menuBtn');
+    await page.waitForFunction(() => document.querySelectorAll('#libList .lib-row button').length > 0, null, { timeout: 8000 }).catch(() => {});
+    await page.evaluate(() => { const row = [...document.querySelectorAll('#libList .lib-row')].find((r) => /E2E puzzle/.test(r.textContent)); if (row) row.querySelector('button').click(); });
+    const reopened = await page.waitForFunction((n) => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1] === n, n0, { timeout: 10000 }).then(() => true).catch(() => false);
+    check('Puzzle library: save, start a new puzzle, open the saved one again', saved && /^0 pieces/.test(afterNew) && reopened, `saved ${saved}; after New: ${afterNew}; reopened with ${n0} pieces: ${reopened}`);
+    await page.click('#closeMenu').catch(() => {});
+
     check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   } finally {
     await browser.close();

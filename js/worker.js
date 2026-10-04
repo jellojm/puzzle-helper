@@ -57,14 +57,82 @@ function bitmapSource(bmp) {
   };
 }
 
+// Camera frames read here, in the worker (research item 8: iOS 18+ has
+// MediaStreamTrackProcessor in workers): the page transfers a clone of its
+// camera track, this keeps only the newest VideoFrame, and a 'frame' message
+// without a bitmap analyses that one - no createImageBitmap + transfer on the
+// page's main thread. The page falls back to bitmaps if this stalls.
+let camReader = null, camLatest = null, camFrames = 0, camError = null, camBlank = 0;
+async function camPump(track) {
+  try {
+    const proc = new MediaStreamTrackProcessor({ track });
+    const reader = proc.readable.getReader();
+    camReader = reader;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done || reader !== camReader) { if (value) value.close(); break; }
+      if (camLatest) camLatest.close();
+      camLatest = value; camFrames++;
+    }
+  } catch (e) { camError = String((e && e.message) || e); post({ type: 'camTrackFailed', why: camError }); }
+}
+function camStop() {
+  if (camReader) { try { camReader.cancel(); } catch (_) { /* gone */ } camReader = null; }
+  if (camLatest) { camLatest.close(); camLatest = null; }
+}
+// A VideoFrame as an image source (same interface as bitmapSource).
+function videoFrameSource(vf) {
+  const w = vf.displayWidth, h = vf.displayHeight;
+  return {
+    w, h,
+    getProc(maxW) {
+      const scale = Math.min(1, maxW / Math.max(w, h));
+      const pw = Math.round(w * scale), ph = Math.round(h * scale);
+      const c = canvas2d(pw, ph, 'proc');
+      c.ctx.drawImage(vf, 0, 0, pw, ph);
+      return { w: pw, h: ph, data: c.ctx.getImageData(0, 0, pw, ph).data, scale };
+    },
+    getCrop(x, y, cw, ch) {
+      const c = canvas2d(cw, ch, 'crop');
+      c.ctx.clearRect(0, 0, cw, ch);
+      c.ctx.drawImage(vf, x, y, cw, ch, 0, 0, cw, ch);
+      return { w: cw, h: ch, data: c.ctx.getImageData(0, 0, cw, ch).data };
+    },
+    rgba() {
+      const c = canvas2d(w, h, 'full');
+      c.ctx.drawImage(vf, 0, 0);
+      return { w, h, data: c.ctx.getImageData(0, 0, w, h).data };
+    },
+  };
+}
+
+function frameFrom(src, msg, bitmap) {
+  const g0 = performance.now();
+  // How long the frame waited between the page sending it and this handler
+  // starting (message transfer + anything queued ahead of it), on one clock.
+  const waitMs = msg.sentAt ? Math.max(0, performance.timeOrigin + g0 - msg.sentAt) : null;
+  const out = engine.processFrame(src, { still: msg.still, tilt: msg.tilt });
+  out.timings.workerTotal = performance.now() - g0;
+  if (waitMs !== null) out.timings.wait = waitMs;
+  if (bitmap) bitmap.close();
+  out.type = 'frame';
+  out.frameW = src.w; out.frameH = src.h;
+  out.fromTrack = !bitmap;
+  noteTimings(out.timings);
+  post(out);
+  scheduleSave();
+}
+
 // ---------- IndexedDB ----------
 function openDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('puzzle-helper', 1);
+    const req = indexedDB.open('puzzle-helper', 2);
     req.onupgradeneeded = () => {
       const d = req.result;
       if (!d.objectStoreNames.contains('pieces')) d.createObjectStore('pieces', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta');
+      // v2: saved puzzles (a whole catalog each: pieces, box, answer key, border)
+      if (!d.objectStoreNames.contains('library')) d.createObjectStore('library', { keyPath: 'key' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -99,6 +167,32 @@ function scheduleSave() {
       post({ type: 'error', message: 'Saving failed: ' + e.message });
     }
   }, 2500);
+}
+
+// ---------- puzzle library ----------
+async function currentName() {
+  if (!db) return null;
+  const c = await tx('meta', 'readonly', (s) => s.get('current'));
+  return c ? c.name : null;
+}
+async function libEntries() {
+  if (!db) return [];
+  const all = await tx('library', 'readonly', (s) => s.getAll());
+  return (all || []).map((e) => ({ key: e.key, name: e.name, savedAt: e.savedAt, pieces: e.counts ? e.counts.pieces : (e.pieces || []).length,
+    shaped: e.counts ? e.counts.shaped : null, grid: e.box ? `${e.box.cols} x ${e.box.rows}` : null })).sort((a, b) => b.savedAt - a.savedAt);
+}
+// The current catalog as a library entry (same entry as last time unless a new name is given).
+async function saveCurrentToLibrary(name) {
+  if (!db) return null;
+  const cur = (await tx('meta', 'readonly', (s) => s.get('current'))) || null;
+  const key = !name && cur ? cur.key : 'p' + Date.now();
+  const nm = name || (cur && cur.name) || `Puzzle ${new Date().toLocaleDateString()}${engine.box ? ` (${engine.box.cols * engine.box.rows} pieces)` : ''}`;
+  const entry = { key, name: nm, savedAt: Date.now(), counts: engine.counts(),
+    pieces: [...engine.pieces.values()].map((p) => engine.exportPiece(p)), box: engine.box || null,
+    feedback: engine.fbLog || [], pframe: engine.pframe ? engine.pframe.toJSON() : null };
+  await tx('library', 'readwrite', (s) => s.put(entry));
+  await tx('meta', 'readwrite', (s) => s.put({ key, name: nm }, 'current'));
+  return { key, name: nm, pieces: entry.pieces.length };
 }
 
 // ---------- messaging ----------
@@ -168,7 +262,8 @@ async function init(msg) {
   } catch (e) {
     post({ type: 'error', message: 'Storage unavailable; the catalog will not be saved (' + e.message + ')' });
   }
-  post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo(), border: !!engine.pframe });
+  post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo(), border: !!engine.pframe,
+    camWorker: typeof MediaStreamTrackProcessor !== 'undefined' });
   post({ type: 'feedbackStats', stats: engine.feedbackStats() }); // running match accuracy in More
 }
 function settingsInfo() { return { minDE: engine.opts.minDE, taught: engine.taught.length }; }
@@ -185,21 +280,30 @@ async function saveSettings() {
 
 const handlers = {
   init,
+  camTrack(msg) {
+    camStop();
+    if (typeof MediaStreamTrackProcessor === 'undefined') { post({ type: 'camTrackFailed', why: 'no MediaStreamTrackProcessor in the worker' }); return; }
+    camPump(msg.track); // runs on its own, outside the message chain
+  },
+  camTrackOff() { camStop(); },
   frame(msg) {
-    const src = bitmapSource(msg.bitmap);
-    const g0 = performance.now();
-    // How long the frame waited between the page sending it and this handler
-    // starting (message transfer + anything queued ahead of it), on one clock.
-    const waitMs = msg.sentAt ? Math.max(0, performance.timeOrigin + g0 - msg.sentAt) : null;
-    const out = engine.processFrame(src, { still: msg.still, tilt: msg.tilt });
-    out.timings.workerTotal = performance.now() - g0;
-    if (waitMs !== null) out.timings.wait = waitMs;
-    msg.bitmap.close();
-    out.type = 'frame';
-    out.frameW = src.w; out.frameH = src.h;
-    noteTimings(out.timings);
-    post(out);
-    scheduleSave();
+    if (msg.fromTrack) {
+      // newest camera frame read in the worker (none yet: tell the page)
+      const vf = camLatest; camLatest = null;
+      if (!vf) { post({ type: 'frame', noFrame: true }); return; }
+      try { frameFrom(videoFrameSource(vf), msg, null); } finally { vf.close(); }
+      // Frames that arrive but are blank (all one value) would quietly
+      // catalogue nothing: 10 in a row -> back to the page's bitmaps.
+      const d = engine.lastProc && engine.lastProc.data;
+      if (d) {
+        let lo = 255, hi = 0;
+        for (let i = 0; i < d.length; i += 4 * 97) { const v = d[i + 1]; if (v < lo) lo = v; if (v > hi) hi = v; }
+        camBlank = hi - lo < 4 ? camBlank + 1 : 0;
+        if (camBlank >= 10) { camStop(); post({ type: 'camTrackFailed', why: 'blank frames' }); }
+      }
+      return;
+    }
+    return frameFrom(bitmapSource(msg.bitmap), msg, msg.bitmap);
   },
   snap(msg) {
     post({ type: 'status', text: 'Cataloging photo…' });
@@ -376,6 +480,7 @@ const handlers = {
       // Why detections did not become pieces (shot-quality gate), and provisional pieces waiting.
       gate: { rejects: engine.rejects || {}, candidates: engine.cands ? engine.cands.size : 0, pieceMM: engine.pieceMM ? engine.pieceMM() : null },
       cvBuild: PH.cvBuild, cvError: PH.cvError || null, simd: simdOk,
+      camWorker: { frames: camFrames, reading: !!camReader, error: camError },
       cvInfo: PH.cv && PH.cv.getBuildInformation ? String(PH.cv.getBuildInformation()).slice(0, 3000) : null,
     } });
   },
@@ -420,7 +525,46 @@ const handlers = {
     if (db) await tx('meta', 'readwrite', (s) => s.delete('pframe'));
     post({ type: 'frameMarked', ok: false, cleared: true });
   },
+  // ---------- puzzle library: several puzzles on the go ----------
+  async libList() { post({ type: 'library', list: await libEntries(), current: await currentName() }); },
+  // Save the current catalog into the library (under its own name; a new
+  // name makes a new entry).
+  async libSave(msg) {
+    const r = await saveCurrentToLibrary(msg.name);
+    post({ type: 'library', list: await libEntries(), current: await currentName(), saved: r });
+  },
+  // Open a saved puzzle: the current one is saved first (nothing is lost).
+  async libOpen(msg) {
+    if (!db) return;
+    const e = await tx('library', 'readonly', (s) => s.get(msg.key));
+    if (!e) return;
+    if (engine.pieces.size) await saveCurrentToLibrary();
+    engine.importState({ pieces: e.pieces || [], box: e.box || null });
+    engine.fbLog = Array.isArray(e.feedback) ? e.feedback : [];
+    engine.refitCalib();
+    engine.pframe = null;
+    if (e.pframe && engine.box && e.pframe.cols === engine.box.cols && e.pframe.rows === engine.box.rows) {
+      try { engine.pframe = PH.PuzzleFrame.fromJSON(e.pframe); } catch (_) { /* mark again */ }
+    }
+    await tx('pieces', 'readwrite', (s) => { s.clear(); for (const p of e.pieces || []) s.put(p); });
+    await tx('meta', 'readwrite', (s) => {
+      if (e.box) s.put(e.box, 'box'); else s.delete('box');
+      s.put(engine.fbLog, 'feedback');
+      if (e.pframe) s.put(e.pframe, 'pframe'); else s.delete('pframe');
+      s.put({ key: e.key, name: e.name }, 'current');
+    });
+    post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo(), border: !!engine.pframe, opened: e.name });
+    post({ type: 'feedbackStats', stats: engine.feedbackStats() });
+    post({ type: 'library', list: await libEntries(), current: e.name });
+  },
+  async libDelete(msg) {
+    if (db) await tx('library', 'readwrite', (s) => s.delete(msg.key));
+    post({ type: 'library', list: await libEntries(), current: await currentName() });
+  },
   async reset(msg) {
+    // A new puzzle: the old catalog goes into the library first (nothing lost).
+    if (msg.keepOld !== false && engine.pieces.size) await saveCurrentToLibrary();
+    if (db) await tx('meta', 'readwrite', (s) => s.delete('current'));
     const keepBox = msg.keepBox ? engine.box : null;
     engine.reset();
     if (keepBox) engine.box = keepBox;

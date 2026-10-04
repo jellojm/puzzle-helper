@@ -144,12 +144,20 @@
         <span id="fovVal">66°</span>
       </label>
       <p class="muted small">Leave at 66° for the iPhone's normal 1× camera. Don't zoom while scanning.</p>
+      <div class="menu-actions"><button id="fovMeasure">Measure lens angle</button></div>
+      <p class="muted small">Measures your camera's angle in 6 seconds: tilt the phone back and forth over the table without sliding it. It helps the distance hint and tilt correction.</p>
       <label id="torchRow" class="row" hidden><input id="torchToggle" type="checkbox"> Flashlight</label>
       <label class="row"><input id="debugToggle" type="checkbox"> Show timing / debug info</label>
       <div class="menu-actions">
         <button id="reportBtn">Send report (frame + data)</button>
       </div>
       <p class="muted small">Saves the current camera view, the box picture, your last catalogued photo and diagnostic data. Choose "Save to Files" → OneDrive → Puzzle Helper → reports to get it to the PC.</p>
+      <div class="lib">
+        <strong>Puzzles</strong> <span id="libCurrent" class="muted small"></span>
+        <div id="libList" class="small"></div>
+        <div class="menu-actions"><button id="libSave">Save this puzzle as…</button></div>
+        <p class="muted small">Keep several puzzles on the go: each keeps its own pieces, box picture, answers and border. Opening one saves the current puzzle first, and New puzzle keeps the old one here too.</p>
+      </div>
       <div class="menu-actions">
         <button id="newPuzzle">New puzzle (keep box picture)</button>
         <button id="clearAll" class="danger">Clear everything</button>

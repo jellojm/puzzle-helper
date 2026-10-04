@@ -96,6 +96,8 @@ Status 2026-10-03: items 7, 13, 14, 15, 16 **done in v0.13.0**; item 12 tested a
 
 ### Tier 3: later or optional
 
+Status 2026-10-03: 16 (frame chain) done in v0.13.0; 9 (SIMD OpenCV) in v0.15.0; 8, 17, 18, 21 in v0.16.0; 19 not applicable to a moving phone; 20 done in v0.14.0; 22 skipped (owner). All 22 items handled.
+
 16. **Frame-chain assistant: "next edge piece after #12"** — M. Solve the border first, as in [Zolver](https://github.com/Kawaboongawa/Zolver) and pondruska's FrameSolver. Only the frame (~70–130 pieces); a full interior solve isn't worth it on real pieces.
 17. **Field-of-view self-calibration** — S–M. Compare the gyro rotation against the optical-flow shift during a ~20° pan to get the focal length per device. Our 66° is close; the XR is about 63–69° depending on the video crop (inf).
 18. **Sharp stills with `ImageCapture.takePhoto()`** — S. Available from iOS 18.4 ([WebKit 18.4](https://webkit.org/blog/16574/webkit-features-in-safari-18-4/)). Verify the actual still size on the XR first.

@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.15.0';
+const APP_VERSION = '0.16.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -80,6 +80,7 @@ worker.onmessage = (e) => {
     case 'status': setStatus(m.text); break;
     case 'ready':
       S.ready = true;
+      if (m.camWorker !== undefined) { S.camWorkerOk = !!m.camWorker; if (!S.camWorkerOk) S.camPath = 'bitmap (no MediaStreamTrackProcessor in the worker)'; startWorkerCam(); }
       setStatus('');
       $('modeHint').textContent = modeHint(S.mode);
       setBox(m.box);
@@ -89,6 +90,17 @@ worker.onmessage = (e) => {
       updateStats(m.counts);
       break;
     case 'frame': {
+      clearTimeout(S.wcTimer);
+      if (m.noFrame) { // worker camera has no frame yet
+        S.busy = false;
+        if (++S.wcEmpty > 15) stopWorkerCam('no camera frames in the worker');
+        break;
+      }
+      if (m.fromTrack) {
+        S.wcEmpty = 0;
+        // its frames must have the video's orientation, or every mark lands in the wrong place
+        if ((m.frameW > m.frameH) !== (video.videoWidth > video.videoHeight)) { stopWorkerCam(`frame ${m.frameW}x${m.frameH} vs video ${video.videoWidth}x${video.videoHeight}`); S.busy = false; break; }
+      }
       const now = performance.now();
       S.fps = S.fps * 0.8 + (1000 / Math.max(1, now - (S.lastResult || now))) * 0.2;
       S.lastResult = now;
@@ -145,6 +157,8 @@ worker.onmessage = (e) => {
       break;
     case 'selected': showFind(m.desc); mapShowSelection(m.desc); break;
     case 'mapData': tableView.setData(m.data); mapApplyFilter(); break;
+    case 'camTrackFailed': stopWorkerCam(m.why); break;
+    case 'library': showLibrary(m); if (m.saved) toast(`Saved "${m.saved.name}" (${m.saved.pieces} pieces).`); break;
     case 'inPuzzle':
       updateStats(m.counts);
       toast(m.on ? `#${m.id} marked as in the puzzle — its spot won't be offered for other pieces. Tap the button again to undo.` : `#${m.id} is back among the loose pieces.`, 3500);
@@ -202,6 +216,7 @@ async function openCamera() {
   S.fpsWanted = 24;
   video.srcObject = stream;
   S.track = stream.getVideoTracks()[0];
+  startWorkerCam();
   S.track.addEventListener('ended', () => ensureCamera());
   await video.play();
 }
@@ -215,6 +230,26 @@ async function ensureCamera() {
   try { await openCamera(); } catch (e) { logError('camera reopen: ' + e.message); }
   S.reopening = false;
   applyPower();
+}
+
+// Camera frames read in the worker (MediaStreamTrackProcessor, iOS 18+):
+// hand it a clone of the track; any trouble (can't transfer, no frames, wrong
+// orientation) switches back to createImageBitmap for the rest of the session.
+function startWorkerCam() {
+  if (S.wcOff || !S.track || !S.camWorkerOk) return;
+  try {
+    const t = S.track.clone();
+    W.post({ type: 'camTrack', track: t }, [t]);
+    S.workerCam = true; S.wcEmpty = 0; S.camPath = 'worker';
+  } catch (e) { stopWorkerCam('track transfer: ' + e.message); }
+}
+function stopWorkerCam(why) {
+  if (!S.workerCam && S.wcOff) return;
+  S.workerCam = false; S.wcOff = true; S.camPath = 'bitmap (' + why + ')';
+  clearTimeout(S.wcTimer);
+  logError('worker camera off: ' + why);
+  W.post({ type: 'camTrackOff' });
+  S.busy = false;
 }
 
 // Camera frame rate follows what the app needs: 15 fps once the view has been
@@ -374,6 +409,7 @@ async function requestMotion() {
       S.gravity = S.gravity ? S.gravity.map((x, i) => x * (1 - k) + v[i] * k) : v;
     }
     const r = e.rotationRate || {}, a = e.acceleration || {};
+    S.rate = { beta: r.beta || 0, gamma: r.gamma || 0, t: performance.now() };
     const rot = Math.hypot(r.alpha || 0, r.beta || 0, r.gamma || 0);
     const acc = Math.hypot(a.x || 0, a.y || 0, a.z || 0);
     S.motion.rot = S.motion.rot * 0.7 + rot * 0.3;
@@ -427,6 +463,7 @@ function trackStep() {
   const t1 = performance.now();
   const r = F.T.push(g);
   const t2 = performance.now();
+  if (S.fovRun) fovSample(F, t0);
   F.readMs = F.readMs * 0.9 + (t1 - t0) * 0.1;
   F.matchMs = F.matchMs * 0.9 + (t2 - t1) * 0.1;
   F.ms = F.ms * 0.9 + (t2 - t0) * 0.1;
@@ -440,6 +477,7 @@ function trackStep() {
 // Only worth tracking when there are dots to move, or when the tracker is
 // the stillness signal (no motion sensor).
 function trackingNeeded() {
+  if (S.fovRun) return true; // measuring the lens angle
   if (!S.follow) return false;
   if (!S.hasMotion) return true;
   return !!(S.last && S.last.dets && S.last.dets.length);
@@ -472,6 +510,20 @@ async function sendFrame() {
   S.busy = true;
   S.lastSend = performance.now();
   const g0 = performance.now();
+  if (S.workerCam) { // the worker reads the camera itself (startWorkerCam)
+    S.grabMs = 0;
+    if (trackingNeeded()) trackStep();
+    if (S.flow) S.flow.T.mark();
+    S.flowAtSend = S.flow ? S.flow.T.total.slice() : null;
+    S.lastStill = isStill();
+    S.lastTilt = currentTilt();
+    S.sentAt = performance.now();
+    bump('framesSent');
+    W.post({ type: 'frame', fromTrack: true, still: S.lastStill, tilt: S.lastTilt, sentAt: performance.timeOrigin + performance.now() });
+    clearTimeout(S.wcTimer);
+    S.wcTimer = setTimeout(() => stopWorkerCam('no frame back within 3 s'), 3000);
+    return;
+  }
   let bmp;
   try {
     bmp = await createImageBitmap(video);
@@ -643,6 +695,42 @@ function showDebug(m) {
     `still ${isStill()}  rot ${S.motion.rot.toFixed(0)}°/s  tilt ${tiltDegOf(S.lastTilt).toFixed(0)}° ${m.rect ? '(corrected)' : ''}`,
   ].join('\n');
 }
+
+// ---------- lens angle (field of view), measured ----------
+// Guided (More -> Measure lens angle): tilt the phone back and forth over the
+// table for ~6 s without sliding it. Each tracker step pairs the gyro's turn
+// over the step with how far the picture moved: focal length f = shift /
+// tan(angle); the median over the steps gives the lens angle along the
+// video's long side. Sliding the phone would also move the picture, so only
+// steps clearly dominated by one turning axis count.
+function fovSample(F, t) {
+  const prev = F.fovPrev; F.fovPrev = { t, tot: F.T.total.slice() };
+  if (!prev || !S.rate || performance.now() - S.rate.t > 200) return;
+  const dt = (t - prev.t) / 1000, dx = (F.T.total[0] - prev.tot[0]) * F.scale, dy = (F.T.total[1] - prev.tot[1]) * F.scale;
+  const b = Math.abs(S.rate.beta), g = Math.abs(S.rate.gamma);
+  // portrait: beta (about the screen's x axis) moves the picture up/down, gamma sideways
+  const [w, d] = b > 2 * g ? [b, Math.abs(dy)] : g > 2 * b ? [g, Math.abs(dx)] : [0, 0];
+  const ang = (w * dt * Math.PI) / 180;
+  if (w < 15 || d < 2 || ang <= 0 || dt <= 0 || dt > 0.2) return;
+  S.fovRun.f.push(d / Math.tan(ang));
+}
+function measureFov() {
+  $('menu').hidden = true; noteActivity(); applyPower();
+  S.fovRun = { f: [], t0: performance.now() };
+  toast('Hold the phone over the table and TILT it slowly forward and back, then side to side, for 6 seconds — keep it in one place.', 6500);
+  setTimeout(() => {
+    const R = S.fovRun; S.fovRun = null;
+    const f = R.f.slice().sort((a, b) => a - b), n = f.length, L = Math.max(video.videoWidth, video.videoHeight);
+    const fov = n ? (2 * Math.atan(L / 2 / f[n >> 1]) * 180) / Math.PI : null;
+    S.fovResult = { n, fov: fov && +fov.toFixed(1), at: Date.now() };
+    if (n < 12 || !(fov >= 45 && fov <= 85)) { toast(`Couldn't measure it this time (${n} usable readings) — try again, tilting a little more and without sliding.`, 6000); return; }
+    if (confirm(`Measured lens angle: about ${Math.round(fov)}° (${n} readings; the setting is ${S.fov}°). Use it?`)) {
+      $('fovRange').value = Math.round(fov); $('fovRange').dispatchEvent(new Event('input'));
+      toast(`Lens angle set to ${Math.round(fov)}°.`);
+    }
+  }, 6500);
+}
+$('fovMeasure').onclick = measureFov;
 
 // ---------- capture coach ----------
 // Watches the last ~40 frames for setups that defeat the camera and says
@@ -1194,7 +1282,31 @@ minimap.addEventListener('pointerup', () => {
 // ---------- snap / box / menu ----------
 // Photo cataloguing lives under More now (the owner wasn't using it from the
 // toolbar); the toolbar slot went to Border.
-$('snapBtn').onclick = () => { endTeaching(); $('menu').hidden = true; S.snapTilt = currentTilt(); $('snapInput').click(); };
+// "Catalog from a photo": in the app when the browser can take a still from
+// the live camera (ImageCapture.takePhoto: iOS 18.4+, Chrome) - no trip to the
+// camera app; else, or after it once fails, the camera app as before. (The
+// choice is made at the tap: iOS only opens the file picker from a tap.)
+$('snapBtn').onclick = () => {
+  endTeaching(); $('menu').hidden = true; S.snapTilt = currentTilt();
+  if (typeof ImageCapture !== 'undefined' && S.usingCamera && !S.noTakePhoto) { inAppPhoto(); return; }
+  $('snapInput').click();
+};
+async function inAppPhoto() {
+  toast('Hold still — taking a photo…', 8000);
+  try {
+    noteActivity(); applyPower(); await ensureCamera();
+    for (let i = 0; i < 30 && !(S.track && S.track.readyState === 'live' && video.readyState >= 2); i++) await new Promise((r) => setTimeout(r, 100));
+    const blob = await new ImageCapture(S.track).takePhoto();
+    const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    S.lastPhoto = { w: bmp.width, h: bmp.height, how: 'takePhoto' };
+    S.snapping = true; S.lastSnapFile = blob;
+    toast('Cataloging photo…', 15000);
+    W.post({ type: 'snap', bitmap: bmp, tilt: S.snapTilt }, [bmp]);
+  } catch (e) {
+    S.noTakePhoto = true; logError('takePhoto: ' + (e && e.message));
+    toast("Couldn't take the photo inside the app — tap Catalog from a photo again to use the camera app.", 6000);
+  }
+}
 // Border: the whole frame of the puzzle — corners and edge pieces — in one tap,
 // from any mode. Tap again to turn it off.
 $('edgesBtn').onclick = () => {
@@ -1218,7 +1330,7 @@ $('snapInput').onchange = async (e) => {
   }
 };
 $('boxBtn').onclick = () => { endTeaching(); boxSetup.open(); };
-$('menuBtn').onclick = () => {
+$('menuBtn').onclick = () => { W.post({ type: 'libList' });
   endTeaching();
   $('menu').hidden = !$('menu').hidden;
   $('findPanel').hidden = true;
@@ -1316,8 +1428,31 @@ function afterReset() {
 // Taught table colours survive a reset unless forgotten here: on a different
 // table (or under different light) they make the board itself look like a
 // piece, which is what happened moving from the white board to the glass table.
+// ---------- puzzle library ----------
+function showLibrary(m) {
+  $('libCurrent').textContent = m.current ? `— now: ${m.current}` : '';
+  const box = $('libList');
+  box.innerHTML = '';
+  if (!m.list.length) { box.innerHTML = '<span class="muted">No saved puzzles yet.</span>'; return; }
+  for (const e of m.list) {
+    const row = document.createElement('div');
+    row.className = 'lib-row';
+    const t = document.createElement('span');
+    t.textContent = `${e.name} · ${e.pieces} pieces${e.grid ? ' · box ' + e.grid : ''} · ${new Date(e.savedAt).toLocaleDateString()}`;
+    const open = document.createElement('button'); open.textContent = e.name === m.current ? 'Open (current)' : 'Open';
+    open.onclick = () => { if (confirm(`Open "${e.name}"? The current puzzle is saved first.`)) { W.post({ type: 'libOpen', key: e.key }); afterReset(); } };
+    const del = document.createElement('button'); del.textContent = 'Delete';
+    del.onclick = () => { if (confirm(`Delete the saved puzzle "${e.name}"? This can't be undone.`)) W.post({ type: 'libDelete', key: e.key }); };
+    row.append(t, open, del);
+    box.append(row);
+  }
+}
+$('libSave').onclick = () => {
+  const name = prompt('Name for this puzzle:', `Puzzle ${new Date().toLocaleDateString()}`);
+  if (name) W.post({ type: 'libSave', name: name.trim().slice(0, 60) });
+};
 $('newPuzzle').onclick = () => {
-  if (!confirm('Forget all catalogued pieces? The box picture is kept.')) return;
+  if (!confirm('Start a new puzzle? The current one is saved under More → Puzzles first. The box picture is kept.')) return;
   const forgetTable = S.taughtN > 0 && confirm(`Also forget the ${S.taughtN} table colour${S.taughtN > 1 ? 's' : ''} you taught?\n\n`
     + 'Choose OK if you moved to a different table or the lighting changed. Choose Cancel to keep them for the same table.');
   W.post({ type: 'reset', keepBox: true, forgetTable });
@@ -1386,6 +1521,7 @@ async function finishReport(workerData, analyzed, boxImg) {
     // capture coach: pieces blending into the board / glare over the last ~40 frames, and which tips were shown
     coach: { now: S.coachNow || null, shown: Object.keys(S.coachSeen || {}) },
     cameraFps: { wanted: S.fpsWanted || null, got: S.track && S.track.getSettings ? S.track.getSettings().frameRate : null },
+    cameraPath: S.camPath || 'bitmap', lastPhoto: S.lastPhoto || null, fovMeasure: S.fovResult || null,
     power: { active: S.active, idle: S.idle, idleOn: S.idleOn, calm: S.calm, gap: Math.round(frameGap()), wakeLock: !!S.wakeLock },
     // Camera-motion tracker health: how often it was sure of a step, its cost
     // on this phone, and the recent motion level it uses for stillness.
@@ -1450,6 +1586,7 @@ window.__phSelectStatus = (want) => { const d = S.last && S.last.dets.find((x) =
 // Select a catalogued piece/section even when it isn't in view right now.
 window.__phSelectKind = (kind) => { setMode('find'); W.post({ type: 'selectKind', kind }); return true; };
 window.__phBorder = () => S.last && S.last.pframe; // test hook: the marked border in the last result
+window.__phCamPath = () => S.camPath || 'bitmap'; // test hook: how camera frames reach the worker
 window.__phStatuses = () => S.last && S.last.dets.map((d) => d.status + (d.border ? '/border' : ''));
 
 // ?video=URL plays a recorded sweep instead of the camera (desktop testing).

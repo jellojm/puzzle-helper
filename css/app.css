@@ -96,6 +96,10 @@ body.panel-open #findBar, body.panel-open #matchBar { display: none; }
 #coach { position: absolute; left: 12px; right: 12px; top: calc(var(--top-h, 52px) + 44px); z-index: 7; display: flex; gap: 10px; align-items: center;
   padding: 10px 12px; border-radius: 12px; background: rgba(20, 24, 30, 0.92); border: 1px solid #ffcc00; font-size: 13px; }
 #coach[hidden] { display: none; }
+.lib { margin: 12px 0 4px; }
+#libList .lib-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+#libList .lib-row span { flex: 1; }
+#libList .lib-row button { border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; background: rgba(255, 255, 255, 0.08); font-size: 12px; }
 #coach button { flex: none; border: 0; border-radius: 8px; padding: 6px 10px; background: #ffcc00; color: #111; font-weight: 600; }
 #matchBar .icon-btn { height: 32px; width: 32px; font-size: 15px; }
 .match-mid { flex: 1; min-width: 0; text-align: center; }
