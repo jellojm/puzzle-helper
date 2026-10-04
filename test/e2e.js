@@ -273,6 +273,15 @@ function writePng(file, mat) {
     check('vision runs on our SIMD OpenCV build (CDN build as fallback)', w.cvBuild === 'simd', `${w.cvBuild} (simd supported: ${w.simd})${w.cvError ? ' error: ' + w.cvError : ''}`);
     check('report carries the diagnostic blocks', !missing.length,
       missing.length ? 'missing ' + missing.join(', ') : `session ${JSON.stringify(reportJson.worker.session).slice(0, 120)}… | wasm ${reportJson.worker.engine.wasmHeapMB} MB | lag in history: ${reportJson.history.some((r) => r.lag != null)}`);
+    // The vision library "crashes" (a WebAssembly trap, as in the owner's
+    // screenshots 2026-10-04): the worker saves, the page starts a fresh one,
+    // and the catalog comes back.
+    const pre = await page.evaluate(() => window.__phRestarts());
+    await page.evaluate(() => window.__phTrap());
+    const post = await page.waitForFunction(() => { const r = window.__phRestarts(); return r.restarts >= 1 && r.ready && r.pieces !== null ? r : null; }, null, { timeout: 90000, polling: 300 })
+      .then((h) => h.jsonValue()).catch(async () => page.evaluate(() => window.__phRestarts()));
+    check('a vision-library crash restarts the engine and keeps the catalog', post.restarts >= 1 && post.ready && post.pieces >= pre.pieces,
+      `${pre.pieces} pieces before, ${post.pieces} after; restarts ${post.restarts}`);
     // Phone tilted ~35°: feed gravity readings, then tap a piece through the
     // corrected mapping (outline -> screen -> tap -> back to the piece).
     await page.evaluate(() => {

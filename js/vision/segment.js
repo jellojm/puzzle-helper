@@ -437,6 +437,9 @@
       thresh = PH.clamp(Math.max(minT, med * 3.5), minT, Math.max(minT, otsu));
     }
     cv.threshold(dist, mask, thresh, 255, cv.THRESH_BINARY);
+    // Colour alone, before outlines are closed and filled: holes inside an
+    // assembled section (missing pieces) survive only here.
+    const colorFg = new Uint8Array(mask.data);
     mark('thresh');
 
     // Experimental: a piece has a crisp outline against any plain table even
@@ -599,8 +602,14 @@
       if (opts.split !== false && unitA && b.area > 1.8 * unitA && pileOk && now() < splitEnd) {
         if (pile) pilesSplit++;
         if (!labMat) { labMat = new cv.Mat(h, w, cv.CV_8UC3); labMat.data.set(lab); }
-        const pieces = PH.splitBlob(b.cnt, labMat, unitA, w, h) || (opts.concave !== false ? PH.splitConcave(b.cnt, unitA) : null);
-        if (pieces) { b.cnt.delete(); for (const p of pieces) parts.push({ cnt: p, split: true }); continue; }
+        // Straight cuts between notches: for a small clump (2-3 touching
+        // pieces) or a ragged pile, never for a big compact blob. On an
+        // assembled section they carved piece-sized chunks off its edge, each
+        // with a straight cut that read as a border side: false "edge pieces"
+        // with a seam inside (owner, 2026-10-04).
+        const concaveOk = b.area <= 3 * unitA || b.solidity < 0.8;
+        const pieces = PH.splitBlob(b.cnt, labMat, unitA, w, h) || (opts.concave !== false && concaveOk ? PH.splitConcave(b.cnt, unitA) : null);
+        if (pieces) { b.cnt.delete(); for (const p of pieces) parts.push({ cnt: p, split: true, parent: { area: b.area / unitA, solidity: b.solidity } }); continue; }
       }
       parts.push({ cnt: b.cnt, split: false });
     }
@@ -608,11 +617,18 @@
     mark('split');
 
     const dets = [];
+    // The frame's foreground, kept for checking a piece's straight sides (bare
+    // table beyond a real border side; more pieces beyond a cut).
+    const fg = new Uint8Array(mask.data);
     const noHier = new cv.Mat();
     for (const part of parts) {
       const cnt = part.cnt;
       const area = cv.contourArea(cnt);
-      if (area < minArea || area > maxArea) { cnt.delete(); continue; }
+      // Bigger than a fifth of the view: the table read as a piece - or, late
+      // in a puzzle, the assembled part of it held close. Kept as `big` (never
+      // catalogued; only searched for open spots, which a wrong blob fails).
+      const big = area > maxArea;
+      if (area < minArea || area > w * h * 0.9) { cnt.delete(); continue; }
       const r = cv.boundingRect(cnt);
       const m = cv.moments(cnt);
       const border = r.x <= 1 || r.y <= 1 || r.x + r.width >= w - 1 || r.y + r.height >= h - 1;
@@ -624,8 +640,10 @@
         bbox: [r.x, r.y, r.width, r.height],
         border,
         split: part.split,
+        parent: part.parent || null, // a split part: its blob's size (in pieces) and solidity
         perim: cv.arcLength(cnt, true),
       };
+      if (big) det.big = true;
       // Filled mask for this contour within its bbox -> fingerprint.
       const pm = cv.Mat.zeros(r.height, r.width, cv.CV_8UC1);
       const one = new cv.MatVector();
@@ -633,6 +651,9 @@
       cv.drawContours(pm, one, 0, new cv.Scalar(255), -1, cv.LINE_8, noHier, 0, new cv.Point(-r.x, -r.y));
       det.fp = PH.fingerprint(lab, w, r, pm.data, dd, thresh);
       det.rect = cv.minAreaRect(cnt);
+      // Holes inside an assembled section (missing pieces): blob filled minus
+      // the mask, piece-sized-ish ones only.
+      if (big || area > w * h * 0.03 || (unitA && area > 2.5 * unitA)) det.holes = blobHoles(pm, colorFg, w, r, Math.min(unitA || Infinity, w * h * 0.002 * 4) / 4);
       one.delete(); pm.delete(); cnt.delete();
       dets.push(det);
     }
@@ -641,8 +662,31 @@
     if (validMat) validMat.delete();
     P.delete(); if (flatL) flatL.delete();
     mark('dets');
-    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, glare, unitArea: unitA, unitOwn, unitN: like.length, flat: flat && { ref: flat.ref, spread: flat.spread } };
+    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, glare, unitArea: unitA, unitOwn, unitN: like.length, flat: flat && { ref: flat.ref, spread: flat.spread }, fg };
   };
+  // Holes of one blob: pm = its filled outline (bbox r), colorFg = the
+  // frame's colour-only foreground (w wide). Board-coloured patches inside
+  // the outline of at least `minA` px.
+  function blobHoles(pm, colorFg, w, r, minA) {
+    const cv = PH.cv;
+    const hole = new cv.Mat(r.height, r.width, cv.CV_8UC1), hd = hole.data, pd = pm.data;
+    for (let y = 0; y < r.height; y++) {
+      const o = (r.y + y) * w + r.x, q = y * r.width;
+      for (let x = 0; x < r.width; x++) hd[q + x] = pd[q + x] && !colorFg[o + x] ? 255 : 0;
+    }
+    const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+    cv.morphologyEx(hole, hole, cv.MORPH_OPEN, k); k.delete();
+    const cs = new cv.MatVector(), hh = new cv.Mat();
+    cv.findContours(hole, cs, hh, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE, new cv.Point(r.x, r.y));
+    const out = [];
+    for (let i = 0; i < cs.size(); i++) {
+      const c = cs.get(i);
+      if (cv.contourArea(c) >= minA) out.push(new Int32Array(c.data32S));
+      c.delete();
+    }
+    [hole, cs, hh].forEach((m) => m.delete());
+    return out;
+  }
 
   /**
    * Split a blob of touching pieces. Seeds are the piece centers (far from the

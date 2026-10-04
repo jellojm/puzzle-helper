@@ -18,12 +18,19 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
 - **Map:** turns the camera off and shows every scanned piece from above, as its own picture at its place and angle on the table — so several people can work from one phone or iPad lying on the table. Drag to move, pinch to zoom, twist (or **↻ 90°**) to turn it toward you, **Fit** to see everything. Tap a piece for its matches (lines to its partners); Border, the finders and Matches work here too. Separate scan areas are shown side by side. Pieces moved since scanning: switch to Scan and sweep that area again.
 - **Area search:** tap the small box picture to enlarge it, then drag across a region (e.g. sky). Every piece from that area lights up.
 - **Fill this spot:** on the enlarged box picture, tap one spot. The panel lists the loose pieces that best fill it — by the picture, and by how well their edges fit the pieces already around that spot (in testing the right piece came first 74 of 80 times, vs 64 by the picture alone) — and the best one glows gold on the table.
+- **Open spots (late in a puzzle):** the assembled part is built up as you move the phone along it close up — every steady view is lined up with what's already known (by which cells are filled and the print in them, no loose pieces needed), so following the border joins it into one piece of work. Once enough of it is known it's found on the box picture: the top line then says how much of the border is done ("border 118/124" or "border done ✓") and how many open spots there are. Every open spot — a hole, a pocket, or a place along the edge — is drawn as a cyan square on the camera view (solid where two or more pieces already surround it), with the best loose piece named on it and ringed in gold. Tap a spot for its list of pieces; each one is checked against the shape the spot needs (a tab or a blank on each side). The assembled part is saved with the catalog.
 - **Zones:** splits the box picture into six areas A–F and rings every piece in its area's colour: sort into six trays.
 - **Next along the border:** a border piece's panel names the next border piece on each side of it (right 108 of 120 times in testing).
 
 Everything runs on the phone. Nothing is uploaded, and the catalog is saved on the phone (IndexedDB). The vision code runs on our own build of OpenCV with WebAssembly SIMD (about a third faster image work, on iOS 16.4 and later), falling back to the standard build on older browsers.
 
 **Dense piles and pale pieces:** in a dense pile the gaps between pieces look like pieces too; the app now checks which side carries print, so a pile of white pieces on dark glass is read the right way round, and pieces pressed together without a gap are cut apart along their notches. When pale pieces blend into a pale board, the app also uses the pieces' texture (fine print detail the board lacks) to find them.
+
+**Edge pieces that aren't:** a piece-sized chunk of an assembled section can look like an edge piece (a straight cut along a strong colour change). Such a "piece" has the seam between two real pieces running through it, so it's not catalogued; pieces seen again with more puzzle right past their straight side stop counting as edge pieces, and once the assembled border is complete, Border / Corners / Edges offer nothing more.
+
+**New pieces need enough detail:** a new piece only counts once its shape has been read well enough for how far away the phone was (close up: two steady views and a fair read; far away: more views and a sharper read). If its shape and print match a catalogued piece that isn't in view, it's that piece, moved — not a new one. All automatic.
+
+**If the vision engine fails:** the app saves the catalog, restarts the engine by itself and carries on (also when its memory runs high). Send report records what happened.
 
 **Capture coach:** if many pieces blend into the table (pale pieces on a white board) or glare washes out the view, a tip says what to change — once per problem. Pale pieces on a dark cloth read right far more often (in testing: none of the pale pieces on white, all of them on dark).
 
@@ -111,6 +118,8 @@ node test/trust.js           # calibrated match probabilities, refit from answer
 node test/capture-coach.js   # coach flags pale pieces on a white board; a dark cloth fixes them
 node test/solve-aids.js      # "fill this spot" ranks the right piece first; next piece along the border
 node test/glass-table.js     # owner's glass-table photos: dense piles of white pieces still catalogued
+node test/open-spots.js      # assembled part built up from close views: placed on the box, holes/pockets/edge spots, finished border recognised
+node test/edge-verify.js     # a seam across a "piece" (a chunk of a section) is seen; print and text are not
 node tools/fit-calib.js      # refit the match-probability model's starting weights on synthetic puzzles
 node test/speed.js           # per-stage timing (VISION=<dir> runs another copy of js/vision to compare)
 ```

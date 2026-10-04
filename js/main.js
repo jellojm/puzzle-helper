@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.16.0';
+const APP_VERSION = '0.17.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -69,12 +69,13 @@ const RAF_GAPS = new Float32Array(300); let rafGapN = 0, rafPrev = 0;
 const bump = (k) => { STATS[k] = (STATS[k] || 0) + 1; };
 
 // ---------- worker ----------
-const worker = new Worker('js/worker.js');
+// `let`: a worker whose vision library crashed is replaced (restartWorker).
+let worker = new Worker('js/worker.js');
 const W = { post: (m, t) => worker.postMessage(m, t || []) };
 const boxSetup = new BoxSetup(W, () => toast('Preparing box picture…'), toast, () => applyPower());
 const frameSetup = new FrameSetup(W, toast, () => applyPower());
 
-worker.onmessage = (e) => {
+function onWorkerMessage(e) {
   const m = e.data;
   switch (m.type) {
     case 'status': setStatus(m.text); break;
@@ -190,13 +191,39 @@ worker.onmessage = (e) => {
     case 'report': finishReport(m.data, m.analyzed, m.boxImg); break;
     case 'error':
       S.busy = false; S.snapping = false;
-      logError(`worker(${m.where}): ${m.message}`);
+      logError(`worker(${m.where}): ${m.message}${m.heapMB ? ` [heap ${m.heapMB} MB]` : ''}${m.stack ? ' | ' + m.stack : ''}`);
       console.error('worker:', m.where, m.message);
       toast('Error: ' + m.message, 4000);
       break;
+    case 'cvDead': restartWorker(m); break;
   }
-};
-worker.onerror = (e) => { setStatus('Vision worker failed to start: ' + (e.message || 'unknown error')); };
+}
+function onWorkerError(e) { setStatus('Vision worker failed to start: ' + (e.message || 'unknown error')); }
+worker.onmessage = onWorkerMessage;
+worker.onerror = onWorkerError;
+// The vision library crashed (or its memory ran near the limit): the worker
+// saved the catalog and stopped; start a fresh one, which loads it again.
+// More than 3 restarts in 5 minutes means something keeps failing: stop
+// looping and say so (Send report carries the details).
+function restartWorker(m) {
+  logError(`vision restart (${m.why}) in ${m.where}: ${m.message} [heap ${m.heapMB} MB, ${m.build}]${m.stack ? ' | ' + m.stack : ''}`);
+  bump('workerRestarts');
+  const now = Date.now();
+  S.restarts = (S.restarts || []).filter((t) => now - t < 300000);
+  S.restarts.push(now);
+  worker.terminate();
+  S.ready = false; S.busy = false; S.snapping = false; S.workerCam = false;
+  clearTimeout(S.wcTimer);
+  if (S.restarts.length > 3) {
+    toast('The vision engine keeps failing. Please use More → Send report, then reload the page.', 15000);
+    return;
+  }
+  toast(m.why === 'heap' ? 'Freeing memory — restarting the vision engine (your pieces are kept)…' : 'The vision engine hit an error — restarting it (your pieces are kept)…', 5000);
+  worker = new Worker('js/worker.js');
+  worker.onmessage = onWorkerMessage;
+  worker.onerror = onWorkerError;
+  W.post({ type: 'init' });
+}
 
 function setStatus(t) {
   $('startStatus').textContent = t || '';
@@ -638,6 +665,10 @@ function updateStats(c, tracking) {
   const tilt = tiltDegOf(S.lastTilt);
   if (tilt >= 4) parts.push(`${Math.round(tilt)}° tilt`);
   const over = c.expected && c.pieces > c.expected;
+  // The assembled part, built up from close views (js/vision/assembly.js).
+  const A = S.last && S.last.assembly;
+  if (A && A.border && A.border.done) parts.push(A.border.done >= A.border.total ? 'border done ✓' : `border ${A.border.done}/${A.border.total}`);
+  if (A && A.spots) parts.push(`${A.spots} open spot${A.spots > 1 ? 's' : ''}`);
   $('stats').textContent = parts.join(' · ');
   $('stats').classList.toggle('warn', tilt > 50 || over);
   if (tilt > 50) $('modeHint').textContent = 'Tilt the phone less (under ~45°)';
@@ -812,6 +843,9 @@ overlay.addEventListener('pointerup', (e) => {
   }
   const r = overlay.getBoundingClientRect();
   const [fx, fy] = S.map.toFrame(e.clientX - r.left, e.clientY - r.top);
+  // An open spot of the assembled part: the loose pieces that fit it.
+  const spot = (S.last.spots || []).find((s) => pointInPoly(fx, fy, s.poly));
+  if (spot) { openSpot(spot); return; }
   const hit = S.last.dets.find((d) => d.id && pointInPoly(fx, fy, d.pts));
   if (hit) {
     if (S.mode !== 'find') setMode('find');
@@ -820,6 +854,20 @@ overlay.addEventListener('pointerup', (e) => {
     W.post({ type: 'select', id: null });
   }
 });
+// A tapped open spot: with its box cell known, the "fill this spot" list
+// (gold on the table); otherwise what shape the missing piece needs.
+function openSpot(s) {
+  const words = { T: 'a tab', B: 'a blank' };
+  const sides = ['top', 'right', 'bottom', 'left'];
+  const need = s.need.map((t, d) => (words[t] ? `${words[t]} on the ${sides[d]}` : null)).filter(Boolean);
+  const what = need.length ? ` It needs ${need.join(', ')} (as it sits on screen).` : '';
+  if (s.cell) {
+    W.post({ type: 'region', c0: s.cell[0], r0: s.cell[1], c1: s.cell[0], r1: s.cell[1] });
+    toast(`Open spot: column ${s.cell[0] + 1}, row ${s.cell[1] + 1} of the box picture.${what}`, 5000);
+  } else {
+    toast(`Open spot.${what} Keep following the assembled part so the app can find it on the box picture.`, 5000);
+  }
+}
 function pointInPoly(x, y, pts) {
   let inside = false;
   for (let i = 0, j = pts.length / 2 - 1; i < pts.length / 2; j = i++) {
@@ -1587,6 +1635,8 @@ window.__phSelectStatus = (want) => { const d = S.last && S.last.dets.find((x) =
 window.__phSelectKind = (kind) => { setMode('find'); W.post({ type: 'selectKind', kind }); return true; };
 window.__phBorder = () => S.last && S.last.pframe; // test hook: the marked border in the last result
 window.__phCamPath = () => S.camPath || 'bitmap'; // test hook: how camera frames reach the worker
+window.__phTrap = () => W.post({ type: '__trap' }); // test hook: make the vision library "crash"
+window.__phRestarts = () => ({ restarts: STATS.workerRestarts || 0, ready: !!S.ready, pieces: S.counts ? S.counts.pieces : null });
 window.__phStatuses = () => S.last && S.last.dets.map((d) => d.status + (d.border ? '/border' : ''));
 
 // ?video=URL plays a recorded sweep instead of the camera (desktop testing).

@@ -208,7 +208,9 @@ function scatter(cv, P, opts) {
     table.copyTo(big.roi(new cv.Rect(0, 0, TW, TH)));
     let x = bandH / 2;
     for (const b of opts.blocks) {
-      const members = P.pieces.filter((p) => p.r >= b.r0 && p.r < b.r0 + b.rows && p.c >= b.c0 && p.c < b.c0 + b.cols);
+      // b.missing = [[row, col], ...]: pieces left out of the block (holes, pockets)
+      const members = P.pieces.filter((p) => p.r >= b.r0 && p.r < b.r0 + b.rows && p.c >= b.c0 && p.c < b.c0 + b.cols &&
+        !(b.missing || []).some(([r, c]) => r === p.r && c === p.c));
       const bx = P.margin + b.c0 * P.cs - ext, by = P.margin + b.r0 * P.cs - ext;
       const cw = b.cols * P.cs + 2 * ext, chh = b.rows * P.cs + 2 * ext;
       const crop = P.big.roi(new cv.Rect(bx, by, cw, chh)).clone();
@@ -303,9 +305,10 @@ function matSource(cv, mat) {
       return r;
     },
     getCrop(x, y, w, h) {
-      const r = mat.roi(new cv.Rect(x, y, w, h)).clone();
+      // roi() is a view that pins the whole frame until it is deleted too
+      const v = mat.roi(new cv.Rect(x, y, w, h)), r = v.clone();
       const o = { w, h, data: new Uint8ClampedArray(r.data) };
-      r.delete();
+      v.delete(); r.delete();
       return o;
     },
   };

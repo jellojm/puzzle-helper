@@ -348,6 +348,15 @@
     for (const e of edges) e.lenRel = e.len / meanSide;
     const code = edges.map((e) => e.type).join('');
     const flats = edges.map((e) => e.type === 'F');
+    // A "piece" with a straight side cut out of an assembled section carries
+    // the seam between two real pieces across its middle (owner 2026-10-04:
+    // false edge pieces "tracing hard color edges across pieces already
+    // placed together"). Real pieces have no seam inside.
+    if (flats.some(Boolean) && ctx.seamCheck !== false && PH.innerSeam(lab, w, h, seg.filled, meanSide)) {
+      seg.filled.delete();
+      if (ctx.why) ctx.why.seam = true;
+      return null;
+    }
 
     // Rotation-normalized core square (Lab + mask) for box placement.
     const S = PH.SQ;
@@ -510,6 +519,40 @@
     if (obs.quality && (!base.quality || obs.quality.q > base.quality.q)) base.quality = obs.quality;
   };
 
+  /**
+   * Is there a seam (the thin dark gap between two joined pieces) across
+   * this outline? Thin dark lines (black-hat) inside the eroded outline; a
+   * seam is continuous and cuts the inside into two big parts, while print
+   * (text, drawn lines with gaps) leaves it in one piece.
+   * @param lab crop Lab (Uint8, 3 per pixel), filled = outline mask (Mat), side = mean side (px)
+   */
+  PH.innerSeam = function (lab, w, h, filled, side) {
+    const cv = PH.cv;
+    const odd = (v) => Math.max(3, (Math.round(v) | 1));
+    const L = new cv.Mat(h, w, cv.CV_8UC1), Ld = L.data;
+    for (let p = 0; p < w * h; p++) Ld[p] = lab[3 * p];
+    const kb = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(odd(Math.min(9, side * 0.06)), odd(Math.min(9, side * 0.06))));
+    const bh = new cv.Mat();
+    cv.morphologyEx(L, bh, cv.MORPH_BLACKHAT, kb);
+    const ke = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(odd(side * 0.12), odd(side * 0.12)));
+    const inner = new cv.Mat();
+    cv.erode(filled, inner, ke);
+    const line = new cv.Mat();
+    cv.threshold(bh, line, 18, 255, cv.THRESH_BINARY);
+    cv.bitwise_and(line, inner, line);
+    const k3 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+    cv.dilate(line, line, k3);
+    const rest = new cv.Mat();
+    cv.bitwise_not(line, rest);
+    cv.bitwise_and(rest, inner, rest);
+    const A = cv.countNonZero(inner);
+    const lab2 = new cv.Mat(), stats = new cv.Mat(), cent = new cv.Mat();
+    const n = cv.connectedComponentsWithStats(rest, lab2, stats, cent, 4, cv.CV_32S);
+    let big = 0;
+    for (let i = 1; i < n; i++) if (stats.intAt(i, cv.CC_STAT_AREA) >= A * 0.15) big++;
+    [L, kb, bh, ke, inner, line, k3, rest, lab2, stats, cent].forEach((m) => m.delete());
+    return A > 50 && big >= 2;
+  };
   PH.MIN_CORNER_SCORE = 0.03; // real pieces ~0.05-0.3, fragments ~0.01-0.02 // below this an outline isn't a jigsaw piece
   PH.SAME_SHAPE = 0.05;
   PH.ANCHOR_SHAPE = 0.13; // candidate threshold when matching photos to the map // sameShape() below this = same physical piece

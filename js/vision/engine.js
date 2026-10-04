@@ -24,7 +24,7 @@
     }
 
     reset() {
-      this.pframe = null; this.pfLoc = null;
+      this.pframe = null; this.pfLoc = null; this.asms = []; this.asmLast = null; this.spotView = null;
       this.pieces = new Map();
       this.nextId = 1;
       this.pose = null;
@@ -517,7 +517,7 @@
       this.link(dets, unitF);
       // Set before the pose work so the shape-based fallback below can read
       // outlines; nothing in it depends on the pose.
-      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs, live: true };
+      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs, live: true, fg: seg.fg, procW: proc.w, procH: proc.h };
       this.frameCtx.view = this.viewGeometry(this.unitLive || seg.unitArea, proc.scale, source.w, source.h);
       for (const [k, c] of this.cands) if (this.fNo - c.last > 6) this.cands.delete(k); // lost from view
       let ok = this.fitPose(dets, unitF);
@@ -600,6 +600,9 @@
       if (ok) { this.lost = 0; this.assign(dets, unitF, proc); }
       const t2 = now();
       const work = this.runQueue(dets, t0 + this.opts.budgetMs);
+      const ts = now();
+      this.findSpots(dets, seg, proc, info.still !== false);
+      segT.spots = now() - ts;
       // Background duplicate clean-up, a few ms every ~20 frames.
       if ((this.frameNo = (this.frameNo || 0) + 1) % 20 === 0) this.dedupeByCell(3);
       this.tracks = dets.map((d) => ({ id: d.id, cid: d.cid, x: d.cx, y: d.cy, fp: d.fp }));
@@ -646,7 +649,7 @@
       const snapModel = snapBest ? snapBest.c : null;
       const seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel } : { bg: this.bg, bgSmooth: 0.5 }));
       if (!this.bg) this.bg = seg.bg;
-      this.frameCtx = { source, scale: proc.scale, bg: seg.bg, thresh: seg.thresh, lut: seg.lut, unitArea: seg.unitArea, still: true, deadline: Infinity };
+      this.frameCtx = { source, scale: proc.scale, bg: seg.bg, thresh: seg.thresh, lut: seg.lut, unitArea: seg.unitArea, still: true, deadline: Infinity, fg: seg.fg, procW: proc.w, procH: proc.h };
       const dets = this.classify(seg.dets, seg.unitArea);
       const unitF = this.unitFrame(dets);
       const before = this.pieces.size;
@@ -933,17 +936,76 @@
     /** Provisional pieces: count a good sighting of `d` (followed from the
      *  previous frame via its candidate id); true once it has been seen in
      *  `confirmSightings` steady frames in a row with a consistent size. */
-    promote(d) {
-      const need = this.opts.confirmSightings;
+    promote(d, need) {
+      need = need || this.opts.confirmSightings;
       let c = d.cid && this.cands.get(d.cid);
       if (c && Math.abs(Math.log(d.area / c.area)) > 0.25) { this.cands.delete(c.id); c = null; } // size jumped: not the same thing
       if (!c) { c = { id: this.nextCid++, n: 0, area: d.area, last: -1 }; this.cands.set(c.id, c); }
       d.cid = c.id;
       if (c.last !== this.fNo) c.n++;
       c.area = c.area * 0.5 + d.area * 0.5; c.last = this.fNo;
-      if (c.n < need) return false;
-      this.cands.delete(c.id); d.cid = null;
-      return true;
+      return c.n >= need; // the caller drops the candidate once it's catalogued (dropCand)
+    }
+    candOf(d) { return (d.cid && this.cands.get(d.cid)) || {}; }
+    dropCand(d) { if (d.cid) this.cands.delete(d.cid); d.cid = null; }
+    /** How much a new piece must show before it's catalogued, by how big
+     *  pieces look (piece side in source px): close up the outline is crisp
+     *  and two steady sightings and a fair read are enough; far away outlines
+     *  are coarse, so more sightings, a better read, and a stricter "same
+     *  piece?" test. Automatic - nothing for the owner to set. */
+    detailTier(d) {
+      const side = Math.sqrt(d.area) / this.frameCtx.scale;
+      const base = this.opts.confirmSightings;
+      if (side >= 110) return { need: base, q: 0.15, tol: PH.SAME_SHAPE * 1.2 };
+      if (side >= 70) return { need: base + 1, q: 0.22, tol: PH.SAME_SHAPE };
+      return { need: base + 2, q: 0.28, tol: PH.SAME_SHAPE * 0.9 };
+    }
+    /** A new view's shape against every catalogued piece not seen in this
+     *  frame: `same` = the piece it is (outline and print agree), else
+     *  `ambiguous` when one is close in outline and similar in colour. */
+    identify(t1, d, claimed, tier) {
+      let same = null, sameD = Infinity, amb = false;
+      for (const p of this.pieces.values()) {
+        if (claimed.has(p.id) || p.kind === 'section' || !p.t1) continue;
+        const al = PH.shapeAlign(t1, p.t1); // cheap: edge types and lengths rule most out
+        if (!(al.d < tier.tol * 1.6)) continue;
+        const m = PH.samePiece(t1, p.t1, tier.tol);
+        if (m.ok && m.d < sameD) { same = p; sameD = m.d; } else if (!m.ok && PH.fpSimilarity(d.fp, p.fp) > 0.6) amb = true;
+      }
+      return { same, ambiguous: !same && amb };
+    }
+    /** A new entry's first shape read. Too little detail for how far away it
+     *  was seen: not attached (tried again on later views; an entry that
+     *  never reads well enough is dropped). The same outline and print as a
+     *  catalogued piece not in this view: that piece moved here - merged into
+     *  it, whatever the colours look like under this light. Close to one but
+     *  not clearly the same: wait for a better view (at most a few).
+     *  @returns 'ok' | 'wait' | 'merged' */
+    verifyNew(p, d, t1, dets) {
+      const tier = this.detailTier(d);
+      p.verifyTries = (p.verifyTries || 0) + 1;
+      // (a photo is the best view there will be: no waiting for a better one)
+      if (this.frameCtx.live && (!t1.quality || t1.quality.q < tier.q)) {
+        this.reject('detail');
+        if (p.verifyTries >= 8) { this.removePiece(p.id); d.id = null; }
+        return 'wait';
+      }
+      const inView = new Set(dets.map((x) => x.id).filter(Boolean));
+      const idn = this.identify(t1, d, inView, tier);
+      // In another scan group it is far more likely the same table seen after
+      // tracking was lost than a moved piece: left as a duplicate, which
+      // Tidy up uses to join the two groups (tidy()).
+      if (idn.same && idn.same.pos && !idn.same.missing && idn.same.island !== p.island) return 'ok';
+      if (idn.same) {
+        const o = idn.same;
+        o.pos = p.pos; o.island = p.island; o.miss = 0; o.missing = false; o.lastSeen = Date.now();
+        this.markMoved(o); this.touch(o);
+        this.removePiece(p.id); d.id = o.id;
+        this.rejects.relinked = (this.rejects.relinked || 0) + 1;
+        return 'merged';
+      }
+      if (idn.ambiguous && this.frameCtx.live && p.verifyTries < 4) { this.reject('ambiguous'); return 'wait'; }
+      return 'ok';
     }
     /** The puzzle's piece side in mm: from the box's finished size when given,
      *  else typical for its piece count (a 1000-piece puzzle's pieces are much
@@ -1008,7 +1070,7 @@
       const medA = unitArea || PH.median(areas.length ? areas : dets.map((d) => d.area));
       const out = [];
       for (const d of dets) {
-        d.merged = !!unitArea && d.area > unitArea * 1.9;
+        d.merged = !!d.big || (!!unitArea && d.area > unitArea * 1.9);
         if (d.area < medA * 0.3) continue; // crumbs, glare, fingers' edges
         d.id = null;
         out.push(d);
@@ -1058,7 +1120,7 @@
       // Pass 1: match by position; then refit the pose on every match so a
       // slightly-off pose (just relocalized, few anchors) doesn't cause misses.
       for (const d of dets) {
-        if (d.id) continue;
+        if (d.id || d.big) continue; // a blob bigger than a fifth of the view is never catalogued
         const p = nearest(d, T);
         if (p) { d.id = p.id; claimed.add(p.id); }
       }
@@ -1072,7 +1134,7 @@
         if (r && r.inliers.length >= Math.max(3, pairs.length * 0.6)) { T = this.pose = r.T; }
       }
       for (const d of dets) {
-        if (d.id) continue;
+        if (d.id || d.big) continue;
         const q = PH.simApply(T, d.cx, d.cy);
         const near = nearest(d, T);
         if (near) { d.id = near.id; claimed.add(near.id); continue; }
@@ -1083,6 +1145,7 @@
           if (!this.frameCtx.still) continue;
           // Sections go through the same "seen twice in a row" rule as pieces.
           if (this.frameCtx.live && !this.promote(d)) continue;
+          if (this.frameCtx.live) this.dropCand(d);
           const p = this.newPiece(d, q, this.island, d.area * s * s);
           p.kind = 'section';
           d.id = p.id; claimed.add(p.id);
@@ -1104,7 +1167,10 @@
         // the catalog.
         const why = this.shotQuality(d);
         if (why) { this.rejects[why] = (this.rejects[why] || 0) + 1; continue; }
-        if (this.frameCtx.live && !this.promote(d)) continue;
+        // Far away a piece must be seen in more steady frames first (detailTier);
+        // its first shape read then decides whether it's new (verifyNew).
+        if (this.frameCtx.live && !this.promote(d, this.detailTier(d).need)) continue;
+        if (this.frameCtx.live) this.dropCand(d);
         const p = this.newPiece(d, q, this.island, d.area * s * s);
         d.id = p.id; claimed.add(p.id);
         this.version++;
@@ -1166,15 +1232,51 @@
       const x0 = Math.max(0, Math.floor((bx - m) / scale)), y0 = Math.max(0, Math.floor((by - m) / scale));
       const x1 = Math.min(source.w, Math.ceil((bx + bw + m) / scale)), y1 = Math.min(source.h, Math.ceil((by + bh + m) / scale));
       const crop = source.getCrop(x0, y0, x1 - x0, y1 - y0);
+      const why = {};
       try {
         const hint = d.split ? Array.from(d.pts, (v, i) => v / scale - (i % 2 ? y0 : x0)) : null;
-        d.t1 = PH.analyzePiece(crop, { bg: F.bg, threshDE: F.thresh, lut: F.lut, hint, lightW: this.opts.lightW, ox: x0, oy: y0,
+        d.t1 = PH.analyzePiece(crop, { bg: F.bg, threshDE: F.thresh, lut: F.lut, hint, lightW: this.opts.lightW, ox: x0, oy: y0, why,
           // one piece's area in this crop's (source) pixels, for the partial-outline check
           unitArea: F.unitArea ? F.unitArea / (scale * scale) : null });
       } catch (e) { d.t1 = null; }
+      if (why.seam) this.reject('seam', d);
       // Background scraps and half-detected pieces don't have 4 good corners.
       if (d.t1 && d.t1.cornerScore < PH.MIN_CORNER_SCORE) { d.t1 = null; d.notPiece = true; }
+      // A straight side with more puzzle right beyond it is a cut through an
+      // assembled section (or a piece pressed against another), not the
+      // puzzle's border: not read as a piece from this view.
+      // Only for parts split off a big compact blob (an assembled section): in
+      // a pile of loose pieces a real edge piece may lie against another one.
+      const fromSection = d.parent && d.parent.area >= 4 && d.parent.solidity >= 0.85;
+      if (d.t1 && fromSection && d.t1.flats.some(Boolean) && this.cutSide(d.t1, F)) { this.reject('cutSide', d); d.t1 = null; d.notPiece = true; }
       return d.t1;
+    }
+    reject(why, d) {
+      this.rejects[why] = (this.rejects[why] || 0) + 1;
+      if (d && d.id) { // already catalogued from an earlier view: its border reading can't be trusted
+        const p = this.pieces.get(d.id);
+        if (p) p.cutSeen = (p.cutSeen || 0) + 1;
+      }
+    }
+    /** Does any straight side of shape t1 (source px) have foreground just
+     *  beyond it in this frame? Samples a line 12% of the side outside it. */
+    cutSide(t1, F) {
+      if (!F.fg) return false;
+      const s = F.scale, W = F.procW, H = F.procH;
+      for (let k = 0; k < 4; k++) {
+        if (!t1.flats[k]) continue;
+        const A = t1.corners[k], B = t1.corners[(k + 1) % 4];
+        const dx = B[0] - A[0], dy = B[1] - A[1], L = Math.hypot(dx, dy) || 1;
+        const nx = dy / L, ny = -dx / L; // outward for a clockwise outline (y down)
+        let on = 0, n = 0;
+        for (const t of [0.25, 0.37, 0.5, 0.63, 0.75]) {
+          const x = Math.round((A[0] + dx * t + nx * 0.12 * L) * s), y = Math.round((A[1] + dy * t + ny * 0.12 * L) * s);
+          if (x < 0 || y < 0 || x >= W || y >= H) continue;
+          n++; if (F.fg[y * W + x]) on++;
+        }
+        if (n >= 4 && on >= n * 0.6) return true;
+      }
+      return false;
     }
 
     // T1 (shape) and T2 (box placement) within a time budget.
@@ -1267,6 +1369,13 @@
               n1++; continue;
             }
             this.uncalibrate(old);
+          }
+          // First shape of a new entry: enough detail for this distance, and
+          // not a catalogued piece that moved (verifyNew).
+          if (!j.p.t1) {
+            const v = this.verifyNew(j.p, j.d, t1, dets);
+            if (v === 'wait') continue;
+            if (v === 'merged') { n1++; continue; }
           }
           j.p.t1 = t1;
           j.p.t1Frame = this.fNo;
@@ -1477,7 +1586,16 @@
       this.clearPuzzleFrame(); // the mark is in the old box's grid
       this.box = box;
       for (const p of this.pieces.values()) { p.t2 = null; this.touch(p); }
+      for (const A of this.asms || []) { A.place = null; A.placeAt = -1e9; A.version++; } // placed again on the new grid
+      this.asmDirty = true;
       this.version++;
+    }
+    /** Assemblies for saving (and back). */
+    exportAsms() { return (this.asms || []).map((A) => A.toJSON()); }
+    importAsms(list) {
+      this.asms = PH.Assembly && Array.isArray(list) ? list.map((o) => PH.Assembly.fromJSON(o)) : [];
+      this.nextAsm = this.asms.reduce((m, A) => Math.max(m, A.id), 0);
+      this.asmLast = null; this.asmDirty = false;
     }
 
     // ---------- matching / selection ----------
@@ -1760,6 +1878,11 @@
     }
     filterIds() {
       if (!this.filter) return [];
+      // The assembled border is complete (js/vision/assembly.js): no loose
+      // piece can be a border piece any more; anything with a straight side
+      // is a misread (owner, 2026-10-04).
+      const asm = this.assemblyInfo();
+      if (asm && asm.border && asm.border.done >= asm.border.total && ['corner', 'border', 'edges'].includes(this.filter)) return [];
       const out = [];
       const doubt = this.filter === 'corner' || this.filter === 'edges' ? this.cornerDoubts() : null;
       for (const p of this.pieces.values()) {
@@ -1935,6 +2058,193 @@
     }
     removePiece(id) { this.pieces.delete(id); this.dirty.add(id); this.version++; }
 
+    // ---------- open spots of assembled sections ----------
+    /** Every steady view with a big blob (the assembled part) adds to an
+     *  Assembly (js/vision/assembly.js): its grid is lined up with what is
+     *  known by the overlap and its cells are added in, so following the
+     *  border or the block close up builds the whole of it. Each assembly is
+     *  put on the box picture as it grows; its open spots are then shown on
+     *  the view this frame lined up with. */
+    findSpots(dets, seg, proc, still) {
+      this.spotView = null;
+      if (!still) return;
+      // The piece size from loose pieces is only a hint here: a view of just
+      // the assembled block has none, and its own estimate can be the block.
+      const unit = this.unitLive || seg.unitArea;
+      const side = unit && unit < proc.w * proc.h * 0.05 ? Math.sqrt(unit) : null;
+      const blobs = dets.filter((d) => d.big || d.area > (side ? side * side * 3.5 : proc.w * proc.h * 0.06)).sort((x, y) => y.area - x.area).slice(0, 2);
+      if (!blobs.length) return;
+      if (!PH.Assembly) return; // js/vision/assembly.js not loaded (some tests)
+      if (!this.asms) this.asms = [];
+      let L = null;
+      for (const d of blobs) {
+        const g = PH.sectionSpots(d, side, proc.w, proc.h);
+        if (PH.DEBUG_ASM) PH.DEBUG_ASM('grid', g ? (g.failed ? 'failed crisp ' + g.crisp.toFixed(2) + ' pitch ' + g.pitch.toFixed(1) : g.occ.length + ' filled ' + g.empty.length + ' empty crisp ' + g.crisp.toFixed(2) + ' pitch ' + g.pitch.toFixed(1)) : 'null', 'area', Math.round(d.area), 'big', !!d.big);
+        if (!g || g.failed || g.occ.length < 4) continue;
+        if (!L) {
+          const cv = PH.cv, m = new cv.Mat(proc.h, proc.w, cv.CV_8UC1);
+          for (let p = 0, n = proc.w * proc.h; p < n; p++) m.data[p] = seg.lab[3 * p];
+          cv.GaussianBlur(m, m, new cv.Size(0, 0), Math.max(0.8, g.pitch / 10));
+          L = new Uint8Array(m.data); m.delete();
+        }
+        const X = PH.gridPatches(g, g.occ, L, proc.w, proc.h), NP = PH.PATCH * PH.PATCH;
+        const fc = g.occ.map(([i, j], n) => ({ i, j, filled: true, patch: X.subarray(n * NP, (n + 1) * NP) }))
+          .concat(g.empty.map(([i, j]) => ({ i, j, filled: false, patch: null })));
+        const reg = this.registerView(fc, g);
+        if (PH.DEBUG_ASM) PH.DEBUG_ASM('reg', reg ? JSON.stringify({ k: reg.k, di: reg.di, dj: reg.dj, corr: +reg.corr.toFixed(2), agree: +reg.agree.toFixed(2), n: reg.n }) : 'none');
+        if (!reg) continue;
+        const A = reg.A;
+        A.add(fc, g.sides, reg.k, reg.di, reg.dj);
+        this.asmLast = { id: A.id, k: reg.k, di: reg.di, dj: reg.dj, g, t: now() };
+        A.locate(this.box);
+        this.asmDirty = true;
+        if (!this.spotView) this.spotView = { A, g, k: reg.k, di: reg.di, dj: reg.dj };
+      }
+    }
+    /** Which assembly (and where in it) a view's cells belong to; a new
+     *  assembly when nothing known overlaps. Two assemblies that one view
+     *  lines up with are joined. */
+    registerView(fc, g) {
+      const good = (r) => r && r.corr >= 0.55 && r.agree >= 0.8 && r.n >= 4;
+      const last = this.asmLast && now() - this.asmLast.t < 4000 ? this.asmLast : null;
+      let best = null;
+      if (last) {
+        const A = this.asms.find((x) => x.id === last.id);
+        // predicted: the frame cell nearest the view's centre sits where the
+        // last view's grid put that spot of the table (the phone moves little
+        // between steady views)
+        const c = g.occ[g.occ.length >> 1];
+        const [x, y] = g.toXY(g.u0 + (c[0] + 0.5) * g.pitch, g.v0 + (c[1] + 0.5) * g.pitch);
+        const [u, v] = last.g.toUV(x, y);
+        const ip = Math.floor((u - last.g.u0) / last.g.pitch), jp = Math.floor((v - last.g.v0) / last.g.pitch);
+        const [ai, aj] = PH.rotCell(last.k, ip, jp);
+        const near = [0, 1, 2, 3].map((k) => { const [a, b] = PH.rotCell(k, c[0], c[1]); return { di: ai + last.di - a, dj: aj + last.dj - b }; });
+        const r = A && A.register(fc, near);
+        if (good(r)) best = Object.assign(r, { A });
+      }
+      // Full search (slower): when the local one failed, at most every 1.5 s.
+      if (!best && now() - (this.asmGlobalAt || 0) > 1500) {
+        this.asmGlobalAt = now();
+        const hits = [];
+        for (const A of this.asms) { const r = A.register(fc, null); if (good(r)) hits.push(Object.assign(r, { A })); }
+        hits.sort((a, b) => b.score - a.score);
+        best = hits[0] || null;
+        for (const h of hits.slice(1)) this.joinAssemblies(best, h);
+        if (!best) {
+          // Nothing known overlaps: a new assembly - but only from a view with
+          // enough cells, and not while a recent one is just failing to line
+          // up (a blurred or misread view would split it).
+          this.asmMiss = (this.asmMiss || 0) + 1;
+          if (g.occ.length >= 8 && (!this.asms.length || this.asmMiss >= 3)) {
+            const A = new PH.Assembly(this.nextAsm = (this.nextAsm || 0) + 1);
+            this.asms.push(A);
+            if (this.asms.length > 6) this.asms.sort((a, b) => b.cells.size - a.cells.size).length = 6;
+            this.asmMiss = 0;
+            return { A, k: 0, di: 0, dj: 0, corr: 1, agree: 1, n: 0 };
+          }
+          return null;
+        }
+      }
+      if (best) this.asmMiss = 0;
+      return best;
+    }
+    /** Fold assembly B into A: the same view lines up with both (view -> A
+     *  is ra, view -> B is rb), so a B cell maps view-wise into A. */
+    joinAssemblies(ra, rb) {
+      const A = ra.A, B = rb.A;
+      if (A === B) return;
+      const NP = PH.PATCH * PH.PATCH, turn = (ra.k - rb.k + 4) % 4, sIdx = PH.patchTurn(turn);
+      for (const c of B.cells.values()) {
+        // B -> view: undo rb's shift and turn; view -> A: ra's turn and shift
+        const [fi, fj] = PH.rotCell((4 - rb.k) % 4, c.i - rb.di, c.j - rb.dj);
+        const [a, b] = PH.rotCell(ra.k, fi, fj);
+        const t = A.cell(a + ra.di, b + ra.dj, true);
+        t.f += c.f; t.e += c.e;
+        if (c.patch) {
+          if (!t.patch) t.patch = new Float32Array(NP);
+          for (let q = 0; q < NP; q++) t.patch[q] += c.patch[sIdx[q]];
+          t.pn += c.pn;
+        }
+        c.sides.forEach((v, d) => {
+          if (!v) return;
+          const dd = (d + turn) % 4, w = t.sides[dd] || (t.sides[dd] = { T: 0, B: 0, F: 0 });
+          w.T += v.T; w.B += v.B; w.F += v.F;
+        });
+      }
+      A.views += B.views; A.version++;
+      this.asms = this.asms.filter((x) => x !== B);
+      A.locate(this.box, true);
+    }
+    /** The biggest assembly's state, for the page and reports. */
+    assemblyInfo() {
+      const A = this.asms && this.asms.length ? this.asms.reduce((a, b) => (b.cells.size > a.cells.size ? b : a)) : null;
+      if (!A) return null;
+      let filled = 0;
+      for (const c of A.cells.values()) if (A.filled(c)) filled++;
+      return { n: this.asms.length, cells: filled, views: A.views, place: A.place, border: A.borderStatus(this.box), spots: A.spots(this.box).length };
+    }
+    /** Loose pieces for box cell (col,row) whose edges agree with the spot's
+     *  needs (box directions; '?' = unknown), best first (PH fillSpot ranking). */
+    spotPieces(col, row, need, topN) {
+      const f = this.fillSpot(col, row, 12);
+      const out = [];
+      // The turn the print suggests can be wrong (plain or repeating print),
+      // so any turn whose edges agree with the spot's needs will do; the
+      // print's own turn first.
+      const fits = (P, rot) => {
+        for (let d = 0; d < 4; d++) {
+          if (need[d] === '?') continue;
+          const e = P.t1.edges[(d - rot + 8) % 4];
+          if (e.type !== need[d] && !(e.unc && e.alt === need[d])) return false;
+        }
+        return true;
+      };
+      for (const c of f.cands) {
+        const P = this.pieces.get(c.id);
+        if (!P || !P.t1 || !P.pos) continue;
+        const rot = [c.rot, (c.rot + 1) % 4, (c.rot + 2) % 4, (c.rot + 3) % 4].find((r) => fits(P, r));
+        if (rot !== undefined) out.push({ id: c.id, rot, print: c.print });
+        if (out.length >= topN) break;
+      }
+      return out;
+    }
+    /** This frame's open spots: the assembly's spots (with box cell, needs
+     *  and the best loose pieces) drawn through the grid this view lined up
+     *  with. Piece suggestions are cached per assembly/catalogue version. */
+    spotsOut(inv, byId) {
+      const V = this.spotView;
+      if (!V) return [];
+      const A = V.A, g = V.g;
+      if (!A.spotCache || A.spotCache.version !== A.version || A.spotCache.pieces !== this.version) {
+        const list = A.spots(this.box).sort((a, b) => b.n - a.n);
+        let budget = 12;
+        for (const sp of list) {
+          sp.best = [];
+          if (!sp.cell || budget <= 0) continue;
+          const need = ['?', '?', '?', '?'];
+          sp.need.forEach((t, d) => (need[(d + A.place.k) % 4] = t)); // assembly side -> box side
+          sp.best = this.spotPieces(sp.cell[0], sp.cell[1], need, 3);
+          budget--;
+        }
+        A.spotCache = { version: A.version, pieces: this.version, list };
+      }
+      return A.spotCache.list.map((sp) => {
+        const [fi, fj] = PH.rotCell((4 - V.k) % 4, sp.i - V.di, sp.j - V.dj);
+        const poly = [];
+        for (const [a, b] of [[fi, fj], [fi + 1, fj], [fi + 1, fj + 1], [fi, fj + 1]]) poly.push(...g.toXY(g.u0 + a * g.pitch, g.v0 + b * g.pitch));
+        const [cx, cy] = g.toXY(g.u0 + (fi + 0.5) * g.pitch, g.v0 + (fj + 0.5) * g.pitch);
+        // needs in this view's directions (for drawing)
+        const need = ['?', '?', '?', '?'];
+        sp.need.forEach((t, d) => (need[(d - V.k + 4) % 4] = t));
+        const best = (sp.best || []).map((b) => {
+          const d = byId.get(b.id), P = this.pieces.get(b.id);
+          const at = d ? [d.cx, d.cy] : P && P.pos && inv && P.island === this.island ? PH.simApply(inv, P.pos[0], P.pos[1]) : null;
+          return { id: b.id, x: at ? at[0] : null, y: at ? at[1] : null, visible: !!d };
+        });
+        return { poly: poly.map((v) => Math.round(v * 10) / 10), cx, cy, n: sp.n, need, cell: sp.cell, best };
+      });
+    }
+
     // ---------- output for the overlay ----------
     output(dets, proc) {
       const inv = this.pose ? PH.simInvert(this.pose) : null;
@@ -2054,6 +2364,7 @@
         procW: proc.w, procH: proc.h, scale: proc.scale,
         dets: outDets, highlights: hl, links,
         tracking: !!this.pose, island: this.island,
+        spots: this.spotsOut(inv, byId), assembly: this.assemblyInfo(),
         counts: this.counts(),
         bg: this.bg, thresh: this.thresh,
       };
@@ -2061,7 +2372,7 @@
 
     // ---------- persistence ----------
     exportPiece(p) {
-      return { id: p.id, kind: p.kind, sec: p.sec, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created, rd: p.rd || null, pic: p.pic || null, missing: !!p.missing, inPuzzle: p.inPuzzle || 0 };
+      return { id: p.id, kind: p.kind, sec: p.sec, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created, rd: p.rd || null, pic: p.pic || null, missing: !!p.missing, inPuzzle: p.inPuzzle || 0, cutSeen: p.cutSeen || 0 };
     }
     importState(state) {
       this.reset();
@@ -2117,6 +2428,9 @@
   function edgeFlags(p) {
     const t1 = p && p.t1;
     if (!t1 || !t1.flats) return { n: 0, border: false, corner: false };
+    // Seen again with more puzzle right past its straight side: a chunk cut
+    // out of an assembled section, not a border piece.
+    if ((p.cutSeen || 0) >= 2) return { n: 0, border: false, corner: false };
     // Only certain flats count: an edge near the flat/tab threshold may be a
     // shallow tab, and calling it border is how "Edges (108)" happened.
     const f = t1.flats, e = t1.edges || [];

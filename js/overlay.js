@@ -138,6 +138,7 @@ export function drawOverlay(ctx, res, M, opts) {
   }
 
   if (res.pframe && res.pframe.visible) drawPuzzleFrame(ctx, res.pframe, M, t);
+  if (res.spots && res.spots.length) drawSpots(ctx, res.spots, M, t, byId);
 
   // Highlights: on-screen ring, off-screen arrows at the edge.
   // No ctx.shadowBlur anywhere — it is re-rasterised per shape and is by far
@@ -187,6 +188,67 @@ export function drawOverlay(ctx, res, M, opts) {
     }
   }
   ctx.globalAlpha = 1;
+}
+
+// Open spots of the assembled part (js/vision/assembly.js): cyan squares on
+// the empty cells - solid where 2+ pieces already surround the spot (holes,
+// pockets: the surest), dashed along the block's edge. The best loose piece
+// for a spot is named on it, ringed gold and linked by a dashed line; one
+// off screen gets an arrow (for the surest spots only, to keep the edges clear).
+const SPOT = '#00e5ff';
+function drawSpots(ctx, spots, M, t, byId) {
+  const pulse = 0.6 + 0.4 * Math.sin(t * 4);
+  let arrows = 0;
+  for (const s of spots) {
+    const strong = s.n >= 2;
+    ctx.beginPath();
+    for (let i = 0; i < s.poly.length; i += 2) {
+      const [x, y] = M.toScreen(s.poly[i], s.poly[i + 1]);
+      if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    }
+    ctx.closePath();
+    ctx.globalAlpha = strong ? 0.22 + 0.14 * pulse : 0.12;
+    ctx.fillStyle = SPOT;
+    ctx.fill();
+    ctx.globalAlpha = strong ? 1 : 0.7;
+    ctx.setLineDash(strong ? [] : [6, 5]);
+    ctx.lineWidth = strong ? 4 : 2.5;
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.stroke();
+    ctx.lineWidth = strong ? 2.5 : 1.5;
+    ctx.strokeStyle = SPOT;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    const b = s.best && s.best[0];
+    if (!b) continue;
+    const [cx, cy] = M.toScreen(s.cx, s.cy);
+    if (b.x !== null && b.visible) {
+      const [px, py] = M.toScreen(b.x, b.y);
+      ctx.setLineDash([7, 6]);
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = 'rgba(255, 204, 0, 0.9)';
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(px, py); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(px, py, 16 + 3 * pulse, 0, Math.PI * 2);
+      ctx.lineWidth = 4; ctx.strokeStyle = '#ffcc00'; ctx.stroke();
+    } else if (b.x !== null && strong && arrows < 3) {
+      arrows++;
+      arrow(ctx, M, { x: b.x, y: b.y }, '#ffcc00');
+    }
+    label(ctx, cx, cy, '#' + b.id);
+  }
+}
+function label(ctx, x, y, text) {
+  if (!(x >= -40 && y >= -20 && x <= ctx.canvas.width && y <= ctx.canvas.height)) return;
+  ctx.font = 'bold 13px -apple-system, sans-serif';
+  const w = ctx.measureText(text).width + 10;
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(x - w / 2, y - 10, w, 20);
+  ctx.fillStyle = '#ffcc00';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y + 1);
 }
 
 // The marked border (js/vision/frame.js) located in this view: its outline,

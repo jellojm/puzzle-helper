@@ -13,7 +13,7 @@ const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-rel
 const OPENCV_SIMD_URL = '../vendor/opencv-4.10.0-simd.js';
 // A tiny module using one SIMD instruction: does this browser accept SIMD?
 const simdOk = (() => { try { return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])); } catch (_) { return false; } })();
-const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'frame', 'engine'];
+const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'engine'];
 
 let engine = null;
 const recent = []; // recent frame timings
@@ -153,12 +153,17 @@ async function loadState() {
   const settings = await tx('meta', 'readonly', (s) => s.get('settings'));
   const feedback = await tx('meta', 'readonly', (s) => s.get('feedback'));
   const pframe = await tx('meta', 'readonly', (s) => s.get('pframe'));
-  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null };
+  const asm = await tx('meta', 'readonly', (s) => s.get('asm'));
+  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null, asm: asm || [] };
 }
 function scheduleSave() {
   if (saveTimer || !db) return;
   saveTimer = setTimeout(async () => {
     saveTimer = null;
+    if (engine.asmDirty) { // the assembled part, built up from close views
+      engine.asmDirty = false;
+      try { await tx('meta', 'readwrite', (s) => s.put(engine.exportAsms(), 'asm')); } catch (e) { post({ type: 'error', message: 'Saving failed: ' + e.message }); }
+    }
     const { put, del } = engine.takeDirty();
     if (!put.length && !del.length) return;
     try {
@@ -189,7 +194,7 @@ async function saveCurrentToLibrary(name) {
   const nm = name || (cur && cur.name) || `Puzzle ${new Date().toLocaleDateString()}${engine.box ? ` (${engine.box.cols * engine.box.rows} pieces)` : ''}`;
   const entry = { key, name: nm, savedAt: Date.now(), counts: engine.counts(),
     pieces: [...engine.pieces.values()].map((p) => engine.exportPiece(p)), box: engine.box || null,
-    feedback: engine.fbLog || [], pframe: engine.pframe ? engine.pframe.toJSON() : null };
+    feedback: engine.fbLog || [], pframe: engine.pframe ? engine.pframe.toJSON() : null, asm: engine.exportAsms() };
   await tx('library', 'readwrite', (s) => s.put(entry));
   await tx('meta', 'readwrite', (s) => s.put({ key, name: nm }, 'current'));
   return { key, name: nm, pieces: entry.pieces.length };
@@ -249,6 +254,7 @@ async function init(msg) {
     db = await openDb();
     const st = await loadState();
     engine.importState(st);
+    engine.importAsms(st.asm);
     engine.fbLog = Array.isArray(st.feedback) ? st.feedback : [];
     engine.refitCalib(); // the match-probability model learns from saved Fits/No answers
     // the marked border, if it was marked on this box's grid
@@ -286,6 +292,8 @@ const handlers = {
     camPump(msg.track); // runs on its own, outside the message chain
   },
   camTrackOff() { camStop(); },
+  // test hook (e2e): a WebAssembly trap like the one in the owner's screenshots
+  __trap() { throw new WebAssembly.RuntimeError('Out of bounds memory access (test)'); },
   frame(msg) {
     if (msg.fromTrack) {
       // newest camera frame read in the worker (none yet: tell the page)
@@ -540,6 +548,7 @@ const handlers = {
     if (!e) return;
     if (engine.pieces.size) await saveCurrentToLibrary();
     engine.importState({ pieces: e.pieces || [], box: e.box || null });
+    engine.importAsms(e.asm);
     engine.fbLog = Array.isArray(e.feedback) ? e.feedback : [];
     engine.refitCalib();
     engine.pframe = null;
@@ -551,6 +560,7 @@ const handlers = {
       if (e.box) s.put(e.box, 'box'); else s.delete('box');
       s.put(engine.fbLog, 'feedback');
       if (e.pframe) s.put(e.pframe, 'pframe'); else s.delete('pframe');
+      s.put(e.asm || [], 'asm');
       s.put({ key: e.key, name: e.name }, 'current');
     });
     post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo(), border: !!engine.pframe, opened: e.name });
@@ -576,6 +586,7 @@ const handlers = {
       await tx('meta', 'readwrite', (s) => s.delete('feedback')); // the answer key belongs to the old catalog
       if (!keepBox) await tx('meta', 'readwrite', (s) => s.delete('box'));
       await tx('meta', 'readwrite', (s) => s.delete('pframe')); // a new puzzle has its own border
+      await tx('meta', 'readwrite', (s) => s.delete('asm')); // and its own assembled part
     }
     post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo() });
     post({ type: 'feedbackStats', stats: engine.feedbackStats() });
@@ -584,16 +595,45 @@ const handlers = {
 
 // Process messages one at a time; frames that arrive while busy are dropped
 // by the page (it waits for each result before sending the next frame).
+// A WebAssembly trap ("Out of bounds memory access", "unreachable", an abort)
+// leaves OpenCV's memory broken: every later call fails the same way (owner's
+// screenshots 2026-10-04: "Out of bounds memory access (evaluating
+// 'rawConstructor()')" on every frame). The catalog itself is plain
+// JavaScript and still fine, so save it all and let the page start a fresh
+// worker. A heap close to its 1 GB ceiling gets the same fresh start before
+// it fails (iOS refuses to grow it long before that).
+const HEAP_LIMIT_MB = 640;
+let cvDead = false;
+const heapMB = () => (PH.cv && PH.cv.HEAP8 ? +(PH.cv.HEAP8.buffer.byteLength / 1048576).toFixed(1) : null);
+const isFatal = (err) => (typeof WebAssembly !== 'undefined' && err instanceof WebAssembly.RuntimeError) ||
+  typeof err === 'number' || /out of bounds memory|memory access out of bounds|unreachable|aborted|abort\(|out of memory|cannot enlarge memory/i.test(String((err && err.message) || err));
+async function flushAll() {
+  clearTimeout(saveTimer); saveTimer = null;
+  if (!db || !engine) return;
+  const { put, del } = engine.takeDirty();
+  if (put.length || del.length) await tx('pieces', 'readwrite', (s) => { for (const p of put) s.put(p); for (const id of del) s.delete(id); });
+  await tx('meta', 'readwrite', (s) => { s.put(engine.fbLog || [], 'feedback'); s.put(engine.exportAsms(), 'asm'); });
+}
+async function retire(why, where, err) {
+  cvDead = true;
+  camStop();
+  try { await flushAll(); } catch (_) { /* best effort: most of the catalog is saved already */ }
+  post({ type: 'cvDead', why, where, message: String((err && err.message) || err || why),
+    stack: err && err.stack ? String(err.stack).slice(0, 1200) : null, heapMB: heapMB(), build: PH.cvBuild || null });
+}
 let chain = Promise.resolve();
 self.onmessage = (e) => {
   const msg = e.data;
   chain = chain.then(async () => {
     try {
-      if (!engine && msg.type !== 'init') { if (msg.bitmap) msg.bitmap.close(); return; }
+      if (cvDead || (!engine && msg.type !== 'init')) { if (msg.bitmap) msg.bitmap.close(); if (msg.track) msg.track.stop(); return; }
       await handlers[msg.type](msg);
+      const h = heapMB();
+      if (h && h > HEAP_LIMIT_MB) await retire('heap', msg.type, new Error(`vision memory at ${h} MB`));
     } catch (err) {
       if (msg.bitmap) try { msg.bitmap.close(); } catch (_) { /* already closed */ }
-      post({ type: 'error', message: (err && err.message) || String(err), where: msg.type });
+      if (engine && isFatal(err)) { await retire('trap', msg.type, err); return; }
+      post({ type: 'error', message: (err && err.message) || String(err), where: msg.type, stack: err && err.stack ? String(err.stack).slice(0, 600) : null, heapMB: heapMB() });
     }
   });
 };
