@@ -504,6 +504,14 @@
         if (PH.dE(d.fp.L, d.fp.a, d.fp.b, seg.bg.L, seg.bg.a, seg.bg.b, 1) < 25) cLow++;
       }
       this.coachNow = { n: cN, low: cLow, glare: +(seg.glare || 0).toFixed(3), boardL: Math.round(seg.bg.L) };
+      // Pale pieces on a pale board: turn the texture channel on (with
+      // hysteresis: on above 30% blending in, off below 15%).
+      if (cN >= 4) {
+        this.paleShare = (this.paleShare === undefined ? cLow / cN : this.paleShare * 0.85 + (cLow / cN) * 0.15);
+        if (!this.useTexture && this.paleShare >= 0.3) this.useTexture = true;
+        else if (this.useTexture && this.paleShare < 0.15) this.useTexture = false;
+      }
+      this.coachNow.texture = !!this.useTexture;
       this.poorStreak = dets.filter((d) => !d.border).length < 3 ? (this.poorStreak || 0) + 1 : 0;
       const unitF = this.unitFrame(dets);
       this.link(dets, unitF);
@@ -720,6 +728,8 @@
         o.boundaryClose = unitArea ? PH.clamp(odd(Math.round(0.07 * Math.sqrt(unitArea))), 3, 7) : 3;
         o.openK = this.opts.boundaryOpenK === undefined ? 0 : this.opts.boundaryOpenK; // the 3x3 open sheared tabs
       }
+      // pale pieces blending into the board: add the texture channel (still frames)
+      if (this.useTexture && info && info.still !== false && this.opts.texture !== false) o.texture = { T: 5, erode: 1 };
       return this.segOpts(Object.assign(o, extra));
     }
 
@@ -764,7 +774,40 @@
       // a model that calls most of the frame "foreground" is wrong even if
       // a few blobs happen to look like pieces
       const fg = area / (proc.w * proc.h);
-      return { c, good, fg: +fg.toFixed(2), score: good * (fg > 0.75 ? 0.3 : 1) };
+      // Inverted models: in a dense pile the GAPS between pieces are jigsaw-
+      // shaped too, and a model calling the pieces' own colour "table" counts
+      // them as pieces (owner's glass-table photo pieces-1: 38 "pieces", all
+      // gaps). Real pieces carry print and cut edges; gaps and tables are
+      // smoother. Foreground smoother than background -> mostly not pieces.
+      const tex = this.texRatio(proc, seg.dets);
+      const inverted = tex !== null && tex < 1 ? tex * 0.4 : 1;
+      return { c, good, fg: +fg.toFixed(2), tex: tex === null ? null : +tex.toFixed(2), score: good * (fg > 0.75 ? 0.3 : 1) * inverted };
+    }
+    /** Mean local lightness spread (texture) inside the detections vs outside
+     *  them, for this processing image (the texture map is cached per image). */
+    texRatio(proc, dets) {
+      if (!dets.length) return null;
+      const cv = PH.cv;
+      if (!this.texCache || this.texCache.proc !== proc) {
+        if (this.texCache) this.texCache.map.delete();
+        const P = PH.labPlanes(PH.rgbaToLab(proc.data, proc.w, proc.h), proc.w, proc.h);
+        const Lf = new cv.Mat(), mu = new cv.Mat(), m2 = new cv.Mat(), sq = new cv.Mat();
+        P.L.convertTo(Lf, cv.CV_32F);
+        cv.blur(Lf, mu, new cv.Size(5, 5)); cv.multiply(Lf, Lf, sq); cv.blur(sq, m2, new cv.Size(5, 5));
+        cv.multiply(mu, mu, sq); cv.subtract(m2, sq, m2);
+        cv.max(m2, new cv.Mat(proc.h, proc.w, cv.CV_32F, new cv.Scalar(0)), m2);
+        cv.sqrt(m2, m2);
+        [Lf, mu, sq].forEach((x) => x.delete()); P.delete();
+        this.texCache = { proc, map: m2 };
+      }
+      const fgm = cv.Mat.zeros(proc.h, proc.w, cv.CV_8UC1), mv = new cv.MatVector();
+      for (const d of dets) mv.push_back(cv.matFromArray(d.pts.length / 2, 1, cv.CV_32SC2, Array.from(d.pts)));
+      cv.drawContours(fgm, mv, -1, new cv.Scalar(255), -1);
+      for (let i = 0; i < mv.size(); i++) mv.get(i).delete();
+      const bgm = new cv.Mat(); cv.bitwise_not(fgm, bgm);
+      const inside = cv.mean(this.texCache.map, fgm)[0], outside = cv.mean(this.texCache.map, bgm)[0];
+      [fgm, bgm, mv].forEach((x) => x.delete());
+      return inside / Math.max(0.1, outside);
     }
     /**
      * Which background model fits this table? Candidates: the 4 most common
@@ -1172,7 +1215,13 @@
           if (!p.t1 && p.t1Fail > 0 && (p.t1Fail++ % 8) !== 0) continue;
           jobs.push({ d, p, pri });
         }
-        jobs.sort((a, b) => a.pri - b.pri);
+        // Within a priority, pieces near the middle of the view first: toward
+        // the edges the camera sees the piece's side wall (outline bulges on
+        // that side) and lens distortion grows (puzzle-bot keeps the most
+        // central of several views for the same reason).
+        const pc = this.lastProc, cxv = pc ? pc.w / 2 : 0, cyv = pc ? pc.h / 2 : 0, rv = Math.hypot(cxv, cyv) || 1;
+        for (const j of jobs) j.centre = pc ? 1 - Math.hypot(j.d.cx - cxv, j.d.cy - cyv) / rv : 0.5;
+        jobs.sort((a, b) => a.pri - b.pri || b.centre - a.centre);
         let confirms = 0;
         for (const j of jobs) {
           // Always read at least 2 shapes per steady frame: when segmentation
@@ -1187,6 +1236,7 @@
           if (j.pri > 0 && j.d.t1 === undefined && now() > t1Deadline && (confirms >= 1 || this.fNo % 2)) break;
           if (j.pri > 0) confirms++;
           const t1 = this.detT1(j.d);
+          if (t1) t1.centre = +j.centre.toFixed(2);
           if (!t1) {
             j.p.t1Fail = (j.p.t1Fail || 0) + 1;
             if (!j.p.t1 && j.d.notPiece && j.p.t1Fail >= 4) { this.removePiece(j.p.id); j.d.id = null; }
@@ -1208,7 +1258,9 @@
             }
             // They disagree: keep the better-quality read.
             j.p.conflicts = (j.p.conflicts || 0) + 1;
-            const qn = t1.quality ? t1.quality.q : 0, qo = old.quality ? old.quality.q : 0;
+            // (a more central view counts a little more: less side wall, less distortion)
+            const cw = (t) => 0.85 + 0.3 * (t.centre === undefined ? 0.5 : t.centre);
+            const qn = (t1.quality ? t1.quality.q : 0) * cw(t1), qo = (old.quality ? old.quality.q : 0) * cw(old);
             if (qn <= qo * 1.15) {
               // the stored shape stays; the map still needs this view's picture
               if (!j.p.rd || j.p.rd.stale) this.notePlacement(j.p, { thumb: t1.thumb, corners: t1.corners, sigs: t1.edges.map((e) => e.sig) });
@@ -1935,7 +1987,7 @@
         // "maybe" (silver), however good its score looks.
         if (res) for (const r of res) r.matches.slice(0, 3).forEach((m, i) => {
           const gold = i === 0 && m.prob >= 0.5 && (m.loopOk || (shapeConfirmed(P) && shapeConfirmed(this.pieces.get(m.id))));
-          locate(m.id, gold ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge });
+          locate(m.id, gold ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge, rank: i });
         });
       }
       if (this.region) for (const id of this.region.ids) locate(id, id === this.region.best ? 'gold' : 'region');

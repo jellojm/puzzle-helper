@@ -490,6 +490,40 @@
       mark('boundary');
     }
 
+    // Texture channel (opts.texture = {T, erode}): printed pieces have fine
+    // detail even where their colour matches the board; a plain board has
+    // none. Local spread of lightness (7x7) above T, closed, holes filled,
+    // trimmed back by `erode` (the window spreads past the edge), added to
+    // the mask. The engine turns it on only while pale pieces blend into the
+    // board (capture coach): on the owner's frames it costs good pieces
+    // elsewhere (98 -> 93-95), on pale-on-white tables it finds more.
+    if (opts.texture) {
+      const tT = opts.texture.T || 5, er = opts.texture.erode || 0;
+      const Lf = new cv.Mat(), m = new cv.Mat(), m2 = new cv.Mat(), sq = new cv.Mat(), tm = new cv.Mat(), t8 = new cv.Mat();
+      P.L.convertTo(Lf, cv.CV_32F);
+      cv.blur(Lf, m, new cv.Size(7, 7));
+      cv.multiply(Lf, Lf, sq); cv.blur(sq, m2, new cv.Size(7, 7));
+      cv.multiply(m, m, sq); cv.subtract(m2, sq, m2); // variance
+      cv.threshold(m2, tm, tT * tT, 255, cv.THRESH_BINARY); tm.convertTo(t8, cv.CV_8U);
+      if (validMat) cv.bitwise_and(t8, validMat, t8);
+      const kc = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+      cv.morphologyEx(t8, t8, cv.MORPH_CLOSE, kc);
+      const inv = new cv.Mat(); cv.bitwise_not(t8, inv);
+      cv.rectangle(inv, new cv.Point(0, 0), new cv.Point(w - 1, h - 1), new cv.Scalar(255), 1);
+      const ff = cv.Mat.zeros(h + 2, w + 2, cv.CV_8UC1);
+      cv.floodFill(inv, ff, new cv.Point(0, 0), new cv.Scalar(0), new cv.Rect(), new cv.Scalar(0), new cv.Scalar(0), 4);
+      cv.bitwise_or(t8, inv, t8);
+      if (er) { const ke = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * er + 1, 2 * er + 1)); cv.erode(t8, t8, ke); ke.delete(); }
+      const before = cv.countNonZero(mask), comb = new cv.Mat();
+      cv.bitwise_or(mask, t8, comb);
+      // same guard as the outline fill: a busy scene must not swallow the table
+      const claimed = (cv.countNonZero(comb) - before) / Math.max(1, w * h - before);
+      if (claimed <= 0.3) comb.copyTo(mask);
+      if (opts.timings) opts.timings.texClaim = claimed;
+      [Lf, m, m2, sq, tm, t8, kc, inv, ff, comb].forEach((x) => x.delete());
+      mark('texture');
+    }
+
     const openK = opts.openK === undefined ? 3 : opts.openK;
     const closeK = opts.closeK === undefined ? 5 : opts.closeK;
     const k3 = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(Math.max(1, openK), Math.max(1, openK)));
@@ -565,7 +599,7 @@
       if (opts.split !== false && unitA && b.area > 1.8 * unitA && pileOk && now() < splitEnd) {
         if (pile) pilesSplit++;
         if (!labMat) { labMat = new cv.Mat(h, w, cv.CV_8UC3); labMat.data.set(lab); }
-        const pieces = PH.splitBlob(b.cnt, labMat, unitA, w, h);
+        const pieces = PH.splitBlob(b.cnt, labMat, unitA, w, h) || (opts.concave !== false ? PH.splitConcave(b.cnt, unitA) : null);
         if (pieces) { b.cnt.delete(); for (const p of pieces) parts.push({ cnt: p, split: true }); continue; }
       }
       parts.push({ cnt: b.cnt, split: false });
@@ -672,6 +706,64 @@
       if (out.length < 2) { out.forEach((m) => m.delete()); out = null; }
     }
     [blob, one, noH, dist, seeds, labels].forEach((m) => m.delete());
+    return out;
+  };
+
+  /**
+   * Split touching pieces the watershed couldn't (no narrow neck: pieces
+   * pressed side by side): cut between a pair of deep inward notches on the
+   * outline (concave points; splitting touching cells this way is >96%
+   * reliable in the literature). A piece's own blanks are deep notches too,
+   * so a cut is only taken when BOTH halves are piece-sized and look like a
+   * jigsaw piece (PH.pieceScore); the best such cut wins, and halves still
+   * the size of two pieces are cut again. Returns contour Mats or null.
+   */
+  PH.splitConcave = function (cnt, unitA, depth) {
+    const cv = PH.cv;
+    depth = depth || 0;
+    const side = Math.sqrt(unitA / 1.1);
+    const P = cnt.data32S, n = P.length / 2;
+    if (n < 30) return null;
+    const hull = new cv.Mat(), defects = new cv.Mat();
+    let deep = [];
+    try {
+      cv.convexHull(cnt, hull, false, false);
+      cv.convexityDefects(cnt, hull, defects);
+      const D = defects.data32S;
+      for (let i = 0; i < D.length; i += 4) if (D[i + 3] / 256 >= 0.12 * side) deep.push({ i: D[i + 2], d: D[i + 3] / 256 });
+    } catch (e) { deep = []; }
+    hull.delete(); defects.delete();
+    if (deep.length < 2) return null;
+    const poly = (a, b) => { // outline from index a to b (inclusive), along the contour
+      const out = [];
+      for (let k = a; ; k = (k + 1) % n) { out.push(P[2 * k], P[2 * k + 1]); if (k === b) break; }
+      return Int32Array.from(out);
+    };
+    const area = (q) => Math.abs(PH.polyArea(Float32Array.from(q)));
+    // candidate cuts: short, between deep notches; the most promising few
+    const cuts = [];
+    for (let x = 0; x < deep.length; x++) for (let y = x + 1; y < deep.length; y++) {
+      const a = deep[x], b = deep[y];
+      const d = Math.hypot(P[2 * a.i] - P[2 * b.i], P[2 * a.i + 1] - P[2 * b.i + 1]);
+      if (d < 2 || d > 0.9 * side) continue;
+      cuts.push({ a: Math.min(a.i, b.i), b: Math.max(a.i, b.i), rank: (a.d + b.d) / d });
+    }
+    cuts.sort((p, q) => q.rank - p.rank);
+    let best = null;
+    for (const c of cuts.slice(0, 8)) {
+      const A = poly(c.a, c.b), B = poly(c.b, c.a), aA = area(A), aB = area(B);
+      if (aA < 0.55 * unitA || aB < 0.55 * unitA) continue;
+      const sA = aA <= 1.8 * unitA ? PH.pieceScore(A, aA) : 1, sB = aB <= 1.8 * unitA ? PH.pieceScore(B, aB) : 1;
+      const sc = Math.min(sA, sB);
+      if (sc > PH.MIN_CORNER_SCORE * 1.5 && (!best || sc > best.sc)) best = { A, B, aA, aB, sc };
+    }
+    if (!best) return null;
+    const out = [];
+    for (const [q, a] of [[best.A, best.aA], [best.B, best.aB]]) {
+      const m = cv.matFromArray(q.length / 2, 1, cv.CV_32SC2, Array.from(q));
+      const more = a > 1.8 * unitA && depth < 3 ? PH.splitConcave(m, unitA, depth + 1) : null;
+      if (more) { m.delete(); out.push(...more); } else out.push(m);
+    }
     return out;
   };
 

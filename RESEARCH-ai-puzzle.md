@@ -54,7 +54,7 @@ Effort: S ≈ a day, M ≈ a few days, L ≈ a week or more. "Verified" means ch
 
 ### Tier 2: medium effort, solid gains
 
-Status 2026-10-03: items 7, 13, 14, 15, 16 **done in v0.13.0**; item 12 tested and **rejected** (made matching worse on synthetic puzzles, see PLAN dead ends).
+Status 2026-10-03: items 7, 13, 14, 15, 16 **done in v0.13.0**; item 12 tested and **rejected** (made matching worse on synthetic puzzles, see PLAN dead ends). v0.14.0: items 10 and 20 done; 11 needs no change (current rule 99.3% right) and 19 doesn't apply to a moving phone (see PLAN); plus a texture channel for pale pieces and a fix for dense piles on the glass table.
 
 7. **Loops of loops: 3×3 blocks and best-buddy growth** — M, high.
    - A false 4-loop needs at least two wrong matches. Higher-order loops push precision toward 1 ([Son et al.](https://faculty.cc.gatech.edu/~hays/papers/puzzle_eccv14.pdf), [JigsawNet](https://arxiv.org/abs/1809.04137)).

@@ -337,11 +337,11 @@
    *  best). 'alike' = it and the runner-up are about equally likely. */
   PH.matchVerdict = function (m, next) {
     const p = m.prob || 0, backed = m.loopOk || m.mutual || m.loops >= 2;
+    if (p < 0.2) return 'weak'; // (before 'alike': two 0% candidates are not look-alikes)
     if (next && (next.prob || 0) >= p * 0.7 && p < 0.7) return 'alike';
     if (p >= 0.85 && backed) return 'strong';
     if (p >= 0.5) return 'likely';
-    if (p >= 0.2) return 'maybe';
-    return 'weak';
+    return 'maybe';
   };
   // A loop is only as good as its weakest join.
   PH.loopScore = (p) => Math.max(p[0], p[1], p[2], p[3]) + 0.25 * (p[0] + p[1] + p[2] + p[3]);

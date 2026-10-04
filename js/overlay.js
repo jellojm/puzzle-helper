@@ -144,33 +144,39 @@ export function drawOverlay(ctx, res, M, opts) {
   // the most expensive thing a 2D canvas can do on a phone. A translucent
   // wide ring under a bright thin one reads the same and costs nothing.
   const pulse = 0.6 + 0.4 * Math.sin(t * 5);
+  // Arcs from the selected piece to its likely partners (and between the two
+  // pieces of a Matches pair), drawn under the pieces: a curve that sweeps
+  // across the view is easy to follow while panning from one piece to the
+  // other, and it still leads off screen toward a partner that isn't in view.
+  const selH = res.highlights.find((h) => h.role === 'sel');
+  if (selH) {
+    const sd = byId.get(selH.id);
+    const from = sd ? M.toScreen(sd.cx, sd.cy) : M.toScreen(selH.x, selH.y);
+    for (const h of res.highlights) {
+      if ((h.role !== 'gold' && h.role !== 'silver') || h.rank > 0) continue; // each edge's top candidate (all of a pair)
+      const d = byId.get(h.id);
+      const to = d ? M.toScreen(d.cx, d.cy) : M.toScreen(h.x, h.y);
+      arcLine(ctx, from, to, ROLE[h.role].color, h.role === 'gold' ? 5 : 3.5);
+    }
+  }
   for (const h of res.highlights) {
     const style = h.role === 'zone' ? { color: ZONE_COLORS[h.zone] || '#fff', width: 4 } : ROLE[h.role];
     const d = byId.get(h.id);
     if (h.visible && d) {
-      if (marks) {
-        const [x, y] = M.toScreen(d.cx, d.cy);
-        const r = markRadius(d, M);
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.globalAlpha = h.role === 'sel' ? 0.3 : 0.18 + 0.16 * pulse;
-        ctx.fillStyle = style.color;
-        ctx.fill();
-        ctx.globalAlpha = 1;
-        ctx.lineWidth = style.width * 0.7;
-        ctx.strokeStyle = style.color;
-        ctx.stroke();
-      } else {
-        pathFor(ctx, d.pts, M);
-        if (h.role === 'region' || h.role === 'find') { ctx.fillStyle = 'rgba(255, 79, 216, 0.22)'; ctx.fill(); }
-        else if (h.role === 'border') { ctx.fillStyle = 'rgba(53, 224, 216, 0.20)'; ctx.fill(); }
-        else if (h.role === 'corner') { ctx.fillStyle = 'rgba(255, 140, 58, 0.28)'; ctx.fill(); }
-        ctx.globalAlpha = h.role === 'sel' ? 1 : 0.55 + 0.45 * pulse;
-        ctx.lineWidth = style.width;
-        ctx.strokeStyle = style.color;
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
+      // Every highlighted piece: its whole outline, shaded in its colour
+      // (owner, 2026-10-03: small rings were hard to spot), in dot mode too.
+      pathFor(ctx, d.pts, M);
+      ctx.globalAlpha = h.role === 'sel' ? 0.5 : 0.4 + 0.15 * pulse; // strong enough to see over a busy print
+      ctx.fillStyle = style.color;
+      ctx.fill();
+      ctx.globalAlpha = h.role === 'sel' ? 1 : 0.65 + 0.35 * pulse;
+      ctx.lineWidth = style.width;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.stroke(); // dark under-stroke: readable on a pale board as well
+      ctx.lineWidth = Math.max(2, style.width - 1.5);
+      ctx.strokeStyle = style.color;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
       if (h.role === 'gold' || h.role === 'silver') {
         const [x, y] = M.toScreen(d.cx, d.cy);
         badge(ctx, x, y, h.role === 'gold' ? '★' : '·', style.color, EDGE_COLORS[h.edge]);
@@ -255,6 +261,27 @@ function arrow(ctx, M, h, color) {
   ctx.shadowColor = 'rgba(0,0,0,0.8)';
   ctx.shadowBlur = 6;
   ctx.fill();
+  ctx.restore();
+}
+
+// A curved line from one piece to another (bulging to one side), with a dark
+// under-stroke so it reads on any table, and a dot at the far end.
+function arcLine(ctx, from, to, color, width) {
+  const [x0, y0] = from, [x1, y1] = to;
+  if (!isFinite(x0 + y0 + x1 + y1)) return;
+  const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+  if (len < 12) return;
+  const bend = Math.min(0.35 * len, 140); // how far the arc swings out
+  const cx = (x0 + x1) / 2 - (dy / len) * bend, cy = (y0 + y1) / 2 + (dx / len) * bend;
+  ctx.save();
+  ctx.lineCap = 'round';
+  for (const [w, c, a] of [[width + 4, 'rgba(0,0,0,0.6)', 1], [width, color, 0.95]]) {
+    ctx.globalAlpha = a; ctx.lineWidth = w; ctx.strokeStyle = c;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo(cx, cy, x1, y1); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(x1, y1, width + 2, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
 

@@ -7,6 +7,7 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
 - **More → Catalog from a photo:** take a full-resolution photo to catalog every piece in it at once.
 - **Box:** photograph the box picture. The app splits it into the puzzle's grid and works out where each piece belongs. Enter the **finished size** printed on the box (optional): with the real piece size the app can tell you how close to hold the phone.
 - **Find:** tap a piece to see its spot on the box and its best partners for each edge. Each partner gets a word and a percentage: **Strong match** (very likely, and backed by a second check — the two pieces pick each other, or a closed 2×2 block), **Likely**, **Maybe**, **Look-alike** (another piece is about as good) or **Unlikely** (dimmed). The percentages are calibrated — "90%" means about 9 in 10 fit — and they keep learning from your **Fits / No** answers on your own puzzle. The box spot is said in words too (sure / likely / several spots look alike), with a warning for plain pieces whose spot is only a rough guess. Matching pieces glow on the table (gold = best). Pieces off-screen get an arrow pointing toward them.
+  - **Easy to see:** every highlighted piece — the selected one, its partners, a Matches pair, anything a finder lights up — gets its whole outline drawn and is shaded in its colour, and curved lines arc from the selected piece to its likely partners (also toward ones off screen), so they're easy to follow while panning.
   - **Which way up:** a white arrow on the selected piece points to its top edge as it sits in the finished puzzle (also on the Map), and the panel shows the piece upright.
   - **Mark as in the puzzle:** once you've placed a piece, tap this in its panel. Its spot on the box is no longer offered for other pieces, Border and the finders skip it, it's dimmed on the table and the Map, and More shows how much is done. Tap again to undo.
   - **Corners / Edges:** light up every corner piece (orange) or edge piece (teal) on the table, with counts. **Unplaced** and **Unread** light up pieces not yet found on the box, or whose shape hasn't been read.
@@ -19,6 +20,8 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
 - **Next along the border:** a border piece's panel names the next border piece on each side of it (right 108 of 120 times in testing).
 
 Everything runs on the phone. Nothing is uploaded, and the catalog is saved on the phone (IndexedDB).
+
+**Dense piles and pale pieces:** in a dense pile the gaps between pieces look like pieces too; the app now checks which side carries print, so a pile of white pieces on dark glass is read the right way round, and pieces pressed together without a gap are cut apart along their notches. When pale pieces blend into a pale board, the app also uses the pieces' texture (fine print detail the board lacks) to find them.
 
 **Capture coach:** if many pieces blend into the table (pale pieces on a white board) or glare washes out the view, a tip says what to change — once per problem. Pale pieces on a dark cloth read right far more often (in testing: none of the pale pieces on white, all of them on dark).
 
@@ -105,6 +108,7 @@ node test/rectify-proc.js    # tilt-corrected frame: same bytes as the reference
 node test/trust.js           # calibrated match probabilities, refit from answers, verdicts, In puzzle, top-edge arrow
 node test/capture-coach.js   # coach flags pale pieces on a white board; a dark cloth fixes them
 node test/solve-aids.js      # "fill this spot" ranks the right piece first; next piece along the border
+node test/glass-table.js     # owner's glass-table photos: dense piles of white pieces still catalogued
 node tools/fit-calib.js      # refit the match-probability model's starting weights on synthetic puzzles
 node test/speed.js           # per-stage timing (VISION=<dir> runs another copy of js/vision to compare)
 ```

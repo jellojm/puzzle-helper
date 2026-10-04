@@ -239,14 +239,20 @@ export class TableView {
     for (const [a, b, col] of this.hl.lines) {
       const A = at.get(a), B = at.get(b);
       if (!A || !B) continue;
-      ctx.beginPath(); ctx.moveTo(A.sx, A.sy); ctx.lineTo(B.sx, B.sy);
-      ctx.lineWidth = 2.5; ctx.strokeStyle = col || ROLE.gold; ctx.setLineDash([7, 5]); ctx.stroke(); ctx.setLineDash([]);
+      // an arc, as on the camera view: easy to follow from one piece to the other
+      const dx = B.sx - A.sx, dy = B.sy - A.sy, len = Math.hypot(dx, dy) || 1, bend = Math.min(0.35 * len, 140);
+      const qx = (A.sx + B.sx) / 2 - (dy / len) * bend, qy = (A.sy + B.sy) / 2 + (dx / len) * bend;
+      for (const [w, c] of [[6.5, 'rgba(0,0,0,0.6)'], [3.5, col || ROLE.gold]]) {
+        ctx.beginPath(); ctx.moveTo(A.sx, A.sy); ctx.quadraticCurveTo(qx, qy, B.sx, B.sy);
+        ctx.lineWidth = w; ctx.strokeStyle = c; ctx.lineCap = 'round'; ctx.stroke();
+      }
     }
-    // rings
+    // rings, shaded inside (as on the camera view: whole piece lit, not just a circle)
     for (const [id, role] of this.hl.roles) {
       const s = at.get(id);
       if (!s) continue;
       ctx.beginPath(); ctx.arc(s.sx, s.sy, Math.max(8, s.r), 0, Math.PI * 2);
+      ctx.globalAlpha = 0.3; ctx.fillStyle = ROLE[role] || ROLE.find; ctx.fill(); ctx.globalAlpha = 1;
       ctx.lineWidth = role === 'sel' ? 3.5 : 3; ctx.strokeStyle = ROLE[role] || ROLE.find; ctx.stroke();
       // the selected piece's top edge (as it sits in the puzzle)
       const p = role === 'sel' && this.byId.get(id);

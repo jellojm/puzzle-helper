@@ -187,6 +187,7 @@ function writePng(file, mat) {
     await page.click('#closeFind').catch(() => {});
     await page.click('#edgesBtn');
     await page.waitForTimeout(800);
+    await page.screenshot({ path: path.join(OUT, 'e2e-border-lit.png') }); // whole outlines, shaded
     const borderOn = await page.evaluate(() => ({ pressed: document.getElementById('edgesBtn').getAttribute('aria-pressed'), toast: document.getElementById('toast').textContent }));
     await page.click('#edgesBtn');
     await page.waitForTimeout(300);
@@ -213,6 +214,15 @@ function writePng(file, mat) {
       check('Fill this spot: tapping a spot lists pieces for it', ok && /[1-9]\d* pieces/.test(info), info);
       await page.click('#closeFind').catch(() => {});
     } else check('Fill this spot: tapping a spot lists pieces for it', false, 'box picture not visible');
+
+    // Matches: step through pairs; the pair is shaded and joined by an arc.
+    await page.click('#pairsBtn');
+    const mOpen = await page.waitForFunction(() => !document.getElementById('matchBar').hidden, null, { timeout: 15000 }).then(() => true).catch(() => false);
+    await page.waitForTimeout(1200);
+    const mLabel = mOpen ? await page.textContent('#matchLabel') : '';
+    await page.screenshot({ path: path.join(OUT, 'e2e-matches.png') });
+    check('Matches: pairs listed with a verdict', mOpen && /(Strong match|Likely|Maybe|Look-alike|Unlikely) \d+%/.test(mLabel), mLabel || 'match bar did not open');
+    if (mOpen) await page.click('#matchClose').catch(() => {});
 
     // Mark the finished border: aim, capture, Use (the default corners are
     // fine here: what matters is that the view is learned and found again).
