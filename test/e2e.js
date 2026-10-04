@@ -269,6 +269,8 @@ function writePng(file, mat) {
     check('send report produces frame + analyzed view + data files', dls.some((n) => n.endsWith('.json')) && dls.some((n) => n.endsWith('frame.jpg')) && dls.some((n) => n.endsWith('analyzed.jpg')), dls.join(', '));
     const want = ['mainThread', 'stats', 'settings', 'device', 'flow'], wantW = ['engine', 'catalog', 'session'];
     const missing = reportJson ? want.filter((k) => !reportJson[k]).concat(wantW.filter((k) => !(reportJson.worker || {})[k])) : ['(no JSON)'];
+    const w = (reportJson && reportJson.worker) || {};
+    check('vision runs on our SIMD OpenCV build (CDN build as fallback)', w.cvBuild === 'simd', `${w.cvBuild} (simd supported: ${w.simd})${w.cvError ? ' error: ' + w.cvError : ''}`);
     check('report carries the diagnostic blocks', !missing.length,
       missing.length ? 'missing ' + missing.join(', ') : `session ${JSON.stringify(reportJson.worker.session).slice(0, 120)}… | wasm ${reportJson.worker.engine.wasmHeapMB} MB | lag in history: ${reportJson.history.some((r) => r.lag != null)}`);
     // Phone tilted ~35°: feed gravity readings, then tap a piece through the

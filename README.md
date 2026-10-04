@@ -19,7 +19,7 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
 - **Zones:** splits the box picture into six areas A–F and rings every piece in its area's colour: sort into six trays.
 - **Next along the border:** a border piece's panel names the next border piece on each side of it (right 108 of 120 times in testing).
 
-Everything runs on the phone. Nothing is uploaded, and the catalog is saved on the phone (IndexedDB).
+Everything runs on the phone. Nothing is uploaded, and the catalog is saved on the phone (IndexedDB). The vision code runs on our own build of OpenCV with WebAssembly SIMD (about a third faster image work, on iOS 16.4 and later), falling back to the standard build on older browsers.
 
 **Dense piles and pale pieces:** in a dense pile the gaps between pieces look like pieces too; the app now checks which side carries print, so a pile of white pieces on dark glass is read the right way round, and pieces pressed together without a gap are cut apart along their notches. When pale pieces blend into a pale board, the app also uses the pieces' texture (fine print detail the board lacks) to find them.
 

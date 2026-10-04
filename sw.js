@@ -1,7 +1,7 @@
 /* Service worker: makes the app open offline and caches the ~10 MB OpenCV.js
  * download. App files: network first (so updates show up), cache fallback.
  * OpenCV (versioned URL): cache first. */
-const CACHE = 'puzzle-helper-v14';
+const CACHE = 'puzzle-helper-v15';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'manifest.json',
   'js/main.js', 'js/overlay.js', 'js/boxSetup.js', 'js/frameSetup.js', 'js/tableView.js', 'js/worker.js',
@@ -20,7 +20,9 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = e.request.url;
   if (e.request.method !== 'GET') return;
-  if (url === OPENCV) {
+  // OpenCV (the CDN build, and our SIMD build under vendor/, whose file
+  // name carries the version): 10-13 MB, so cache first, fetch once.
+  if (url === OPENCV || new URL(url).pathname.includes('/vendor/')) {
     e.respondWith(caches.open(CACHE).then(async (c) => {
       const hit = await c.match(url);
       if (hit) return hit;

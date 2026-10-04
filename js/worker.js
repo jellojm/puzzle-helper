@@ -6,6 +6,13 @@
 'use strict';
 
 const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
+// Our own OpenCV.js 4.10.0 build with WebAssembly SIMD (research item 9;
+// build steps in PLAN-hard-issues.md): segmentation ~35% faster in node.
+// Used when the browser has WebAssembly SIMD (iOS 16.4+); otherwise, or if
+// it fails to load, the CDN build above.
+const OPENCV_SIMD_URL = '../vendor/opencv-4.10.0-simd.js';
+// A tiny module using one SIMD instruction: does this browser accept SIMD?
+const simdOk = (() => { try { return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])); } catch (_) { return false; } })();
 const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'frame', 'engine'];
 
 let engine = null;
@@ -127,12 +134,22 @@ function boxInfo() {
 
 async function init(msg) {
   post({ type: 'status', text: 'Loading vision library (first time ~10 MB)…' });
-  importScripts(OPENCV_URL);
   for (const f of VISION) importScripts('vision/' + f + '.js');
-  // The Emscripten module is a thenable; never `await` it directly.
-  const m = self.cv;
-  if (m instanceof Promise) PH.cv = await m;
-  else { if (!m.Mat) await new Promise((r) => (m.onRuntimeInitialized = r)); PH.cv = m; }
+  // The Emscripten module of the CDN build is a thenable: never `await` it,
+  // and never RETURN it from an async function either (resolving a promise
+  // with a thenable adopts it, and this one never settles - the app hung on
+  // the CDN fallback). So start() assigns PH.cv instead of returning it.
+  const start = async () => {
+    const m = self.cv;
+    if (m instanceof Promise) { PH.cv = await m; return; } // newer builds (ours): a real Promise
+    if (!m.Mat) await new Promise((r, j) => { m.onRuntimeInitialized = r; m.onAbort = j; setTimeout(() => j(new Error('timeout')), 60000); });
+    PH.cv = m;
+  };
+  PH.cvBuild = null;
+  if (simdOk) {
+    try { importScripts(OPENCV_SIMD_URL); await start(); PH.cvBuild = 'simd'; } catch (e) { self.cv = undefined; PH.cv = null; PH.cvError = String((e && e.message) || e); }
+  }
+  if (!PH.cvBuild) { importScripts(OPENCV_URL); await start(); PH.cvBuild = simdOk ? 'cdn (simd build failed)' : 'cdn (no simd)'; }
   engine = new PH.Engine(msg.opts || {});
   try {
     db = await openDb();
@@ -358,6 +375,7 @@ const handlers = {
       feedback: { stats: engine.feedbackStats(), log: (engine.fbLog || []).slice(-300) },
       // Why detections did not become pieces (shot-quality gate), and provisional pieces waiting.
       gate: { rejects: engine.rejects || {}, candidates: engine.cands ? engine.cands.size : 0, pieceMM: engine.pieceMM ? engine.pieceMM() : null },
+      cvBuild: PH.cvBuild, cvError: PH.cvError || null, simd: simdOk,
       cvInfo: PH.cv && PH.cv.getBuildInformation ? String(PH.cv.getBuildInformation()).slice(0, 3000) : null,
     } });
   },
