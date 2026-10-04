@@ -2030,6 +2030,14 @@
      *  put on the box picture as it grows; its open spots are then shown on
      *  the view this frame lined up with. */
     findSpots(dets, seg, proc, still, photo) {
+      // Paced on live frames: on the owner's phone this work ran ~140 ms per
+      // frame (up to 1.4 s) and the app fell to 2 frames a second (report
+      // 22:58). At most every 0.4 s; the previous result stays meanwhile.
+      if (!photo && now() - (this.spotsAt || 0) < (this.opts.spotEveryMs === undefined ? 400 : this.opts.spotEveryMs)) {
+        if (!still) this.spotView = null; // a steady view keeps the last spots; a moving one drops them
+        return;
+      }
+      this.spotsAt = now();
       this.spotView = null;
       this.asmFar = false;
       if (!still) return;
@@ -2062,12 +2070,16 @@
       // up to 1440 px (at most about once a second).
       const S = this.frameCtx && this.frameCtx.source;
       const hw = S ? Math.min(1440, Math.max(S.w, S.h)) : 0;
-      if (!photo && S && hw >= Math.max(proc.w, proc.h) * 1.4 && now() - (this.hiResAt || 0) > 1000) {
+      // A whole-frame segmentation at that size costs ~0.5-1 s on a phone:
+      // every 5 s at most, backing off to 30 s while it keeps failing.
+      const wait = Math.min(30000, 5000 * 2 ** (this.hiResFails || 0));
+      if (!photo && S && hw >= Math.max(proc.w, proc.h) * 1.4 && now() - (this.hiResAt || 0) > wait) {
         this.hiResAt = now();
         const hp = S.getProc(hw), f = hp.w / proc.w;
         const hs = PH.segment(hp, this.liveSegOpts({ still: true }, { split: false, unitArea: unit ? unit * f * f : null }));
         const hb = pick(hs.dets, hp, side ? side * f : null);
-        if (hb.length && this.addBlobs(hb, hs, hp, f, side ? side * f : null, false)) return;
+        if (hb.length && this.addBlobs(hb, hs, hp, f, side ? side * f : null, false)) { this.hiResFails = 0; return; }
+        this.hiResFails = Math.min(3, (this.hiResFails || 0) + 1);
       }
       this.asmFar = true; // the page says "move closer"
     }
@@ -2179,8 +2191,12 @@
           // (a photo is one sharp view: each block in it starts its own)
           if (g.occ.length >= (photo ? 6 : 8) && (photo || !this.asms.length || this.asmMiss >= 3)) {
             const A = new PH.Assembly(this.nextAsm = (this.nextAsm || 0) + 1);
+            A.born = now();
+            // One-off views that never lined up again (20 s) are dropped, and
+            // at most 3 are kept: every full search tries each of them.
+            this.asms = this.asms.filter((x) => x.place || x.views >= 2 || !x.born || now() - x.born < 20000);
             this.asms.push(A);
-            if (this.asms.length > 6) this.asms.sort((a, b) => (b.place ? 1e6 : 0) + b.views * 100 + b.cells.size - ((a.place ? 1e6 : 0) + a.views * 100 + a.cells.size)).length = 6;
+            if (this.asms.length > 3) this.asms.sort((a, b) => (b.place ? 1e6 : 0) + b.views * 100 + b.cells.size - ((a.place ? 1e6 : 0) + a.views * 100 + a.cells.size)).length = 3;
             this.asmMiss = 0;
             return { A, k: 0, di: 0, dj: 0, corr: 1, agree: 1, n: 0 };
           }

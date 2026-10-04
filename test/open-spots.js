@@ -27,7 +27,9 @@ function setup(cv, cols, rows, seed, block) {
   const inBlock = (p) => p.r >= block.r0 && p.r < block.r0 + block.rows && p.c >= block.c0 && p.c < block.c0 + block.cols && !block.missing.some(([r, c]) => r === p.r && c === p.c);
   const subset = P.pieces.map((p, i) => i).filter((i) => !inBlock(P.pieces[i]));
   const scat = S.scatter(cv, P, { scale: 2.2, seed: seed + 14, subset, blocks: [block] });
-  const eng = new PH.Engine();
+  // spotEveryMs 0: node runs frames far faster than a phone (~5-8 a second),
+  // so the live pacing (one assembly view per 0.4 s) would skip most stops.
+  const eng = new PH.Engine({ spotEveryMs: 0 });
   eng.setBox(box);
   return { P, box, scat, eng, B: scat.blocks[0], k: 2.2 * 48 };
 }
