@@ -2031,33 +2031,70 @@
      *  the view this frame lined up with. */
     findSpots(dets, seg, proc, still, photo) {
       this.spotView = null;
+      this.asmFar = false;
       if (!still) return;
       // The piece size from loose pieces is only a hint here: a view of just
       // the assembled block has none, and its own estimate can be the block.
       const unit = this.unitLive || seg.unitArea;
       const side = unit && unit < proc.w * proc.h * 0.05 ? Math.sqrt(unit) : null;
-      const blobs = dets.filter((d) => d.big || d.area > (side ? side * side * 3.5 : proc.w * proc.h * 0.06))
+      const pick = (ds, P, sd) => ds.filter((d) => d.big || d.area > (sd ? sd * sd * 3.5 : P.w * P.h * 0.06))
         .sort((x, y) => y.area - x.area).slice(0, photo ? 6 : 2);
+      const blobs = pick(dets, proc, side);
       if (!blobs.length) return;
       if (!PH.Assembly) return; // js/vision/assembly.js not loaded (some tests)
+      // Only sharp views build the assembled part: a motion-blurred one
+      // (owner's video: a quick sweep, most frames smeared) gives a wrong grid
+      // and lines up badly. Sharpness = lightness Laplacian spread, against
+      // the recent views' own (the print sets the level, not a fixed number).
+      if (!photo) {
+        const sh = this.frameSharpness(seg.lab, proc.w, proc.h);
+        const hist = this.sharpHist || (this.sharpHist = []);
+        hist.push(sh); if (hist.length > 40) hist.shift();
+        const ref = hist.slice().sort((a, b) => a - b)[Math.floor(hist.length * 0.75)];
+        this.lastSharp = { sh: +sh.toFixed(1), ref: +ref.toFixed(1) };
+        if (hist.length >= 5 && sh < ref * 0.6) { this.rejects.blurView = (this.rejects.blurView || 0) + 1; return; }
+      }
       if (!this.asms) this.asms = [];
-      let L = null;
+      if (this.addBlobs(blobs, seg, proc, 1, side, photo)) return;
+      // Nothing readable: far away the pieces are only ~10-15 px at the
+      // processing size (owner's video, whole puzzle in view), too few for
+      // tabs and blanks. The camera image has 2-3x the detail: look again at
+      // up to 1440 px (at most about once a second).
+      const S = this.frameCtx && this.frameCtx.source;
+      const hw = S ? Math.min(1440, Math.max(S.w, S.h)) : 0;
+      if (!photo && S && hw >= Math.max(proc.w, proc.h) * 1.4 && now() - (this.hiResAt || 0) > 1000) {
+        this.hiResAt = now();
+        const hp = S.getProc(hw), f = hp.w / proc.w;
+        const hs = PH.segment(hp, this.liveSegOpts({ still: true }, { split: false, unitArea: unit ? unit * f * f : null }));
+        const hb = pick(hs.dets, hp, side ? side * f : null);
+        if (hb.length && this.addBlobs(hb, hs, hp, f, side ? side * f : null, false)) return;
+      }
+      this.asmFar = true; // the page says "move closer"
+    }
+    /** Grid each blob (in image P, f x the processing size), line it up with
+     *  the assemblies and add it. True when at least one was added. */
+    addBlobs(blobs, seg, P, f, side, photo) {
+      let L = null, added = false;
       for (const d of blobs) {
-        const g = PH.sectionSpots(d, side, proc.w, proc.h, (seg.unitN || 0) >= 6);
-        if (PH.DEBUG_ASM) PH.DEBUG_ASM('grid', g ? (g.failed ? 'failed crisp ' + g.crisp.toFixed(2) + ' pitch ' + g.pitch.toFixed(1) : g.occ.length + ' filled ' + g.empty.length + ' empty crisp ' + g.crisp.toFixed(2) + ' pitch ' + g.pitch.toFixed(1)) : 'null', 'area', Math.round(d.area), 'big', !!d.big);
+        const g = PH.sectionSpots(d, side, P.w, P.h, (seg.unitN || 0) >= 6);
+        if (PH.DEBUG_ASM) PH.DEBUG_ASM('grid', 'x' + f.toFixed(2), g ? (g.failed ? 'failed crisp ' + g.crisp.toFixed(2) + ' pitch ' + g.pitch.toFixed(1) : g.occ.length + ' filled ' + g.empty.length + ' empty crisp ' + g.crisp.toFixed(2) + ' pitch ' + g.pitch.toFixed(1)) : 'null', 'area', Math.round(d.area), 'big', !!d.big);
         if (!g || g.failed || g.occ.length < 4) continue;
+        // Under ~16 px per piece tabs and blanks are a few pixels: the grid
+        // is a guess, and a wrong one would spoil the assembly.
+        if (g.pitch < 16) continue;
         // A clump of a few loose pieces touching each other is small and
         // ragged (solidity well under ~0.8); a small assembled block is
         // compact. Bigger ones count whatever their shape (a border run is an
         // L or a hollow ring).
         if (d.solidity < 0.78 && g.occ.length < 8) continue;
         if (!L) {
-          const cv = PH.cv, m = new cv.Mat(proc.h, proc.w, cv.CV_8UC1);
-          for (let p = 0, n = proc.w * proc.h; p < n; p++) m.data[p] = seg.lab[3 * p];
+          const cv = PH.cv, m = new cv.Mat(P.h, P.w, cv.CV_8UC1);
+          for (let p = 0, n = P.w * P.h; p < n; p++) m.data[p] = seg.lab[3 * p];
           cv.GaussianBlur(m, m, new cv.Size(0, 0), Math.max(0.8, g.pitch / 10));
           L = new Uint8Array(m.data); m.delete();
         }
-        const X = PH.gridPatches(g, g.occ, L, proc.w, proc.h), NP = PH.PATCH * PH.PATCH;
+        g.f = f; // this grid's image is f x the processing frame
+        const X = PH.gridPatches(g, g.occ, L, P.w, P.h), NP = PH.PATCH * PH.PATCH;
         const fc = g.occ.map(([i, j], n) => ({ i, j, filled: true, patch: X.subarray(n * NP, (n + 1) * NP) }))
           .concat(g.empty.map(([i, j]) => ({ i, j, filled: false, patch: null })));
         const reg = this.registerView(fc, g, photo);
@@ -2069,8 +2106,10 @@
         this.asmLast = { id: A.id, k: reg.k, di: reg.di, dj: reg.dj, g, t: now() };
         A.locate(this.box);
         this.asmDirty = true;
+        added = true;
         if (!this.spotView) this.spotView = { A, g, k: reg.k, di: reg.di, dj: reg.dj };
       }
+      return added;
     }
     /** Where an assembly lies on the table map (for the Map): when a view
      *  lines up with it while the pose is known, its cells' centres in the
@@ -2084,12 +2123,21 @@
       for (let n = 0; n < g.occ.length; n += step) {
         const [i, j] = g.occ[n];
         const [x, y] = g.toXY(g.u0 + (i + 0.5) * g.pitch, g.v0 + (j + 0.5) * g.pitch);
-        const [a, b] = PH.rotCell(reg.k, i, j);
-        P.push({ src: [a + reg.di + 0.5, b + reg.dj + 0.5], dst: PH.simApply(this.pose, x, y) });
+        const [a, b] = PH.rotCell(reg.k, i, j), f = g.f || 1;
+        P.push({ src: [a + reg.di + 0.5, b + reg.dj + 0.5], dst: PH.simApply(this.pose, x / f, y / f) });
       }
       if (P.length > 240) P.splice(0, P.length - 240);
       const r = P.length >= 6 ? PH.simRansac(P, (this.unitTable() || 30) * 0.4, 60, this.rnd) : null;
       if (r && r.inliers.length >= P.length * 0.5) A.tab.T = r.T;
+    }
+    /** Lightness Laplacian spread of the processing frame (every 2nd pixel). */
+    frameSharpness(lab, w, h) {
+      let s = 0, ss = 0, n = 0;
+      for (let y = 2; y < h - 2; y += 2) for (let x = 2; x < w - 2; x += 2) {
+        const p = y * w + x, v = 4 * lab[3 * p] - lab[3 * (p - 1)] - lab[3 * (p + 1)] - lab[3 * (p - w)] - lab[3 * (p + w)];
+        s += v; ss += v * v; n++;
+      }
+      return Math.sqrt(Math.max(0, ss / n - (s / n) ** 2));
     }
     /** Which assembly (and where in it) a view's cells belong to; a new
      *  assembly when nothing known overlaps. Two assemblies that one view
@@ -2105,7 +2153,8 @@
         // between steady views)
         const c = g.occ[g.occ.length >> 1];
         const [x, y] = g.toXY(g.u0 + (c[0] + 0.5) * g.pitch, g.v0 + (c[1] + 0.5) * g.pitch);
-        const [u, v] = last.g.toUV(x, y);
+        const k = (last.g.f || 1) / (g.f || 1); // into the last view's image size
+        const [u, v] = last.g.toUV(x * k, y * k);
         const ip = Math.floor((u - last.g.u0) / last.g.pitch), jp = Math.floor((v - last.g.v0) / last.g.pitch);
         const [ai, aj] = PH.rotCell(last.k, ip, jp);
         const near = [0, 1, 2, 3].map((k) => { const [a, b] = PH.rotCell(k, c[0], c[1]); return { di: ai + last.di - a, dj: aj + last.dj - b }; });
@@ -2245,8 +2294,10 @@
       return A.spotCache.list.map((sp) => {
         const [fi, fj] = PH.rotCell((4 - V.k) % 4, sp.i - V.di, sp.j - V.dj);
         const poly = [];
-        for (const [a, b] of [[fi, fj], [fi + 1, fj], [fi + 1, fj + 1], [fi, fj + 1]]) poly.push(...g.toXY(g.u0 + a * g.pitch, g.v0 + b * g.pitch));
-        const [cx, cy] = g.toXY(g.u0 + (fi + 0.5) * g.pitch, g.v0 + (fj + 0.5) * g.pitch);
+        const f = g.f || 1; // the grid's image -> the processing frame
+        for (const [a, b] of [[fi, fj], [fi + 1, fj], [fi + 1, fj + 1], [fi, fj + 1]]) { const q = g.toXY(g.u0 + a * g.pitch, g.v0 + b * g.pitch); poly.push(q[0] / f, q[1] / f); }
+        let [cx, cy] = g.toXY(g.u0 + (fi + 0.5) * g.pitch, g.v0 + (fj + 0.5) * g.pitch);
+        cx /= f; cy /= f;
         // needs in this view's directions (for drawing)
         const need = ['?', '?', '?', '?'];
         sp.need.forEach((t, d) => (need[(d - V.k + 4) % 4] = t));
@@ -2373,7 +2424,7 @@
         procW: proc.w, procH: proc.h, scale: proc.scale,
         dets: outDets, highlights: hl, links,
         tracking: !!this.pose, island: this.island,
-        spots: this.spotsOut(inv, byId), assembly: this.assemblyInfo(true),
+        spots: this.spotsOut(inv, byId), assembly: this.assemblyInfo(true), asmFar: !!this.asmFar,
         counts: this.counts(),
         bg: this.bg, thresh: this.thresh,
       };

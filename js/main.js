@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.18.0';
+const APP_VERSION = '0.18.1';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -121,6 +121,10 @@ function onWorkerMessage(e) {
       const changed = !pc || c.pieces !== pc.pieces || c.shaped !== pc.shaped || c.placed !== pc.placed;
       // The assembled part's box cells (sent only when they change): shaded on the box picture.
       if (m.assembly && m.assembly.boxCells) { S.asmCells = m.assembly.boxCells; drawMinimap(); }
+      // The assembled part is in view but too small to read its pieces' tabs.
+      const FAR = 'Move closer to read the assembled part (its pieces are too small to see their tabs)';
+      if (m.asmFar && S.mode === 'scan') $('modeHint').textContent = FAR;
+      else if ($('modeHint').textContent === FAR) $('modeHint').textContent = modeHint(S.mode);
       S.prevCounts = c;
       // The view itself moving must also wake the pump, and it has to be
       // judged from the picture, not the motion sensor: on iOS Chrome the
@@ -149,7 +153,7 @@ function onWorkerMessage(e) {
       updateStats(r.counts);
       break;
     }
-    case 'box': setBox(m.box); toast(`Box picture ready: ${m.box.cols} × ${m.box.rows} grid.` +
+    case 'box': setBox(m.box); setStatus(''); $('modeHint').textContent = modeHint(S.mode); toast(`Box picture ready: ${m.box.cols} × ${m.box.rows} grid.` +
       (m.box.srcPx && m.box.srcPx < 48 ? ` The photo is small for this many pieces (${m.box.srcPx} px per piece; 48+ is better) — retake it closer or fill the frame with the picture, or spots on the box will be rough.` : ''), m.box.srcPx && m.box.srcPx < 48 ? 8000 : 2500); break;
     case 'taught': showTaught(m.count); break;
     case 'boxCorners': if (m.corners) boxSetup.setCorners(m.corners); break;
@@ -1608,6 +1612,7 @@ window.__phSelectKind = (kind) => { setMode('find'); W.post({ type: 'selectKind'
 window.__phBorder = () => S.last && S.last.pframe; // test hook: the marked border in the last result
 window.__phCamPath = () => S.camPath || 'bitmap'; // test hook: how camera frames reach the worker
 window.__phTrap = () => W.post({ type: '__trap' }); // test hook: make the vision library "crash"
+window.__phBoxFull = () => { const b = boxSetup.bitmap; if (b) boxSetup.setCorners([[0, 0], [b.width, 0], [b.width, b.height], [0, b.height]]); return !!b; }; // test hook: the photo IS the picture
 window.__phAsm = () => { // test hook: the assembled part, and the screen point of an open spot with a box cell
   const sp = S.last && S.map && (S.last.spots || []).find((x) => x.cell);
   const r = overlay.getBoundingClientRect(), pt = sp ? S.map.toScreen(sp.cx, sp.cy) : null;

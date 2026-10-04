@@ -131,6 +131,8 @@ python tools/report-summary.py reports/puzzle-report-*.json   # speed per stage,
 node test/report-replay.js reports/<report>.json --draw       # re-run a report's frame with its settings -> test/out/
 node test/seg-lab.js --draw <photo.jpg> ...                   # compare segmentation option sets on real photos
 node test/flow-video.js <dir of fNNNN.jpg frames>              # motion tracker on frames from a real phone video
+node tools/video-frames.js reports/<video>.MOV test/fixtures/<dir> 4   # still frames from a phone video (decoded by Edge/Chrome, no ffmpeg)
+node tools/replay-video.js reports/<video>.MOV [box.jpg] [seconds] [pieces] [colsxrows]   # the real app on a phone video: what it catalogues and assembles, screenshots -> test/out/
 node test/shape-real.js <photo.jpg> 15 20 --autotilt          # shape reading on a real photo: outlines, flat edges, failures -> test/out/
 node test/real-box.js test/fixtures/<box>.jpg                 # real box picture: corners, grid, placement + matching + 2x2 loops
 node test/real-pieces.js test/fixtures/<photo>.jpg test/fixtures/<box>.jpg   # outlines found in a real photo -> test/out/

@@ -139,9 +139,11 @@
       const inp = this.placeInput();
       if (inp.cells.length < 6) return (this.place = null);
       const p = PH.placeOnBox(box, inp.cells, inp.X, inp.flats);
-      // a clear winner, or a strong one (right placements scored 0.3-0.6
-      // with margins of 0.1-0.35 on synthetic blocks; wrong ones trail)
-      const ok = p && ((p.score >= 0.3 && p.margin >= 0.08) || (p.score >= 0.45 && p.margin >= 0.04));
+      // A clear winner only: on a 1000-piece box some wrong offset always
+      // correlates fairly well, and a wrong placement is worse than none
+      // (owner's video: wrong-looking winners led by 0.04-0.05; right ones on
+      // synthetic blocks lead by 0.1-0.9).
+      const ok = p && ((p.score >= 0.45 && p.margin >= 0.08) || (p.score >= 0.3 && p.margin >= 0.15));
       this.place = ok ? { k: p.k, oc: p.oc, or: p.or, score: +p.score.toFixed(3), margin: +p.margin.toFixed(3), n: p.n } : null;
       return this.place;
     }
