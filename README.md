@@ -13,7 +13,10 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
   - **Matches:** search the whole catalog for pairs that fit, with no box picture needed, and step through them with ‹ ›. Tap **Fits** or **No** on each: the app keeps an answer key and shows its running accuracy under **More**.
   - **Box picture:** hide or show the small box picture when it's in the way.
 - **Map:** turns the camera off and shows every scanned piece from above, as its own picture at its place and angle on the table — so several people can work from one phone or iPad lying on the table. Drag to move, pinch to zoom, twist (or **↻ 90°**) to turn it toward you, **Fit** to see everything. Tap a piece for its matches (lines to its partners); Border, the finders and Matches work here too. Separate scan areas are shown side by side. Pieces moved since scanning: switch to Scan and sweep that area again.
-- **Area search:** tap the small box picture to enlarge it, then drag across a region (e.g. sky). Every piece from that area lights up. Tap the enlarged picture to shrink it again.
+- **Area search:** tap the small box picture to enlarge it, then drag across a region (e.g. sky). Every piece from that area lights up.
+- **Fill this spot:** on the enlarged box picture, tap one spot. The panel lists the loose pieces that best fill it — by the picture, and by how well their edges fit the pieces already around that spot (in testing the right piece came first 74 of 80 times, vs 64 by the picture alone) — and the best one glows gold on the table.
+- **Zones:** splits the box picture into six areas A–F and rings every piece in its area's colour: sort into six trays.
+- **Next along the border:** a border piece's panel names the next border piece on each side of it (right 108 of 120 times in testing).
 
 Everything runs on the phone. Nothing is uploaded, and the catalog is saved on the phone (IndexedDB).
 
@@ -101,6 +104,7 @@ node test/table-view.js      # Map: each piece's picture at its place, angle and
 node test/rectify-proc.js    # tilt-corrected frame: same bytes as the reference, and its time per frame
 node test/trust.js           # calibrated match probabilities, refit from answers, verdicts, In puzzle, top-edge arrow
 node test/capture-coach.js   # coach flags pale pieces on a white board; a dark cloth fixes them
+node test/solve-aids.js      # "fill this spot" ranks the right piece first; next piece along the border
 node tools/fit-calib.js      # refit the match-probability model's starting weights on synthetic puzzles
 node test/speed.js           # per-stage timing (VISION=<dir> runs another copy of js/vision to compare)
 ```

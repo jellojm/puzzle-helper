@@ -122,7 +122,7 @@ function sessionSummary() {
 function boxInfo() {
   const b = engine.box;
   if (!b) return null;
-  return { cols: b.cols, rows: b.rows, preview: b.preview };
+  return { cols: b.cols, rows: b.rows, preview: b.preview, srcPx: b.srcPx || null };
 }
 
 async function init(msg) {
@@ -228,7 +228,14 @@ const handlers = {
   },
   region(msg) {
     const n = engine.selectRegion(msg.c0, msg.r0, msg.c1, msg.r1);
-    post({ type: 'region', count: n, cells: [msg.c0, msg.r0, msg.c1, msg.r1] });
+    // One cell: "fill this spot" - the loose pieces ranked for it.
+    let fill = null;
+    if (msg.c0 === msg.c1 && msg.r0 === msg.r1) {
+      const f = engine.fillSpot(msg.c0, msg.r0, 8);
+      fill = Object.assign(f, { cands: f.cands.map((c) => { const Q = engine.pieces.get(c.id); return Object.assign(c, { thumb: Q.t1.thumb, corners: Q.t1.corners, sigs: Q.t1.edges.map((e) => e.sig), located: !!Q.pos }); }) });
+      engine.region = { c0: msg.c0, r0: msg.r0, c1: msg.c1, r1: msg.r1, ids: new Set(f.cands.slice(0, 5).map((c) => c.id)), best: f.cands.length ? f.cands[0].id : null };
+    }
+    post({ type: 'region', count: n, cells: [msg.c0, msg.r0, msg.c1, msg.r1], fill });
   },
   clearHighlights() { engine.selection = null; engine.region = null; engine.filter = null; engine.pairSel = null; },
   // Highlight a whole class of pieces (border / corner / unplaced / unread).

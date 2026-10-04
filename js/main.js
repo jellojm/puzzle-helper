@@ -1,10 +1,10 @@
 // Page controller: camera, frame pump to the vision worker, overlay, UI.
-import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COLORS } from './overlay.js';
+import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COLORS, ZONE_COLORS } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.12.0';
+const APP_VERSION = '0.13.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -133,7 +133,8 @@ worker.onmessage = (e) => {
       updateStats(r.counts);
       break;
     }
-    case 'box': setBox(m.box); toast(`Box picture ready: ${m.box.cols} × ${m.box.rows} grid.`); break;
+    case 'box': setBox(m.box); toast(`Box picture ready: ${m.box.cols} × ${m.box.rows} grid.` +
+      (m.box.srcPx && m.box.srcPx < 48 ? ` The photo is small for this many pieces (${m.box.srcPx} px per piece; 48+ is better) — retake it closer or fill the frame with the picture, or spots on the box will be rough.` : ''), m.box.srcPx && m.box.srcPx < 48 ? 8000 : 2500); break;
     case 'taught': showTaught(m.count); break;
     case 'boxCorners': if (m.corners) boxSetup.setCorners(m.corners); break;
     case 'frameMarked':
@@ -149,9 +150,12 @@ worker.onmessage = (e) => {
       toast(m.on ? `#${m.id} marked as in the puzzle — its spot won't be offered for other pieces. Tap the button again to undo.` : `#${m.id} is back among the loose pieces.`, 3500);
       if (S.mode === 'map') W.post({ type: 'mapData' });
       break;
-    case 'region': S.region = m.cells; toast(m.count ? `${m.count} catalogued pieces belong in that area.` : 'No catalogued pieces placed in that area yet.'); drawMinimap(); break;
+    case 'region': S.region = m.cells;
+      if (m.fill) showFill(m.fill);
+      else toast(m.count ? `${m.count} catalogued pieces belong in that area.` : 'No catalogued pieces placed in that area yet.');
+      drawMinimap(); break;
     case 'filter': {
-      const label = { corner: 'corner pieces', border: 'edge pieces', edges: 'border pieces (corners and edges)', unplaced: 'pieces not placed on the box', unread: 'pieces whose shape is unread' }[m.kind];
+      const label = { corner: 'corner pieces', border: 'edge pieces', edges: 'border pieces (corners and edges)', unplaced: 'pieces not placed on the box', unread: 'pieces whose shape is unread', zones: 'pieces with a spot on the box, ringed in the colour of their area (A–F on the box picture) — one tray per colour' }[m.kind];
       if (m.kind) toast(m.count ? `${m.count} ${label} highlighted. Arrows point to the nearest ones off screen.` : `No ${label} found yet — read more shapes first.`, 3500);
       S.needDraw = true;
       break;
@@ -607,6 +611,7 @@ function updateStats(c, tracking) {
   chip('border', c.border, 'Edges');
   chip('unplaced', Math.max(0, c.shaped - c.placed), 'Unplaced');
   chip('unread', Math.max(0, c.pieces - c.shaped), 'Unread');
+  chip('zones', S.box ? c.placed : 0, 'Zones');
   $('pairsBtn').disabled = c.shaped < 2;
   const dot = $('trackDot');
   if (tracking !== undefined) {
@@ -742,6 +747,7 @@ const SIDE = { T: 'tab', B: 'blank', F: 'flat edge' };
 const VERDICT = { strong: 'Strong match', likely: 'Likely', maybe: 'Maybe', weak: 'Unlikely', alike: 'Look-alike' };
 function showFind(desc) {
   S.desc = desc;
+  S.fillOpen = false;
   S.needDraw = true;
   drawMinimap();
   if (!desc) { closeFind(); return; }
@@ -791,6 +797,16 @@ function showFind(desc) {
     note.append(t);
     rows.append(note);
   }
+  if (desc.chain && desc.chain.length) {
+    const note = document.createElement('div');
+    note.className = 'edge-row';
+    note.innerHTML = '<h4><span class="sw" style="background:#35e0d8"></span> Next along the border</h4>';
+    const t = document.createElement('div');
+    t.className = 'empty';
+    t.textContent = desc.chain.map((c) => `edge ${c.edge + 1}: #${c.id} (${VERDICT[c.verdict] || ''} ${Math.round((c.prob || 0) * 100)}%${c.rank > 1 ? `, choice ${c.rank} overall but the best border piece` : ''})`).join(' · ');
+    note.append(t);
+    rows.append(note);
+  }
   desc.edges.forEach((e) => {
     const row = document.createElement('div');
     row.className = 'edge-row';
@@ -831,7 +847,7 @@ function showFind(desc) {
       const v = document.createElement('div');
       v.className = 'verdict';
       v.textContent = VERDICT[m.verdict] || '';
-      label.textContent = `#${m.id} · ${Math.round((m.prob || 0) * 100)}%${m.loopOk ? ' · 2×2 ✓' : m.mutual ? ' · picks it too' : m.adj > 0.3 ? ' · box ✓' : ''}${m.confirmed ? '' : ' · ?'}`;
+      label.textContent = `#${m.id} · ${Math.round((m.prob || 0) * 100)}%${m.loops >= 2 ? ' · 2×3 ✓' : m.loopOk ? ' · 2×2 ✓' : m.mutual ? ' · picks it too' : m.adj > 0.3 ? ' · box ✓' : ''}${m.confirmed ? '' : ' · ?'}`;
       label.prepend(v);
       label.title = (m.located ? '' : 'Not on the table map right now. ') + (m.confirmed ? '' : 'Its shape has been read only once (dashed frame).');
       const acts = document.createElement('div');
@@ -848,12 +864,44 @@ function showFind(desc) {
     if (e.loop && e.matches[0] && e.matches[0].loopOk) {
       const note = document.createElement('div');
       note.className = 'empty';
-      note.textContent = `Confirmed: #${e.loop.partner}, #${e.loop.others[0]} and #${e.loop.others[1]} close a 2×2 block with this piece.`;
+      note.textContent = `Confirmed: #${e.loop.partner}, #${e.loop.others[0]} and #${e.loop.others[1]} close a 2×2 block with this piece.` +
+        (e.matches[0].loops >= 2 ? ' Another 2×2 block closes on the other side of the seam too (a 2×3 block) — very strong evidence.' : '');
       row.append(note);
     }
     rows.append(row);
   });
 }
+// "Fill this spot": one box cell picked on the box picture - the loose pieces
+// ranked for it (print + fit with the pieces already around it).
+function showFill(f) {
+  $('inPuzzleBtn').hidden = true; $('uprightBox').hidden = true;
+  const ctx = $('selThumb').getContext('2d');
+  ctx.clearRect(0, 0, 72, 72); ctx.fillStyle = '#ff4fd8'; ctx.fillRect(8, 8, 56, 56);
+  $('selTitle').textContent = `Spot: column ${f.col + 1}, row ${f.row + 1}`;
+  $('selSub').textContent = f.cands.length ? `Best pieces for this spot (gold on the table, the rest pink)${f.neighbours ? ` — checked against ${f.neighbours} piece${f.neighbours > 1 ? 's' : ''} already around it` : ' — by the picture only (no neighbours known yet)'}` : 'No catalogued piece fits here yet — scan more pieces.';
+  const rows = $('edgeRows');
+  rows.innerHTML = '';
+  const list = document.createElement('div');
+  list.className = 'cands';
+  f.cands.forEach((m, i) => {
+    const c = document.createElement('div');
+    c.className = 'cand ' + (i === 0 ? 'gold' : 'silver');
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 144;
+    drawThumb(cv, m, null);
+    const label = document.createElement('div');
+    label.textContent = `#${m.id}${m.of ? ` · fits ${m.fits} of ${m.of}` : ''}${m.print ? ' · picture ✓' : ''}${m.located ? '' : ' · ?'}`;
+    c.append(cv, label);
+    list.append(c);
+  });
+  rows.append(list);
+  $('findPanel').hidden = false;
+  $('menu').hidden = true;
+  S.desc = null; // not a piece: nothing else reads it
+  S.fillOpen = true; // closing the panel also clears the spot's highlights
+  S.needDraw = true;
+}
+
 // An assembled section: where it sits on the box and which scanned loose
 // pieces attach to it (they glow gold on the table).
 function showSection(desc) {
@@ -929,6 +977,7 @@ window.__phMapState = () => { // test hook; size = drawn side / one piece, per d
 function closeFind() {
   $('findPanel').hidden = true;
   if (S.desc) { S.desc = null; W.post({ type: 'select', id: null }); }
+  if (S.fillOpen) { S.fillOpen = false; S.region = null; W.post({ type: 'clearHighlights' }); }
   if (S.mode === 'map') mapApplyFilter();
   drawMinimap();
 }
@@ -961,6 +1010,7 @@ function setFilter(kind) {
   showBorderBtn();
   if (next) { closeFind(); closeMatches(); }
   if (S.mode === 'map') mapApplyFilter();
+  drawMinimap(); // Zones tints the box picture
   W.post({ type: 'filter', kind: next });
 }
 $('findBar').querySelectorAll('[data-filter]').forEach((b) => (b.onclick = () => setFilter(b.dataset.filter)));
@@ -1057,6 +1107,18 @@ function drawMinimap() {
   ctx.drawImage(img, 0, 0, cssW, cssH);
   const cw = cssW / b.cols, ch = cssH / b.rows;
   const cell = (c, r, color, width) => { ctx.strokeStyle = color; ctx.lineWidth = width; ctx.strokeRect(c * cw, r * ch, cw, ch); };
+  if (S.filter === 'zones') {
+    const [zc, zr] = b.cols >= b.rows ? [3, 2] : [2, 3]; // PH.zoneGrid
+    ctx.font = 'bold 14px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (let zy = 0; zy < zr; zy++) for (let zx = 0; zx < zc; zx++) {
+      const z = zx + zy * zc, x0 = Math.ceil((zx * b.cols) / zc) * cw, x1 = Math.ceil(((zx + 1) * b.cols) / zc) * cw;
+      const y0 = Math.ceil((zy * b.rows) / zr) * ch, y1 = Math.ceil(((zy + 1) * b.rows) / zr) * ch;
+      ctx.globalAlpha = 0.28; ctx.fillStyle = ZONE_COLORS[z]; ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      ctx.globalAlpha = 1; ctx.strokeStyle = ZONE_COLORS[z]; ctx.lineWidth = 2; ctx.strokeRect(x0 + 1, y0 + 1, x1 - x0 - 2, y1 - y0 - 2);
+      ctx.fillStyle = '#000'; ctx.fillText('ABCDEF'[z], (x0 + x1) / 2 + 1, (y0 + y1) / 2 + 1);
+      ctx.fillStyle = '#fff'; ctx.fillText('ABCDEF'[z], (x0 + x1) / 2, (y0 + y1) / 2);
+    }
+  }
   if (S.region) {
     const [c0, r0, c1, r1] = S.region;
     ctx.fillStyle = 'rgba(255,79,216,0.25)';
@@ -1114,10 +1176,11 @@ minimap.addEventListener('pointermove', (e) => {
 minimap.addEventListener('pointerup', () => {
   if (!mmStart) return;
   let [c0, r0, c1, r1] = S.dragCells;
-  if (c0 === c1 && r0 === r1) {
-    // Single tap: small -> enlarge; enlarged -> shrink back out of the way.
-    // (Dragging across it, at either size, lights up pieces from that area.)
-    minimap.classList.toggle('big');
+  if (c0 === c1 && r0 === r1 && !minimap.classList.contains('big')) {
+    // Tap on the small picture: enlarge it. On the enlarged one a tap picks
+    // that spot ("fill this spot": the best loose pieces for it), and
+    // dragging across it, at either size, lights up pieces from that area.
+    minimap.classList.add('big');
     mmStart = null; S.dragCells = null; drawMinimap();
     return;
   }

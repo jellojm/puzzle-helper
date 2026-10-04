@@ -61,12 +61,12 @@ function samples(cv, seed, scale, withBox) {
     for (const r of res) {
       // where edge k points in the solved puzzle: [dc, dr]
       const da = dirOf(p, r.edge, a.rot);
-      r.matches.slice(0, 3).forEach((m) => {
+      r.matches.slice(0, 3).forEach((m, rank) => {
         const q = eng.pieces.get(m.id);
         if (!gtOf.has(m.id)) return;
         const b = gtOf.get(m.id), db = dirOf(q, m.edge, b.rot);
         const y = b.c === a.c + da[0] && b.r === a.r + da[1] && db[0] === -da[0] && db[1] === -da[1];
-        out.push({ x: m.x.slice(), y: y ? 1 : 0, pSoft: m.pSoft });
+        out.push({ x: m.x.slice(), y: y ? 1 : 0, pSoft: m.pSoft, rank, score: m.score });
       });
     }
   }
@@ -96,11 +96,18 @@ function report(label, S, w) {
   console.log(`train ${train.length} candidates (${train.filter((s) => s.y).length} true), test ${test.length} (${test.filter((s) => s.y).length} true)`);
   // Neutral start; 'confirmed' never varies in photo catalogues (one view
   // each), so it keeps this value - a modest bonus for shapes seen twice.
-  const neutral = [0, 1, 0, 0, 0, 0.5, 0, 0];
+  const neutral = [0, 1, 0, 0, 0, 0.5, 0, 0, 0];
   const w = PH.fitCalib(train, neutral, 1, 30);
   console.log('weights', PH.CALIB_FEATURES.map((f, i) => `${f} ${w[i].toFixed(2)}`).join(', '));
   report('softmax only (test)', test, null);
   report('current prior (test)', test, PH.CALIB_PRIOR);
   report('fitted (test)', test, w);
+  if (process.env.ADJ) { const T = train.concat(test); const m = (f) => { const S = T.filter(f); return (S.reduce((t, s) => t + s.x[6], 0) / Math.max(1, S.length)).toFixed(3) + ' over ' + S.length + ', >0: ' + S.filter((s) => s.x[6] > 0).length; }; console.log('box adjacency mean: true partners', m((s) => s.y), '| wrong', m((s) => !s.y)); }
+  // how often the best-scored candidate is the true partner (matching quality itself)
+  const tops = train.concat(test).filter((s) => s.x && s.rank === 0);
+  console.log(`top suggestion right: ${tops.filter((s) => s.y).length}/${tops.length} (${(100 * tops.filter((s) => s.y).length / tops.length).toFixed(1)}%)`);
+  // precision by evidence (all candidates, train + test)
+  const all = train.concat(test), prec = (f) => { const S = all.filter(f), n = S.filter((s) => s.y).length; return `${n}/${S.length}`; };
+  console.log(`right: mutual ${prec((s) => s.x[3])}, one 2x2 loop ${prec((s) => s.x[4] && !s.x[8])}, 2x3 (loops on both sides) ${prec((s) => s.x[8])}, mutual + 2x3 ${prec((s) => s.x[3] && s.x[8])}, neither ${prec((s) => !s.x[3] && !s.x[4])}`);
   console.log(`PH.CALIB_PRIOR = [${w.map((v) => +v.toFixed(2)).join(', ')}];`);
 })();

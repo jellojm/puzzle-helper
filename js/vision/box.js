@@ -48,9 +48,73 @@
     const preview = { w: prev.cols, h: prev.rows, data: new Uint8ClampedArray(prev.data) };
     [src, from, to, M, warped, prev].forEach((m) => m.delete());
 
-    const box = { cols, rows, S, W, H, lab, preview };
+    // Box-photo pixels per piece side: below ~48 placement gets unreliable
+    // (Piece Finder's threshold); the page warns.
+    const srcPx = Math.min((d(corners[0], corners[1]) + d(corners[3], corners[2])) / 2 / cols, (d(corners[0], corners[3]) + d(corners[1], corners[2])) / 2 / rows);
+    const box = { cols, rows, S, W, H, lab, preview, srcPx: Math.round(srcPx) };
     PH.computeCells(box);
     return box;
+  };
+
+  /** Sorting zones (tray sorting, PuzAI's main feature): the box picture in
+   *  6 areas - 3 x 2, or 2 x 3 for a tall box - lettered A-F in reading
+   *  order. A piece's zone is the area of its box spot. */
+  PH.zoneGrid = (box) => (box.cols >= box.rows ? [3, 2] : [2, 3]);
+  PH.zoneOf = function (box, col, row) {
+    const [zc, zr] = PH.zoneGrid(box);
+    return Math.min(zc - 1, Math.floor((col * zc) / box.cols)) + Math.min(zr - 1, Math.floor((row * zr) / box.rows)) * zc;
+  };
+
+  /**
+   * One piece per cell: assign pieces to box cells so the total placement
+   * score is (near) lowest, each cell holding at most one piece. Each piece
+   * only bids for its own candidate cells plus a private "not placed" option
+   * costing `none[i]`. Forward auction (Bertsekas), within n*eps of optimal: sparse,
+   * so it stays fast for 1000 pieces x 6 candidates.
+   * @param arcs  per piece: [{key, score}] (key = 'col,row'; lower score = better)
+   * @param none  per piece: cost of leaving it unassigned
+   * @returns per piece: the assigned key or null
+   * On synthetic puzzles the optimal assignment lifted top-1 placement from
+   * 84.2% to 87.3% (greedy, most confident first: no gain).
+   */
+  PH.assignCells = function (arcs, none) {
+    const n = arcs.length, keys = new Map();
+    // one arc per cell per piece (its best score there): a cell listed twice
+    // (two rotations) would make the "second best" the same cell, and the
+    // bid increment - the gap between them - meaningless
+    const A = arcs.map((list) => {
+      const best = new Map();
+      for (const a of list) {
+        let j = keys.get(a.key);
+        if (j === undefined) { j = keys.size; keys.set(a.key, j); }
+        if (!best.has(j) || -a.score > best.get(j)) best.set(j, -a.score);
+      }
+      return [...best].map(([j, b]) => ({ j, b }));
+    });
+    const M = keys.size;
+    A.forEach((list, i) => list.push({ j: M + i, b: -none[i] })); // private "not placed"
+    // One round at a fine step from zero prices. (eps-scaling keeps prices
+    // between rounds, which is only right when every object must be taken;
+    // with private "not placed" options it pushed ~60 of 96 pieces there.)
+    const price = new Float64Array(M + n), owner = new Int32Array(M + n).fill(-1), asg = new Int32Array(n).fill(-1);
+    const eps = 0.003, queue = [];
+    for (let i = n - 1; i >= 0; i--) queue.push(i);
+    let guard = 0;
+    while (queue.length && guard++ < 5000000) {
+      const i = queue.pop();
+      let b1 = -Infinity, b2 = -Infinity, j1 = -1;
+      for (const a of A[i]) {
+        const v = a.b - price[a.j];
+        if (v > b1) { b2 = b1; b1 = v; j1 = a.j; } else if (v > b2) b2 = v;
+      }
+      if (b2 === -Infinity) b2 = b1 - 1;
+      price[j1] += b1 - b2 + eps;
+      const prev = owner[j1];
+      owner[j1] = i; asg[i] = j1;
+      if (prev >= 0) { asg[prev] = -1; queue.push(prev); }
+    }
+    const back = [...keys.keys()];
+    return Array.from(asg, (j) => (j >= 0 && j < M ? back[j] : null));
   };
 
   /** Guess the 4 corners (TL, TR, BR, BL) of the picture in a lid photo:

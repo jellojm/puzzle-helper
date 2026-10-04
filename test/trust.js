@@ -115,6 +115,28 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
     eng.version++;
   }
 
+  // 3a. one piece per cell (joint assignment after the photo)
+  {
+    const tops = [...eng.pieces.values()].filter((p) => p.t2 && p.t2.cands.length).map((p) => p.t2.cands[0].col + ',' + p.t2.cands[0].row);
+    check('no two pieces are given the same box spot', tops.length > 20 && new Set(tops).size === tops.length, `${tops.length} placed, ${tops.length - new Set(tops).size} sharing`);
+  }
+
+  // 3b. sorting zones: right area much more often than right cell
+  {
+    let n = 0, cell = 0, zone = 0;
+    for (const p of eng.pieces.values()) {
+      const g = gtOf.get(p.id);
+      if (!g || !p.t2 || !p.t2.cands.length || p.t2.conf < 0.2) continue;
+      const c = p.t2.cands[0];
+      n++; if (c.col === g.c && c.row === g.r) cell++;
+      if (PH.zoneOf(box, c.col, c.row) === PH.zoneOf(box, g.c, g.r)) zone++;
+    }
+    eng.setFilter('zones');
+    const lit = eng.filterIds().length;
+    eng.setFilter(null);
+    check('sorting zones: pieces go to the right tray', n >= 20 && zone / n >= 0.9 && zone >= cell && lit === n, `right zone ${zone}/${n} (right cell ${cell}/${n}); ${lit} lit`);
+  }
+
   // 3. "In the puzzle"
   {
     const placed = [...eng.pieces.values()].filter((p) => p.t2 && p.t2.conf >= 0.35 && p.t2.cands.length);

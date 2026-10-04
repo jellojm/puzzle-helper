@@ -1,6 +1,8 @@
 // Drawing on the camera overlay, plus small canvas helpers for thumbnails.
 
 export const EDGE_COLORS = ['#ff6b6b', '#4dd0e1', '#ffd54f', '#b388ff'];
+// Sorting zones A-F (PH.zoneOf): the same colours on the camera view, the Map and the box picture.
+export const ZONE_COLORS = ['#ff6b6b', '#4dd0e1', '#ffd54f', '#b388ff', '#3ddc84', '#ff8c3a'];
 const STATUS = {
   unknown: { stroke: 'rgba(255,255,255,0.45)', dash: [4, 4] },
   seen: { stroke: '#aab2bb', dash: [] },
@@ -143,7 +145,7 @@ export function drawOverlay(ctx, res, M, opts) {
   // wide ring under a bright thin one reads the same and costs nothing.
   const pulse = 0.6 + 0.4 * Math.sin(t * 5);
   for (const h of res.highlights) {
-    const style = ROLE[h.role];
+    const style = h.role === 'zone' ? { color: ZONE_COLORS[h.zone] || '#fff', width: 4 } : ROLE[h.role];
     const d = byId.get(h.id);
     if (h.visible && d) {
       if (marks) {

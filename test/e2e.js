@@ -194,6 +194,26 @@ function writePng(file, mat) {
     check('Border button lights up corners + edges and toggles off', borderOn.pressed === 'true' && /border pieces/.test(borderOn.toast) && borderOff === 'false', `${borderOn.toast} | off: ${borderOff}`);
     check('Snap is off the toolbar (kept under More)', await page.evaluate(() => !document.querySelector('#toolbar #snapBtn') && !!document.querySelector('#menu #snapBtn')));
 
+    // Zones (tray sorting) and "fill this spot" on the enlarged box picture.
+    await page.click('#toolbar [data-mode="find"]').catch(() => {});
+    await page.click('#findBar [data-filter="zones"]');
+    await page.waitForTimeout(800);
+    const zones = await page.evaluate(() => ({ on: document.querySelector('#findBar [data-filter="zones"]').classList.contains('on'), toast: document.getElementById('toast').textContent }));
+    await page.click('#findBar [data-filter="zones"]');
+    check('Zones lights pieces by area of the box', zones.on && /colour of their area/.test(zones.toast), zones.toast.slice(0, 90));
+    const mm = await page.$('#minimap');
+    if (mm && await mm.isVisible()) {
+      let b = await mm.boundingBox();
+      await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2); // enlarge
+      await page.waitForTimeout(400);
+      b = await mm.boundingBox();
+      await page.mouse.click(b.x + b.width * 0.5, b.y + b.height * 0.5); // pick the middle spot
+      const ok = await page.waitForFunction(() => !document.getElementById('findPanel').hidden && /^Spot: column/.test(document.getElementById('selTitle').textContent), null, { timeout: 6000 }).then(() => true).catch(() => false);
+      const info = ok ? await page.evaluate(() => `${document.getElementById('selTitle').textContent} | ${document.querySelectorAll('#edgeRows .cand').length} pieces`) : 'panel did not open';
+      check('Fill this spot: tapping a spot lists pieces for it', ok && /[1-9]\d* pieces/.test(info), info);
+      await page.click('#closeFind').catch(() => {});
+    } else check('Fill this spot: tapping a spot lists pieces for it', false, 'box picture not visible');
+
     // Mark the finished border: aim, capture, Use (the default corners are
     // fine here: what matters is that the view is learned and found again).
     await page.click('#menuBtn');
@@ -211,6 +231,7 @@ function writePng(file, mat) {
     const seen = await page.waitForFunction(() => { const b = window.__phBorder(); return b && b.visible; }, null, { timeout: 15000, polling: 200 }).then(() => true).catch(() => false);
     check('Mark border: found again in the live view', seen, JSON.stringify(await page.evaluate(() => window.__phBorder())).slice(0, 120));
     await page.evaluate(() => window.__phSelectStatus('placed'));
+    await page.waitForFunction(() => !document.getElementById('findPanel').hidden && /^Piece #/.test(document.getElementById('selTitle').textContent), null, { timeout: 10000 }).catch(() => {});
     const spot = await page.waitForFunction(() => { const b = window.__phBorder(); return b && b.target; }, null, { timeout: 15000, polling: 200 }).then(() => true).catch(() => false);
     check('Mark border: a selected piece gets its spot inside the border', spot, JSON.stringify(await page.evaluate(() => window.__phBorder())).slice(0, 120));
     const peekShown = await page.evaluate(() => !document.getElementById('findPeek').hidden);

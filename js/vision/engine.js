@@ -606,6 +606,7 @@
       out.rect = st.rect ? { H: st.rect.H, Hinv: st.rect.Hinv, tilt: PH.tiltDeg(info.tilt.down) } : null;
       out.pframe = this.puzzleFrameOut(proc, pfFound);
       out.coach = this.coachNow;
+      if (this.cellsDirty && now() - (this.cellsAt || 0) > 2000) this.assignCellsNow();
       out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2, border: this.pfMs || 0 };
       this.pfMs = 0;
       for (const k in segT) out.timings['seg_' + k] = segT[k];
@@ -661,6 +662,7 @@
       const merged = this.mergeIslandsByShape(dets);
       this.assign(dets, unitF, proc);
       const work = this.runQueue(dets, Infinity);
+      if (this.cellsDirty) this.assignCellsNow();
       Object.assign(this, saved);
       return {
         found: dets.filter((d) => d.id).length,
@@ -845,6 +847,7 @@
         out.push({
           id: p.id, kind: p.kind || 'piece', pos: p.pos, island: p.island, rd: p.rd || null, missing: !!p.missing,
           inPuzzle: !!p.inPuzzle, upT: (this.upOf(p) || {}).vt || null,
+          zone: this.box && p.t2 && p.t2.cands.length && p.t2.conf >= 0.2 ? PH.zoneOf(this.box, p.t2.cands[0].col, p.t2.cands[0].row) : null,
           area: p.area, shaped: !!t1, placed: !!(p.t2 && p.t2.conf >= 0.35), confirmed: shapeConfirmed(p),
           border: f.border && !f.corner, corner: f.corner && !doubt.has(p.id),
           thumb: pic ? pic.thumb : t1 ? t1.thumb : null, corners: pic ? pic.corners : t1 ? t1.corners : null,
@@ -1247,7 +1250,8 @@
           if (done.has(p.id) || !p.t1 || p.t2 || p.kind === 'section') continue;
           done.add(p.id);
           if (n2 >= 2 && now() > deadline) break;
-          p.t2 = this.withoutTaken(p, PH.placePiece(this.box, p.t1, cal) || { cands: [], conf: 0, failed: true });
+          p.t2 = PH.placePiece(this.box, p.t1, cal) || { cands: [], conf: 0, failed: true };
+          this.cellsDirty = true;
           this.touch(p);
           n2++;
         }
@@ -1357,19 +1361,52 @@
       }
       return m;
     }
-    /** A piece's box placement with cells already taken by placed pieces
-     *  removed (Piece Finder's "mark as placed" idea): the full placement is
-     *  kept in .orig so un-marking restores it. */
-    withoutTaken(p, t2, taken) {
-      if (!t2 || t2.failed) return t2;
-      const base = t2.orig || t2;
-      if (p.inPuzzle) return base;
-      taken = taken || this.takenCells();
-      const cands = base.cands.filter((c) => { const id = taken.get(c.col + ',' + c.row); return !id || id === p.id; });
-      if (cands.length === base.cands.length) return base;
-      if (!cands.length) return { cands: [], conf: 0, tex: base.tex, orig: base };
-      const s1 = cands[0].score, other = cands.find((s) => Math.abs(s.col - cands[0].col) + Math.abs(s.row - cands[0].row) > 1);
-      return { cands, conf: other ? PH.clamp((other.score - s1) / 0.25, 0, 1) : 0.5, tex: base.tex, orig: base };
+    /** Box cell rules over the whole catalog, from each piece's own placement
+     *  (kept in t2.orig when changed, so this can always be redone):
+     *  - cells held by pieces marked in the puzzle are out (Piece Finder's
+     *    "mark as placed");
+     *  - one piece per cell: a joint assignment (PH.assignCells) puts each
+     *    piece in its best cell that no better-fitting piece needs. A piece
+     *    that loses its first choice keeps the rest of its list, with its
+     *    confidence recomputed (often "several spots look alike").
+     *  Cheap (sparse auction); run after placements change (cellsDirty). */
+    assignCellsNow() {
+      this.cellsDirty = false;
+      this.cellsAt = now();
+      const taken = this.takenCells();
+      const items = [];
+      for (const p of this.pieces.values()) {
+        if (!p.t2 || p.t2.failed || p.kind === 'section') continue;
+        const base = p.t2.orig || p.t2;
+        if (p.inPuzzle) { if (p.t2 !== base) { p.t2 = base; this.touch(p); } continue; }
+        const cands = base.cands.filter((c) => { const id = taken.get(c.col + ',' + c.row); return !id || id === p.id; });
+        items.push({ p, base, cands });
+      }
+      const keyOf = (c) => c.col + ',' + c.row;
+      const res = PH.assignCells(items.map((it) => it.cands.map((c) => ({ key: keyOf(c), score: c.score }))),
+        items.map((it) => (it.cands.length ? it.cands[it.cands.length - 1].score + 0.5 : 0)));
+      let changed = 0;
+      items.forEach((it, i) => {
+        const { p, base } = it;
+        let cands = it.cands;
+        const k = res[i], at = k ? cands.findIndex((c) => keyOf(c) === k) : -1;
+        if (at > 0) cands = [cands[at], ...cands.slice(0, at), ...cands.slice(at + 1)];
+        let t2 = base;
+        if (cands.length !== base.cands.length || at > 0) {
+          if (!cands.length) t2 = { cands: [], conf: 0, tex: base.tex, orig: base };
+          else {
+            const s1 = cands[0].score, other = cands.find((s) => Math.abs(s.col - cands[0].col) + Math.abs(s.row - cands[0].row) > 1);
+            // lost its first choice to a better-fitting piece: never surer than before
+            const conf = Math.min(base.conf, other ? PH.clamp((other.score - s1) / 0.25, 0, 1) : 0.5);
+            t2 = { cands, conf, tex: base.tex, orig: base };
+          }
+        }
+        const was = p.t2 && p.t2.cands[0], now0 = t2.cands[0];
+        if (p.t2 !== t2 && (!was !== !now0 || (was && now0 && keyOf(was) !== keyOf(now0)) || p.t2.cands.length !== t2.cands.length)) changed++;
+        if (p.t2 !== t2) { p.t2 = t2; this.touch(p); }
+      });
+      if (changed) this.version++;
+      return changed;
     }
     /** Mark (or un-mark) a piece as physically in the puzzle. Its box cell
      *  leaves every other piece's candidates, Border and the finders skip it,
@@ -1378,13 +1415,7 @@
       const P = this.pieces.get(id);
       if (!P || P.kind === 'section') return false;
       P.inPuzzle = on ? Date.now() : 0;
-      if (P.t2) P.t2 = this.withoutTaken(P, P.t2);
-      const taken = this.takenCells();
-      for (const q of this.pieces.values()) {
-        if (q === P || !q.t2) continue;
-        const t = this.withoutTaken(q, q.t2, taken);
-        if (t !== q.t2) { q.t2 = t; this.touch(q); }
-      }
+      this.assignCellsNow();
       this.touch(P);
       this.version++;
       return true;
@@ -1406,6 +1437,25 @@
      *  edge k faces box side (k + rot) % 4, 0 = top), and that edge's outward
      *  direction on the table map (table units) when its read placement
      *  allows (not after the piece moved). null without a confident spot. */
+    /** Frame chain: for a border piece, the next border piece along the frame
+     *  on each side - the best candidate on an edge next to its flat edge that
+     *  is itself a border piece with its flat edge on the same side (frame
+     *  first, as in Zolver / pondruska's FrameSolver). Joining P's edge f+1 to
+     *  Q's edge m puts Q's flat at m+1 (and f-1 / m-1). */
+    chainFor(P, res) {
+      if (!P.t1 || !res) return [];
+      const E = P.t1.edges, out = [];
+      for (let f = 0; f < 4; f++) {
+        if (E[f].type !== 'F' || E[f].unc) continue;
+        for (const s of [1, 3]) {
+          const k = (f + s) % 4;
+          if (E[k].type === 'F' || !res[k] || P.joined[k]) continue;
+          const m = res[k].matches.find((c) => { const Q = this.pieces.get(c.id); const g = Q && Q.t1 && Q.t1.edges[(c.edge + s) % 4]; return g && g.type === 'F' && !g.unc; });
+          if (m) out.push({ edge: k, id: m.id, edgeB: m.edge, prob: m.prob, verdict: m.verdict, rank: res[k].matches.indexOf(m) + 1 });
+        }
+      }
+      return out;
+    }
     upOf(P) {
       const t2 = P.t2;
       if (!P.t1 || !t2 || !t2.cands.length || t2.conf < 0.35) return null;
@@ -1470,7 +1520,7 @@
             mutual = !!back && back.id === P.id && back.edge === r.edge;
           }
           m.mutual = mutual;
-          m.x = PH.candFeatures({ pSoft: m.pSoft, lead, mutual, loop: m.loopOk, confirmed: confP && shapeConfirmed(Q), adj: m.adj,
+          m.x = PH.candFeatures({ pSoft: m.pSoft, lead, mutual, loop: m.loopOk, loops: m.loops || 0, confirmed: confP && shapeConfirmed(Q), adj: m.adj,
             unsure: P.t1.edges[r.edge].type === 'F' || Q.t1.edges[m.edge].type === 'F' });
           m.prob = PH.calibProb(w, m.x);
         });
@@ -1579,9 +1629,58 @@
       return {
         piece: brief(P),
         attach: this.attachmentsOf(P),
+        chain: this.chainFor(P, res),
         status: !P.t1 ? 'Hold steady over this piece to read its shape' : null,
-        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, unc: !!(P.t1.edges[r.edge] && P.t1.edges[r.edge].unc), joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, mutual: !!m.mutual, verdict: m.verdict, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
+        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, unc: !!(P.t1.edges[r.edge] && P.t1.edges[r.edge].unc), joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, loops: m.loops || 0, mutual: !!m.mutual, verdict: m.verdict, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
       };
+    }
+    /** "Fill this spot" (a cheaper stand-in for PuzPal's gap scan): rank the
+     *  loose pieces for one box cell by how well their print matches it (their
+     *  own placement score there, any rotation) and how well their edges fit
+     *  the pieces already around it - marked in the puzzle, or confidently
+     *  placed on a neighbouring cell - each in the rotation the cell implies.
+     *  Late in a puzzle the pool is small and shape decides. */
+    fillSpot(col, row, topN) {
+      const D = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+      const nb = [];
+      for (const q of this.pieces.values()) {
+        if (!q.t1 || !q.t2 || !q.t2.cands.length || q.kind === 'section') continue;
+        const c = q.t2.cands[0];
+        if (!q.inPuzzle && q.t2.conf < 0.35) continue;
+        for (let d = 0; d < 4; d++) if (c.col === col + D[d][0] && c.row === row + D[d][1]) nb.push({ q, d, rot: c.rot });
+      }
+      const nbRes = new Map(nb.map((n) => [n.q.id, this.matchesFor(n.q.id)]));
+      const out = [];
+      for (const p of this.pieces.values()) {
+        if (!p.t1 || p.inPuzzle || p.kind === 'section') continue;
+        const base = p.t2 ? p.t2.orig || p.t2 : null;
+        const own = base ? base.cands.filter((c) => c.col === col && c.row === row) : [];
+        // print: how much worse this cell is than the piece's own best spot
+        // (raw placement scores carry a per-piece texture offset, so only
+        // differences within one piece compare); unlisted = worse than its list
+        const s0 = base && base.cands.length ? base.cands[0].score : 0;
+        const worst = base && base.cands.length ? base.cands[base.cands.length - 1].score - s0 + 0.3 : 1;
+        const rots = own.length ? own.map((c) => ({ rot: c.rot, print: c.score - s0 })) : [0, 1, 2, 3].map((rot) => ({ rot, print: worst }));
+        let best = null;
+        for (const { rot, print } of rots) {
+          // fit: how likely p is each neighbour's partner on the edge facing
+          // the spot (its calibrated match list; not listed = 1%)
+          let fit = 0, ok = 0;
+          for (const n of nb) {
+            if (n.q === p) continue;
+            const k = (n.d - rot + 8) % 4, e = (n.d + 2 - n.rot + 8) % 4; // p's edge toward n, n's edge back
+            const lst = nbRes.get(n.q.id), r = lst && lst[e];
+            const m = r && r.matches.find((x) => x.id === p.id && x.edge === k);
+            const pr = m ? Math.max(0.01, m.prob) : 0.01;
+            fit -= Math.log(pr); if (pr >= 0.5) ok++;
+          }
+          const score = print + (nb.length ? (PH.FILL_FIT * fit) / nb.length : 0);
+          if (!best || score < best.score) best = { id: p.id, score, rot, print: own.length > 0, fits: ok, of: nb.length };
+        }
+        out.push(best);
+      }
+      out.sort((a, b) => a.score - b.score);
+      return { col, row, neighbours: nb.length, cands: out.slice(0, topN || 8) };
     }
     selectRegion(c0, r0, c1, r1) {
       this.selection = null;
@@ -1619,7 +1718,8 @@
           : this.filter === 'border' ? f.border && !f.corner
             : this.filter === 'unplaced' ? !!p.t1 && !(p.t2 && p.t2.conf >= 0.35)
               : this.filter === 'unread' ? !p.t1
-                : false;
+                : this.filter === 'zones' ? !!this.box && !!p.t2 && p.t2.cands.length > 0 && p.t2.conf >= 0.2
+                  : false;
         if (hit) out.push(p.id);
       }
       return out;
@@ -1838,7 +1938,7 @@
           locate(m.id, gold ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge });
         });
       }
-      if (this.region) for (const id of this.region.ids) locate(id, 'region');
+      if (this.region) for (const id of this.region.ids) locate(id, id === this.region.best ? 'gold' : 'region');
       if (this.pairSel) {
         locate(this.pairSel.a, 'sel');
         locate(this.pairSel.b, 'gold');
@@ -1850,7 +1950,12 @@
         const fixed = this.filter === 'corner' ? 'corner' : this.filter === 'border' ? 'border' : 'find';
         const role = (id) => this.filter !== 'edges' ? fixed : edgeFlags(this.pieces.get(id)).corner ? 'corner' : 'border';
         const off = [];
+        const zones = this.filter === 'zones';
         for (const id of this.filterIds()) {
+          if (zones) { // every piece in view ringed in its zone's colour; no arrows (it's sorting, not finding)
+            if (byId.has(id)) { const c = this.pieces.get(id).t2.cands[0]; locate(id, 'zone', { zone: PH.zoneOf(this.box, c.col, c.row) }); }
+            continue;
+          }
           if (byId.has(id)) { locate(id, role(id)); continue; }
           const p = this.pieces.get(id);
           if (p && p.pos && inv && p.island === this.island) off.push(p);

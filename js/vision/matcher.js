@@ -241,9 +241,27 @@
       const top = r.matches[0];
       if (top && top.loopOk) top.prob = Math.max(top.prob || 0, PH.LOOP_CONF);
     }
+    // Loops of loops: a match closed by 2x2 blocks on BOTH sides of the seam
+    // (P's corners at either end of the edge) is a 2x3 block. A false 2x2
+    // needs two wrong joins; a false 2x3 needs more, so precision climbs
+    // toward 1 with loop order (Son et al. 2014, JigsawNet).
+    // Only each corner's best loop counts (loops are sorted best first): any
+    // closed loop at all is weak evidence - wrong pieces close loops too.
+    const bestAt = new Map();
+    for (const L of loops) if (!bestAt.has(L.corner)) bestAt.set(L.corner, L);
+    for (const r of res) {
+      const a = bestAt.get(r.edge), b = bestAt.get((r.edge + 3) % 4); // corners at both ends of edge r
+      for (const m of r.matches) {
+        m.loops = (a && a.B === m.id && a.mB === m.edge ? 1 : 0) + (b && b.C === m.id && b.mC === m.edge ? 1 : 0);
+      }
+    }
     return res;
   };
   PH.LOOP_CONF = 0.9;
+  // "Fill this spot" (Engine.fillSpot): weight of the fit with the pieces
+  // around the spot vs the picture. test/solve-aids.js: right piece first
+  // 74/80 at 0.6-1 (65/80 at 0, 64/80 by the picture alone).
+  PH.FILL_FIT = 0.6;
 
   /* ---- Calibrated match probability ----
    * The softmax above only knows how a candidate's score compares with the
@@ -255,17 +273,19 @@
    * with known answers (tools/fit-calib.js); the owner's Fits/No answers
    * refit it on the real puzzle (Engine.refitCalib), pulled toward the prior
    * while there are few answers. */
-  PH.CALIB_FEATURES = ['bias', 'logit', 'lead', 'mutual', 'loop', 'confirmed', 'box', 'unsure'];
+  PH.CALIB_FEATURES = ['bias', 'logit', 'lead', 'mutual', 'loop', 'confirmed', 'box', 'unsure', 'loop2'];
   // Fitted by tools/fit-calib.js (2026-10-03: held-out synthetic log-loss
   // 0.236 -> 0.12, calibration error 0.048 -> 0.02 vs the softmax alone).
   // Two set by hand: 'box' fitted slightly negative (box agreement is already
   // in the score) -> 0; 'unsure' never occurs on synthetic pieces -> a modest
   // penalty for matching through an edge read as flat. 'confirmed' only
   // varies on real tables (photo catalogues see each piece once) -> 0.5.
-  PH.CALIB_PRIOR = [-3.04, 0.11, 2.31, 2.75, 0.84, 0.5, 0, -0.5];
+  // 'loop2' (2x2 blocks closing on both sides of the seam): 103/132 right
+  // vs 169/329 for one loop; with mutual best 98/98.
+  PH.CALIB_PRIOR = [-3.14, 0.1, 2.28, 2.83, 0.45, 0.5, 0, -0.5, 1.35];
   PH.candFeatures = function (f) {
     const p = PH.clamp(f.pSoft || 0, 1e-4, 1 - 1e-4);
-    return [1, PH.clamp(Math.log(p / (1 - p)), -6, 6), PH.clamp(f.lead, -2, 2), f.mutual ? 1 : 0, f.loop ? 1 : 0, f.confirmed ? 1 : 0, f.adj || 0, f.unsure ? 1 : 0];
+    return [1, PH.clamp(Math.log(p / (1 - p)), -6, 6), PH.clamp(f.lead, -2, 2), f.mutual ? 1 : 0, f.loop ? 1 : 0, f.confirmed ? 1 : 0, f.adj || 0, f.unsure ? 1 : 0, f.loops >= 2 ? 1 : 0];
   };
   PH.calibProb = function (w, x) {
     let z = 0;
@@ -316,7 +336,7 @@
    *  probability and whether anything independent backs it (loop or mutual
    *  best). 'alike' = it and the runner-up are about equally likely. */
   PH.matchVerdict = function (m, next) {
-    const p = m.prob || 0, backed = m.loopOk || m.mutual;
+    const p = m.prob || 0, backed = m.loopOk || m.mutual || m.loops >= 2;
     if (next && (next.prob || 0) >= p * 0.7 && p < 0.7) return 'alike';
     if (p >= 0.85 && backed) return 'strong';
     if (p >= 0.5) return 'likely';

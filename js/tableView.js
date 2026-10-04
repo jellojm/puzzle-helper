@@ -87,7 +87,8 @@ function spriteKey(p) {
   return k + ':' + sum.toFixed(3);
 }
 
-const ROLE = { sel: '#ffffff', gold: '#ffcc00', silver: '#c9ced6', corner: '#ff8c3a', border: '#35e0d8', find: '#ff4fd8', pairA: '#ffffff', pairB: '#ffcc00' };
+const ZONES = ['#ff6b6b', '#4dd0e1', '#ffd54f', '#b388ff', '#3ddc84', '#ff8c3a']; // sorting zones A-F, as on the camera view
+const ROLE = { zone0: ZONES[0], zone1: ZONES[1], zone2: ZONES[2], zone3: ZONES[3], zone4: ZONES[4], zone5: ZONES[5], sel: '#ffffff', gold: '#ffcc00', silver: '#c9ced6', corner: '#ff8c3a', border: '#35e0d8', find: '#ff4fd8', pairA: '#ffffff', pairB: '#ffcc00' };
 const STATUS = { seen: '#aab2bb', shaped: '#4f9dff', placed: '#3ddc84', section: '#c084fc' };
 
 export class TableView {
@@ -169,7 +170,8 @@ export class TableView {
         : kind === 'border' ? (p.border ? 'border' : null)
           : kind === 'edges' ? (p.corner ? 'corner' : p.border ? 'border' : null)
             : kind === 'unplaced' ? (p.shaped && !p.placed ? 'find' : null)
-              : kind === 'unread' ? (!p.shaped ? 'find' : null) : null;
+              : kind === 'unread' ? (!p.shaped ? 'find' : null)
+                : kind === 'zones' ? (p.zone != null && !p.inPuzzle ? 'zone' + p.zone : null) : null;
       if (r) roles.set(p.id, r);
     }
     return roles;
