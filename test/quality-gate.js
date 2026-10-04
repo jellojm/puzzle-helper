@@ -11,7 +11,7 @@
 const path = require('path');
 const S = require('./synth');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
 
 let failures = 0;
@@ -74,10 +74,8 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
     for (let k = 0; k < 3; k++) stops.push([Math.min(Math.max(bx, vw / 2), sc.TW - vw / 2) + k * 6, Math.min(Math.max(by, vh / 2), sc.TH - vh / 2)]);
     for (let y = vh / 2; y <= sc.TH - vh / 2 + 1; y += vh * 0.45) for (let x = vw / 2; x <= sc.TW - vw / 2 + 1; x += vw * 0.3) for (let k = 0; k < 3; k++) stops.push([x + k * 6, y]);
     const eng = new PH.Engine();
-    // The state the phone reached after its first frames: a section (here a
-    // towel fold / touching pair stand-in) already on the map, no loose pieces.
-    const sec = eng.newPiece({ fp: { hist: new Float32Array(PH.HIST_BINS), L: 0, a: 128, b: 128, sdL: 0 } }, [50000, 50000], eng.nextIsland++, 5000);
-    sec.kind = 'section';
+    // The sweep starts on the assembled block (no loose pieces in view): the
+    // block is never catalogued, so it can't hold up the map.
     let tracked = 0;
     for (const [x, y] of stops) {
       const fr = S.cameraFrame(cv, sc.table, x, y, 0, zoom, FW, FH);
@@ -86,7 +84,7 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
       fr.delete();
     }
     const cc = eng.counts();
-    check('a section in the first frame does not stall cataloguing', cc.pieces >= loose.length * 0.8, `${cc.pieces} of ${loose.length} loose pieces, ${cc.sections} section(s), tracking ${Math.round(100 * tracked / stops.length)}% of frames`);
+    check('an assembled block in the first frames does not stall cataloguing', cc.pieces >= loose.length * 0.8, `${cc.pieces} of ${loose.length} loose pieces, tracking ${Math.round(100 * tracked / stops.length)}% of frames`);
   }
 
   // Camera distance from the real piece size: 25 mm pieces, 100 px side in a

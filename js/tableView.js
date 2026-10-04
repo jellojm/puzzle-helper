@@ -89,7 +89,7 @@ function spriteKey(p) {
 
 const ZONES = ['#ff6b6b', '#4dd0e1', '#ffd54f', '#b388ff', '#3ddc84', '#ff8c3a']; // sorting zones A-F, as on the camera view
 const ROLE = { zone0: ZONES[0], zone1: ZONES[1], zone2: ZONES[2], zone3: ZONES[3], zone4: ZONES[4], zone5: ZONES[5], sel: '#ffffff', gold: '#ffcc00', silver: '#c9ced6', corner: '#ff8c3a', border: '#35e0d8', find: '#ff4fd8', pairA: '#ffffff', pairB: '#ffcc00' };
-const STATUS = { seen: '#aab2bb', shaped: '#4f9dff', placed: '#3ddc84', section: '#c084fc' };
+const STATUS = { seen: '#aab2bb', shaped: '#4f9dff', placed: '#3ddc84' };
 
 export class TableView {
   constructor(canvas, opts) {
@@ -114,8 +114,12 @@ export class TableView {
   setData(data) {
     this.unit = data.unit || 30;
     this.pieces = data.pieces;
+    this.asm = data.asm || []; // assembled parts (js/vision/assembly.js): cells and open spots on the table map
     this.byId = new Map(this.pieces.map((p) => [p.id, p]));
-    this.off = layoutIslands(this.pieces, this.unit);
+    // an assembled part counts toward its scan group's extent (its cells' centres as stand-ins)
+    const stand = [];
+    for (const A of this.asm) for (const q of A.cells) stand.push({ island: A.island, pos: [(q[0][0] + q[2][0]) / 2, (q[0][1] + q[2][1]) / 2] });
+    this.off = layoutIslands(this.pieces.concat(stand), this.unit);
     // Cut-out pictures are rebuilt only for pieces whose picture or outline
     // changed since the last visit (a 1000-piece table would otherwise make
     // 1000 of them every time Map is opened).
@@ -165,7 +169,6 @@ export class TableView {
   filterRoles(kind) {
     const roles = new Map();
     for (const p of this.pieces) {
-      if (p.kind === 'section') continue;
       const r = kind === 'corner' ? (p.corner ? 'corner' : null)
         : kind === 'border' ? (p.border ? 'border' : null)
           : kind === 'edges' ? (p.corner ? 'corner' : p.border ? 'border' : null)
@@ -183,6 +186,7 @@ export class TableView {
     const [w, h] = this.size();
     const u = this.unit, pts = [];
     for (const p of this.pieces) { const [x, y] = this.laid(p); pts.push([x - u, y - u], [x + u, y + u]); }
+    for (const A of this.asm || []) { const o = this.off.get(A.island) || [0, 0]; for (const q of A.cells) pts.push([q[0][0] + o[0], q[0][1] + o[1]], [q[2][0] + o[0], q[2][1] + o[1]]); }
     this.view = fitView(pts, w, h, this.view.rot, 24);
     this.request();
   }
@@ -207,11 +211,12 @@ export class TableView {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#1a1f26'; ctx.fillRect(0, 0, w, h);
     const V = makeView(this.view, w, h), u = this.unit, z = this.view.zoom;
+    this.drawAssembly(ctx, V);
     this.screen = [];
     for (const p of this.pieces) {
       const [lx, ly] = this.laid(p);
       const [sx, sy] = V.toScreen(lx, ly);
-      const r = p.kind === 'section' ? Math.max(u, Math.sqrt(p.area || u * u) / 2) * z : u * 0.62 * z;
+      const r = u * 0.62 * z;
       this.screen.push({ id: p.id, sx, sy, r });
       if (sx < -r * 2 || sy < -r * 2 || sx > w + r * 2 || sy > h + r * 2) continue;
       ctx.globalAlpha = p.missing || p.inPuzzle ? 0.35 : 1; // not where it was / already placed
@@ -228,8 +233,8 @@ export class TableView {
         ctx.restore();
       } else {
         ctx.beginPath();
-        ctx.arc(sx, sy, p.kind === 'section' ? r : r * 0.55, 0, Math.PI * 2);
-        ctx.fillStyle = p.kind === 'section' ? 'rgba(192,132,252,0.35)' : (p.placed ? STATUS.placed : p.shaped ? STATUS.shaped : STATUS.seen);
+        ctx.arc(sx, sy, r * 0.55, 0, Math.PI * 2);
+        ctx.fillStyle = p.placed ? STATUS.placed : p.shaped ? STATUS.shaped : STATUS.seen;
         ctx.fill();
       }
       ctx.globalAlpha = 1;
@@ -267,6 +272,23 @@ export class TableView {
           ctx.lineTo(ex - 9 * Math.cos(a - 0.6), ey - 9 * Math.sin(a - 0.6)); ctx.moveTo(ex, ey); ctx.lineTo(ex - 9 * Math.cos(a + 0.6), ey - 9 * Math.sin(a + 0.6));
           ctx.stroke();
         }
+      }
+    }
+  }
+
+  // The assembled part under the pieces: its cells shaded purple, its open
+  // spots outlined in cyan (solid where 2+ pieces surround the spot).
+  drawAssembly(ctx, V) {
+    for (const A of this.asm || []) {
+      const o = this.off.get(A.island) || [0, 0];
+      const path = (q) => { ctx.beginPath(); q.forEach(([x, y], i) => { const [sx, sy] = V.toScreen(x + o[0], y + o[1]); if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); }); ctx.closePath(); };
+      ctx.fillStyle = 'rgba(192,132,252,0.32)';
+      for (const q of A.cells) { path(q); ctx.fill(); }
+      for (const sp of A.spots) {
+        path(sp.q);
+        ctx.fillStyle = sp.n >= 2 ? 'rgba(0,229,255,0.28)' : 'rgba(0,229,255,0.12)'; ctx.fill();
+        ctx.setLineDash(sp.n >= 2 ? [] : [5, 4]); ctx.lineWidth = sp.n >= 2 ? 2 : 1.2; ctx.strokeStyle = '#00e5ff'; ctx.stroke();
+        ctx.setLineDash([]);
       }
     }
   }

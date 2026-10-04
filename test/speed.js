@@ -13,7 +13,7 @@ const S = require('./synth');
 const { readImage } = require('./imageio');
 globalThis.self = globalThis;
 const VISION = process.env.VISION || path.join(__dirname, '..', 'js', 'vision');
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(VISION, f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(VISION, f + '.js'));
 const PH = globalThis.PH;
 
 const med = (a) => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };

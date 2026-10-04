@@ -116,7 +116,7 @@ function writePng(file, mat) {
     const stats2 = await page.textContent('#stats');
     console.log('stats after snap + box:', stats2);
     const n2 = parseInt(stats2, 10);
-    check('snap adds the rest without duplicating', n2 >= 37 && n2 <= 42, `${n2} pieces (39 loose + 1 section on the table)`);
+    check('snap adds the rest without duplicating', n2 >= 37 && n2 <= 42, `${n2} pieces (39 loose + an assembled 3x3 block on the table)`);
     check('pieces placed on the box', /(\d+) placed/.test(stats2) && parseInt(stats2.match(/(\d+) placed/)[1], 10) >= 20, stats2);
 
     // Tap a piece that has a shape model and check the Find panel.
@@ -152,27 +152,20 @@ function writePng(file, mat) {
     } else {
       check('tapping a piece opens its matches', false, 'no shaped piece on screen to tap');
     }
-    // Assembled section: tap it -> section view with its loose neighbors.
+    // The assembled block (js/vision/assembly.js): built up, found on the box
+    // and shaded on the box picture; tapping one of its open spots lists the
+    // loose pieces for it. (The fake camera is a looping video: wait for the
+    // block to pan back into view.)
     await page.click('#closeFind').catch(() => {});
-    // the section has to come fully into the (moving) fake camera view
-    const sp = await page.waitForFunction(() => window.__phPick && window.__phPick('section'), null, { timeout: 30000, polling: 200 }).then((h) => h.jsonValue()).catch(async () => {
-      console.log('statuses seen:', await page.evaluate(() => JSON.stringify(window.__phStatuses && window.__phStatuses())));
-      return null;
-    });
-    // Fall back to selecting it from the catalog. The fake camera is a video
-    // file, and the app now releases the camera behind a modal, so re-opening
-    // it restarts that file — the section may simply never pan back into view
-    // here. test/live-sections.js covers the engine side deterministically;
-    // what this check is really for is the panel the selection produces.
-    const picked = sp || await page.evaluate(() => window.__phSelectStatus('section')) ||
-      await page.evaluate(() => window.__phSelectKind && window.__phSelectKind('section'));
-    if (picked) {
-      if (sp) await page.mouse.click(sp[0], sp[1]);
-      const ok = await page.waitForFunction(() => /Assembled section/.test(document.getElementById('selTitle').textContent), null, { timeout: 8000 }).then(() => true).catch(() => false);
-      const sub = await page.textContent('#selSub');
+    const asm = await page.waitForFunction(() => { const a = window.__phAsm(); return a.info && a.info.place && a.shaded >= 6 && a.spot ? a : null; }, null, { timeout: 45000, polling: 200 })
+      .then((h) => h.jsonValue()).catch(async () => page.evaluate(() => window.__phAsm()));
+    check('the assembled block is built up, found on the box and shaded there', !!(asm.info && asm.info.place) && asm.shaded >= 6,
+      JSON.stringify({ cells: asm.info && asm.info.cells, place: asm.info && asm.info.place, shaded: asm.shaded }));
+    if (asm.spot && await page.evaluate(() => window.__phOpenSpot())) {
+      const ok = await page.waitForFunction(() => /Spot: column/.test(document.getElementById('selTitle').textContent), null, { timeout: 8000 }).then(() => true).catch(() => false);
       await page.screenshot({ path: path.join(OUT, 'e2e-section.png') });
-      check('tapping an assembled section shows where it goes', ok && /column/.test(sub), sub);
-    } else check('tapping an assembled section shows where it goes', false, 'no section in the catalog at all');
+      check('tapping an open spot of the assembled block lists pieces for it', ok, await page.textContent('#selSub'));
+    } else check('tapping an open spot of the assembled block lists pieces for it', false, 'no open spot with a box cell in view');
     // Teach background: tap a bare spot, expect it to be learned, then clear.
     await page.click('#closeFind').catch(() => {});
     await page.click('#menuBtn');

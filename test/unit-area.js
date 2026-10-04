@@ -9,7 +9,7 @@
 const path = require('path');
 const S = require('./synth');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
 const { robustUnit } = require('./seg-metrics');
 
@@ -55,10 +55,10 @@ const { robustUnit } = require('./seg-metrics');
       const u = stable ? eng.unitLive : eng.lastSegUnit;
       if (u) { frames++; const err = Math.abs(u / ref - 1); worst = Math.max(worst, err); if (err > 0.2) outside++; }
     });
-    return { worst, outside, frames, pieces: eng.counts().pieces, sections: eng.counts().sections };
+    return { worst, outside, frames, pieces: eng.counts().pieces, assembled: eng.asms ? eng.asms.length : 0 };
   };
   const off = run(false), on = run(true);
-  const fmt = (r) => `worst unit error ${(r.worst * 100).toFixed(0)}%, frames >20% off: ${r.outside}/${r.frames}, catalog ${r.pieces} pieces + ${r.sections} sections (true ${n})`;
+  const fmt = (r) => `worst unit error ${(r.worst * 100).toFixed(0)}%, frames >20% off: ${r.outside}/${r.frames}, catalog ${r.pieces} pieces + ${r.assembled} assembled part(s) (true ${n})`;
   console.log(`true unit ≈ ${ref.toFixed(0)} px² at 640 wide, ${path_.length} frames, the same 30% of pieces broken in every frame`);
   console.log('old (per-frame unit):  ' + fmt(off));
   console.log('WP1 (stable unit):     ' + fmt(on));

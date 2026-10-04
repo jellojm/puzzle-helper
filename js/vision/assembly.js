@@ -195,12 +195,13 @@
       return out;
     }
     toJSON() {
-      return { id: this.id, views: this.views, place: this.place,
+      return { id: this.id, views: this.views, place: this.place, tab: this.tab && this.tab.T ? { island: this.tab.island, T: this.tab.T } : null,
         cells: [...this.cells.values()].map((c) => ({ i: c.i, j: c.j, f: c.f, e: c.e, pn: c.pn, patch: c.patch ? Array.from(c.patch, (v) => Math.round(v)) : null, sides: c.sides })) };
     }
     static fromJSON(o) {
       const A = new Assembly(o.id);
       A.views = o.views || 0; A.place = o.place || null;
+      A.tab = o.tab ? { island: o.tab.island, T: o.tab.T, pairs: [] } : null; // where it lies on the table map
       for (const c of o.cells || []) A.cells.set(key(c.i, c.j), { i: c.i, j: c.j, f: c.f, e: c.e, pn: c.pn, patch: c.patch ? Float32Array.from(c.patch) : null, sides: c.sides || [null, null, null, null] });
       return A;
     }

@@ -19,7 +19,7 @@ const fs = require('fs');
 const S = require('./synth');
 const { readImage, writeJpg } = require('./imageio');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
 
 const args = process.argv.slice(2);

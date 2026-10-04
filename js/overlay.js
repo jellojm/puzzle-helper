@@ -10,14 +10,12 @@ const STATUS = {
   placed: { stroke: '#3ddc84', dash: [] },
   done: { stroke: 'rgba(160,170,180,0.35)', dash: [2, 4] }, // marked as in the puzzle
   merged: { stroke: '#ff9f43', dash: [6, 4] },
-  section: { stroke: '#c084fc', dash: [] },
 };
 const ROLE = {
   sel: { color: '#ffffff', width: 5 },
   gold: { color: '#ffcc00', width: 5 },
   silver: { color: '#c9ced6', width: 3 },
   region: { color: '#ff4fd8', width: 4 },
-  section: { color: '#c084fc', width: 5 },
   border: { color: '#35e0d8', width: 4 },  // edge pieces (one straight side)
   corner: { color: '#ff8c3a', width: 5 },  // corner pieces (two straight sides)
   find: { color: '#ff4fd8', width: 4 },    // whatever else the filter bar asked for

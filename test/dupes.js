@@ -17,7 +17,7 @@ const path = require('path');
 const S = require('./synth');
 globalThis.self = globalThis;
 const VISION = process.env.VISION || path.join(__dirname, '..', 'js', 'vision');
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(VISION, f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(VISION, f + '.js'));
 const PH = globalThis.PH;
 
 let failures = 0;
@@ -85,7 +85,7 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
     });
   });
   const c = eng.counts();
-  const lost = [...eng.pieces.values()].filter((p) => p.kind !== 'section' && !p.pos).length;
+  const lost = [...eng.pieces.values()].filter((p) => !p.pos).length;
   console.log(`2/3 of pieces missing 2/3 of the time, light shifted and shape reads starved on sweep 2: ${c.pieces} catalogued for ${n} pieces, ${lost} without a table position, ${c.islands} island(s)`);
   check('pieces that drop out of detection are not catalogued twice', c.pieces <= n * 1.05, `${c.pieces} entries for ${n} pieces`);
   check('and keep their table position', lost <= n * 0.1, `${lost} without a position`);

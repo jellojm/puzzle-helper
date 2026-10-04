@@ -24,7 +24,7 @@
     }
 
     reset() {
-      this.pframe = null; this.pfLoc = null; this.asms = []; this.asmLast = null; this.spotView = null;
+      this.pframe = null; this.pfLoc = null; this.asms = []; this.asmLast = null; this.spotView = null; this.asmSentKey = null;
       this.pieces = new Map();
       this.nextId = 1;
       this.pose = null;
@@ -80,11 +80,10 @@
       return p;
     }
     counts() {
-      let shaped = 0, placed = 0, located = 0, sections = 0, pieces = 0, border = 0, cornerShaped = 0, cornerDoubt = 0;
+      let shaped = 0, placed = 0, located = 0, pieces = 0, border = 0, cornerShaped = 0, cornerDoubt = 0;
       const islands = new Set();
       const doubt = this.cornerDoubts();
       for (const p of this.pieces.values()) {
-        if (p.kind === 'section') { sections++; continue; }
         pieces++;
         if (p.t1) shaped++;
         if (p.t2 && p.t2.conf >= 0.35) placed++;
@@ -102,7 +101,7 @@
       // every undoubted corner shape was counted: 6 corners on a 15x20 box.
       const corner = this.box ? doubt.winners.size : cornerShaped;
       const cornerUnplaced = this.box ? cornerShaped - doubt.winners.size : 0;
-      return { inPuzzle: [...this.pieces.values()].filter((p) => p.inPuzzle).length, pieces, sections, shaped, placed, located, border, corner, cornerUnplaced, cornerDoubt, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
+      return { inPuzzle: [...this.pieces.values()].filter((p) => p.inPuzzle).length, pieces, shaped, placed, located, border, corner, cornerUnplaced, cornerDoubt, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
     }
 
     /**
@@ -123,7 +122,7 @@
       const isCornerCell = (c, r) => (c === 0 || c === cols - 1) && (r === 0 || r === rows - 1);
       const best = new Map();
       for (const p of this.pieces.values()) {
-        if (p.kind === 'section' || !edgeFlags(p).corner || !p.t2 || !p.t2.cands.length || p.t2.conf < 0.35) continue;
+        if (!edgeFlags(p).corner || !p.t2 || !p.t2.cands.length || p.t2.conf < 0.35) continue;
         const c = p.t2.cands[0];
         if (!isCornerCell(c.col, c.row)) { doubt.add(p.id); continue; } // corner shape but placed mid-edge: misread
         const key = c.row * cols + c.col;
@@ -150,7 +149,7 @@
       const end = budgetMs === Infinity ? Infinity : now() + budgetMs;
       const groups = new Map();
       for (const p of this.pieces.values()) {
-        if (p.kind === 'section' || !p.t1 || !p.t2 || !p.t2.cands.length || p.t2.conf < 0.35) continue;
+        if (!p.t1 || !p.t2 || !p.t2.cands.length || p.t2.conf < 0.35) continue;
         const c = p.t2.cands[0], key = c.row * this.box.cols + c.col;
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(p);
@@ -205,7 +204,7 @@
       // different spot, or a weaker shape match) now sit at the same table
       // position: same island, within half a piece, and alike -> merge.
       if (joinedIslands || budgetMs === Infinity) {
-        const list = [...this.pieces.values()].filter((p) => p.kind !== 'section' && p.pos);
+        const list = [...this.pieces.values()].filter((p) => p.pos);
         const cell = unitT, grid = new Map();
         const key = (x, y, isl) => isl + ':' + Math.floor(x / cell) + ':' + Math.floor(y / cell);
         for (const p of list) { const k = key(p.pos[0], p.pos[1], p.island); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(p); }
@@ -537,7 +536,7 @@
       // followed from the last frame, until the group has its 3 anchors.
       if (!ok && this.pose && this.island) {
         let own = 0;
-        for (const p of this.pieces.values()) if (p.pos && p.kind !== 'section' && p.island === this.island && ++own >= 3) break;
+        for (const p of this.pieces.values()) if (p.pos && p.island === this.island && ++own >= 3) break;
         if (own < 3) {
           let dx = 0, dy = 0, n = 0;
           for (const d of dets) {
@@ -562,7 +561,7 @@
         // made the engine wait to re-find a map it never had; provisional
         // pieces expired meanwhile and nothing was ever catalogued.)
         let anchors = 0;
-        for (const p of this.pieces.values()) if (p.pos && p.kind !== 'section' && ++anchors >= 3) break;
+        for (const p of this.pieces.values()) if (p.pos && ++anchors >= 3) break;
         const anyPlaced = anchors >= 3;
         const goodDets = dets.filter((d) => !d.border && !d.merged).length;
         // Color fingerprints fail under changed light or zoom; outlines don't.
@@ -659,7 +658,7 @@
       for (const d of dets) this.detT1(d);
       // In a still photo every piece gets a full read; anything that doesn't
       // read as a jigsaw piece is not catalogued.
-      for (let i = dets.length - 1; i >= 0; i--) if (!dets[i].t1 && !dets[i].merged && !dets[i].border) dets.splice(i, 1); // sections (merged) stay
+      for (let i = dets.length - 1; i >= 0; i--) if (!dets[i].t1 && !dets[i].merged && !dets[i].border) dets.splice(i, 1); // clumps (merged) stay: they're not catalogued
       // Shape + print only: color fingerprints can't tell look-alike pieces
       // apart (e.g. a puzzle with lots of plain white), so they can't anchor a photo.
       const r = this.relocalizeByShape(dets, unitF);
@@ -673,6 +672,7 @@
       const merged = this.mergeIslandsByShape(dets);
       this.assign(dets, unitF, proc);
       const work = this.runQueue(dets, Infinity);
+      this.findSpots(dets, seg, proc, true, true); // assembled parts in the photo
       if (this.cellsDirty) this.assignCellsNow();
       Object.assign(this, saved);
       return {
@@ -891,14 +891,13 @@
         const f = edgeFlags(p);
         const t1 = p.t1, pic = p.rd && p.pic;
         out.push({
-          id: p.id, kind: p.kind || 'piece', pos: p.pos, island: p.island, rd: p.rd || null, missing: !!p.missing,
+          id: p.id, pos: p.pos, island: p.island, rd: p.rd || null, missing: !!p.missing,
           inPuzzle: !!p.inPuzzle, upT: (this.upOf(p) || {}).vt || null,
           zone: this.box && p.t2 && p.t2.cands.length && p.t2.conf >= 0.2 ? PH.zoneOf(this.box, p.t2.cands[0].col, p.t2.cands[0].row) : null,
           area: p.area, shaped: !!t1, placed: !!(p.t2 && p.t2.conf >= 0.35), confirmed: shapeConfirmed(p),
           border: f.border && !f.corner, corner: f.corner && !doubt.has(p.id),
           thumb: pic ? pic.thumb : t1 ? t1.thumb : null, corners: pic ? pic.corners : t1 ? t1.corners : null,
           sigs: pic && pic.sigs ? pic.sigs : t1 ? t1.edges.map((e) => e.sig) : null,
-          sec: p.kind === 'section' && p.sec && p.sec.cells ? p.sec.cells.length : 0,
         });
       }
       const unit = this.unitTable() || 30;
@@ -908,7 +907,7 @@
       // more than ~15% off the typical size is drawn at the typical size,
       // centred where it was and at its own angle.
       const side = (c) => { let s = 0; for (let k = 0; k < 4; k++) s += Math.hypot(c[(k + 1) % 4][0] - c[k][0], c[(k + 1) % 4][1] - c[k][1]) / 4; return s; };
-      const drawn = out.filter((q) => q.rd && q.corners && q.kind !== 'section');
+      const drawn = out.filter((q) => q.rd && q.corners);
       const ratio = drawn.map((q) => Math.hypot(q.rd.a, q.rd.b) * side(q.corners) / unit);
       const typ = PH.median(ratio);
       drawn.forEach((q, i) => {
@@ -918,7 +917,22 @@
         const mx = r.a * cx - r.b * cy + r.tx, my = r.b * cx + r.a * cy + r.ty; // where its centre was drawn
         q.rd = { a, b, tx: mx - (a * cx - b * cy), ty: my - (b * cx + a * cy), pos0: r.pos0, stale: r.stale };
       });
-      return { pieces: out, unit };
+      return { pieces: out, unit, asm: this.asmMapData() };
+    }
+    /** Assembled parts on the Map: filled cells and open spots as table-map
+     *  squares (for assemblies whose place on the table map is known - see
+     *  noteAsmTable). */
+    asmMapData() {
+      const out = [];
+      for (const A of this.asms || []) {
+        const T = A.tab && A.tab.T;
+        if (!T || !this.asmShown(A)) continue;
+        const sq = (i, j) => [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]].map(([a, b]) => PH.simApply(T, a, b));
+        const cells = [];
+        for (const c of A.cells.values()) if (A.filled(c)) cells.push(sq(c.i, c.j));
+        out.push({ island: A.tab.island, cells, spots: A.spots(this.box).map((sp) => ({ q: sq(sp.i, sp.j), n: sp.n, cell: sp.cell })), border: A.borderStatus(this.box) });
+      }
+      return out;
     }
 
     /** Why detection `d` is not good enough to become a new piece (null = OK).
@@ -966,7 +980,7 @@
     identify(t1, d, claimed, tier) {
       let same = null, sameD = Infinity, amb = false;
       for (const p of this.pieces.values()) {
-        if (claimed.has(p.id) || p.kind === 'section' || !p.t1) continue;
+        if (claimed.has(p.id) || !p.t1) continue;
         const al = PH.shapeAlign(t1, p.t1); // cheap: edge types and lengths rule most out
         if (!(al.d < tier.tol * 1.6)) continue;
         const m = PH.samePiece(t1, p.t1, tier.tol);
@@ -1105,7 +1119,6 @@
         let best = null;
         for (const p of this.pieces.values()) {
           if (!p.pos || p.island !== this.island || claimed.has(p.id)) continue;
-          if ((p.kind === 'section') !== !!d.merged) continue;
           const dist = Math.hypot(p.pos[0] - q[0], p.pos[1] - q[1]);
           if (dist > unitT * (d.merged ? 1.2 : 0.55)) continue;
           const sim = PH.fpSimilarity(d.fp, p.fp);
@@ -1120,7 +1133,7 @@
       // Pass 1: match by position; then refit the pose on every match so a
       // slightly-off pose (just relocalized, few anchors) doesn't cause misses.
       for (const d of dets) {
-        if (d.id || d.big) continue; // a blob bigger than a fifth of the view is never catalogued
+        if (d.id || d.merged) continue; // clumps and assembled parts are never catalogued (assembly.js)
         const p = nearest(d, T);
         if (p) { d.id = p.id; claimed.add(p.id); }
       }
@@ -1134,23 +1147,11 @@
         if (r && r.inliers.length >= Math.max(3, pairs.length * 0.6)) { T = this.pose = r.T; }
       }
       for (const d of dets) {
-        if (d.id || d.big) continue;
+        if (d.id || d.merged) continue;
         const q = PH.simApply(T, d.cx, d.cy);
         const near = nearest(d, T);
         if (near) { d.id = near.id; claimed.add(near.id); continue; }
         if (d.border) continue;
-        if (d.merged) {
-          // An assembled section (or a clump of touching pieces): catalogued
-          // separately and located on the box picture as a whole.
-          if (!this.frameCtx.still) continue;
-          // Sections go through the same "seen twice in a row" rule as pieces.
-          if (this.frameCtx.live && !this.promote(d)) continue;
-          if (this.frameCtx.live) this.dropCand(d);
-          const p = this.newPiece(d, q, this.island, d.area * s * s);
-          p.kind = 'section';
-          d.id = p.id; claimed.add(p.id);
-          continue;
-        }
         // Before adding a new piece, check whether a known piece was moved here
         // (or went missing earlier). Look-alikes are common (sky!), so a
         // candidate with a shape model must also match by shape.
@@ -1201,7 +1202,7 @@
     findMoved(d, s, claimed) {
       const cands = [];
       for (const p of this.pieces.values()) {
-        if (claimed.has(p.id) || p.kind === 'section') continue;
+        if (claimed.has(p.id)) continue;
         const sim = PH.fpSimilarity(d.fp, p.fp);
         const ar = (d.area * s * s) / p.area;
         if (sim > 0.75 && ar > 0.7 && ar < 1.4) cands.push({ p, sim });
@@ -1388,18 +1389,6 @@
           n1++;
         }
       }
-      if (this.box && F.still) {
-        // Sections: one per live frame (they're slower), all of them in a photo.
-        let ns = 0;
-        for (const d of dets) {
-          if (!d.id || !d.merged || d.border) continue;
-          const p = this.pieces.get(d.id);
-          if (!p || p.kind !== 'section' || p.sec) continue;
-          if (deadline !== Infinity && (ns >= 1 || now() > deadline)) break;
-          p.sec = this.placeSectionDet(d) || { failed: true };
-          this.touch(p); this.version++; ns++;
-        }
-      }
       if (this.box) {
         // Visible pieces first, then the backlog.
         const order = [];
@@ -1408,7 +1397,7 @@
         const done = new Set();
         const cal = this.calibStats();
         for (const p of order) {
-          if (done.has(p.id) || !p.t1 || p.t2 || p.kind === 'section') continue;
+          if (done.has(p.id) || !p.t1 || p.t2) continue;
           done.add(p.id);
           if (n2 >= 2 && now() > deadline) break;
           p.t2 = PH.placePiece(this.box, p.t1, cal) || { cands: [], conf: 0, failed: true };
@@ -1418,21 +1407,6 @@
         }
       }
       return { t1: n1, t2: n2 };
-    }
-
-    placeSectionDet(d) {
-      const F = this.frameCtx, scale = F.scale, source = F.source;
-      const [bx, by, bw, bh] = d.bbox;
-      const m = Math.max(bw, bh) * 0.05;
-      const x0 = Math.max(0, Math.floor((bx - m) / scale)), y0 = Math.max(0, Math.floor((by - m) / scale));
-      const x1 = Math.min(source.w, Math.ceil((bx + bw + m) / scale)), y1 = Math.min(source.h, Math.ceil((by + bh + m) / scale));
-      // Work at a moderate resolution: the box match runs at ~12 px per piece.
-      let crop = source.getCrop(x0, y0, x1 - x0, y1 - y0);
-      const pts = Array.from(d.pts, (v, i) => v / scale - (i % 2 ? y0 : x0));
-      const sidePx = Math.sqrt(F.unitArea || d.area / 4) / scale / 1.05;
-      try {
-        return PH.placeSection(this.box, crop, pts, sidePx);
-      } catch (e) { return null; }
     }
 
     calibrate(t1, sign) {
@@ -1499,11 +1473,9 @@
       const { cols, rows } = this.pframe;
       const out = { marked: true, visible: true, quad: PH.PuzzleFrame.cellQuad(H, 0, 0, cols, rows), cols, rows };
       const sel = this.selection && this.pieces.get(this.selection.id);
-      if (sel && sel.kind !== 'section' && sel.t2 && sel.t2.cands.length && sel.t2.conf >= 0.15) {
+      if (sel && sel.t2 && sel.t2.cands.length && sel.t2.conf >= 0.15) {
         const c = sel.t2.cands[0];
         out.target = { quad: PH.PuzzleFrame.cellQuad(H, c.col, c.row), col: c.col, row: c.row, conf: sel.t2.conf };
-      } else if (sel && sel.kind === 'section' && sel.sec && sel.sec.cells) {
-        out.target = { quads: sel.sec.cells.map((k) => PH.PuzzleFrame.cellQuad(H, k % cols, Math.floor(k / cols))) };
       } else if (this.region) {
         const R = this.region;
         out.target = { quad: PH.PuzzleFrame.cellQuad(H, R.c0, R.r0, R.c1 - R.c0 + 1, R.r1 - R.r0 + 1) };
@@ -1537,7 +1509,7 @@
       const taken = this.takenCells();
       const items = [];
       for (const p of this.pieces.values()) {
-        if (!p.t2 || p.t2.failed || p.kind === 'section') continue;
+        if (!p.t2 || p.t2.failed) continue;
         const base = p.t2.orig || p.t2;
         if (p.inPuzzle) { if (p.t2 !== base) { p.t2 = base; this.touch(p); } continue; }
         const cands = base.cands.filter((c) => { const id = taken.get(c.col + ',' + c.row); return !id || id === p.id; });
@@ -1574,7 +1546,7 @@
      *  and Matches skips pairs of two placed pieces. */
     setInPuzzle(id, on) {
       const P = this.pieces.get(id);
-      if (!P || P.kind === 'section') return false;
+      if (!P) return false;
       P.inPuzzle = on ? Date.now() : 0;
       this.assignCellsNow();
       this.touch(P);
@@ -1586,7 +1558,7 @@
       this.clearPuzzleFrame(); // the mark is in the old box's grid
       this.box = box;
       for (const p of this.pieces.values()) { p.t2 = null; this.touch(p); }
-      for (const A of this.asms || []) { A.place = null; A.placeAt = -1e9; A.version++; } // placed again on the new grid
+      for (const A of this.asms || []) { A.place = null; A.placeAt = -1e9; A.version++; A.locate(box, true); } // placed again on the new grid
       this.asmDirty = true;
       this.version++;
     }
@@ -1749,45 +1721,23 @@
       this.region = null;
       this.filter = null;
       this.pairSel = null;
-      return P.kind === 'section' ? this.describeSection(id) : this.describe(id);
+      return this.describe(id);
     }
-    // Loose pieces that attach to section S (by box placement).
-    sectionPartners(S) {
-      if (!this.box || !S.sec || !S.sec.cells) return [];
-      const out = [];
-      for (const P of this.pieces.values()) {
-        if (P.kind === 'section') continue;
-        const a = PH.sectionAttach(this.box, S.sec, P);
-        if (a) out.push({ id: P.id, edges: a.edges, conf: a.conf, cell: a.cell });
+    /** The assembled part's open spot that piece P's box cell is, if any:
+     *  {col, row, n (pieces around it), fit (its edges agree with the spot's needs)}. */
+    asmSpotOf(P) {
+      if (!this.box || !P.t2 || !P.t2.cands.length || P.t2.conf < 0.2 || !P.t1) return null;
+      const c = P.t2.cands[0];
+      for (const A of this.asms || []) {
+        if (!A.place) continue;
+        const sp = A.spots(this.box).find((x) => x.cell && x.cell[0] === c.col && x.cell[1] === c.row);
+        if (!sp) continue;
+        const need = ['?', '?', '?', '?'];
+        sp.need.forEach((t, d) => (need[(d + A.place.k) % 4] = t));
+        const fit = this.spotPieces(c.col, c.row, need, 12).some((x) => x.id === P.id);
+        return { col: c.col, row: c.row, n: sp.n, fit };
       }
-      return out.sort((a, b) => b.conf - a.conf);
-    }
-    // Sections that loose piece P attaches to.
-    attachmentsOf(P) {
-      if (!this.box || !P.t2) return [];
-      const out = [];
-      for (const S of this.pieces.values()) {
-        if (S.kind !== 'section' || !S.sec || !S.sec.cells) continue;
-        const a = PH.sectionAttach(this.box, S.sec, P);
-        if (a) out.push({ section: S.id, edges: a.edges, located: !!S.pos });
-      }
-      return out;
-    }
-    describeSection(id) {
-      const S = this.pieces.get(id);
-      const sec = S.sec;
-      return {
-        section: true,
-        piece: { id: S.id, code: null, thumb: null, t2: null, located: !!S.pos },
-        status: !this.box ? 'Add a box picture to locate this section' : !sec ? 'Hold steady over this section to locate it on the box' :
-          sec.failed ? 'Couldn\'t find this section on the box picture (if it is a clump of loose pieces, spread them apart)' : null,
-        sec: sec && sec.cells ? { cells: sec.cells, open: sec.open, center: sec.center, score: sec.score } : null,
-        partners: sec && sec.cells ? this.sectionPartners(S).map((p) => {
-          const Q = this.pieces.get(p.id);
-          return Object.assign(p, { thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, located: !!Q.pos });
-        }) : [],
-        edges: [],
-      };
+      return null;
     }
     // Everything the UI panel needs about a piece and its candidate partners.
     describe(id) {
@@ -1798,7 +1748,7 @@
         confirmed: shapeConfirmed(Q), views: Q.t1 ? Q.t1.nObs || 1 : 0, quality: Q.t1 && Q.t1.quality ? Q.t1.quality.q : null, unc: Q.t1 ? Q.t1.edges.map((e) => !!e.unc) : null });
       return {
         piece: brief(P),
-        attach: this.attachmentsOf(P),
+        spot: this.asmSpotOf(P),
         chain: this.chainFor(P, res),
         status: !P.t1 ? 'Hold steady over this piece to read its shape' : null,
         edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, unc: !!(P.t1.edges[r.edge] && P.t1.edges[r.edge].unc), joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, loops: m.loops || 0, mutual: !!m.mutual, verdict: m.verdict, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
@@ -1814,7 +1764,7 @@
       const D = [[0, -1], [1, 0], [0, 1], [-1, 0]];
       const nb = [];
       for (const q of this.pieces.values()) {
-        if (!q.t1 || !q.t2 || !q.t2.cands.length || q.kind === 'section') continue;
+        if (!q.t1 || !q.t2 || !q.t2.cands.length) continue;
         const c = q.t2.cands[0];
         if (!q.inPuzzle && q.t2.conf < 0.35) continue;
         for (let d = 0; d < 4; d++) if (c.col === col + D[d][0] && c.row === row + D[d][1]) nb.push({ q, d, rot: c.rot });
@@ -1822,7 +1772,7 @@
       const nbRes = new Map(nb.map((n) => [n.q.id, this.matchesFor(n.q.id)]));
       const out = [];
       for (const p of this.pieces.values()) {
-        if (!p.t1 || p.inPuzzle || p.kind === 'section') continue;
+        if (!p.t1 || p.inPuzzle) continue;
         const base = p.t2 ? p.t2.orig || p.t2 : null;
         const own = base ? base.cands.filter((c) => c.col === col && c.row === row) : [];
         // print: how much worse this cell is than the piece's own best spot
@@ -1886,7 +1836,7 @@
       const out = [];
       const doubt = this.filter === 'corner' || this.filter === 'edges' ? this.cornerDoubts() : null;
       for (const p of this.pieces.values()) {
-        if (p.kind === 'section' || p.inPuzzle) continue; // placed pieces are done
+        if (p.inPuzzle) continue; // placed pieces are done
         const f = edgeFlags(p);
         const hit = this.filter === 'corner' ? f.corner && !doubt.has(p.id)
           : this.filter === 'edges' ? (f.corner && !doubt.has(p.id)) || (f.border && !f.corner)
@@ -1915,7 +1865,7 @@
       const minProb = opts.minProb || 0.8;
       const deadline = now() + (opts.budgetMs || 1200);
       const ids = [];
-      for (const p of this.pieces.values()) if (p.t1 && p.kind !== 'section') ids.push(p.id);
+      for (const p of this.pieces.values()) if (p.t1) ids.push(p.id);
       ids.sort((a, b) => a - b);
       const from = opts.from || 0;
       let i = from;
@@ -1973,7 +1923,7 @@
       const dd = this.dedupeByCell(Infinity);
       // 1. Merge islands: a piece whose shape matches a piece in another island
       //    is the same physical piece seen after tracking broke.
-      const shaped = [...this.pieces.values()].filter((p) => p.t1 && p.kind !== 'section');
+      const shaped = [...this.pieces.values()].filter((p) => p.t1);
       const dropped = [];
       for (let i = 0; i < shaped.length; i++) {
         const A = shaped[i];
@@ -1994,15 +1944,29 @@
       // 2. Drop never-identified leftovers: no shape, not on the table map, and
       //    repeated attempts to read them failed (glare, shadows, crumbs).
       for (const p of [...this.pieces.values()]) {
-        if (p.kind === 'section') {
-          if (p.sec && p.sec.failed) { this.removePiece(p.id); dropped.push(p.id); }
-          continue;
-        }
         if (!p.t1 && !p.pos && (p.t1Fail || 0) >= 3) { this.removePiece(p.id); dropped.push(p.id); }
+      }
+      // 3. "Edge pieces" that can't be: a loose piece with a straight side
+      //    whose box spot is already filled in the assembled part, or any of
+      //    them once the assembled border is complete - chunks of the assembly
+      //    read as pieces (owner, 2026-10-04).
+      let falseEdges = 0;
+      const asm = this.assemblyInfo();
+      const borderDone = !!(asm && asm.border && asm.border.done >= asm.border.total);
+      const filled = new Set();
+      for (const A of this.asms || []) for (const id of A.filledBoxCells(this.box)) filled.add(id);
+      for (const p of [...this.pieces.values()]) {
+        if (p.inPuzzle || !p.t1) continue;
+        const f = edgeFlags(p);
+        if (!f.border && !f.corner && !(p.cutSeen >= 2 && p.t1.flats.some(Boolean))) continue;
+        const c = this.box && p.t2 && p.t2.cands.length && p.t2.conf >= 0.35 ? p.t2.cands[0] : null;
+        if (borderDone || (c && filled.has(c.row * this.box.cols + c.col)) || (p.cutSeen || 0) >= 2) {
+          this.removePiece(p.id); dropped.push(p.id); falseEdges++;
+        }
       }
       this.matchCache.clear();
       this.selection = null; this.region = null; this.pairSel = null;
-      return { removed: dropped.length + dd.merged, before, after: this.counts(), joinedIslands: dd.islands };
+      return { removed: dropped.length + dd.merged, falseEdges, before, after: this.counts(), joinedIslands: dd.islands };
     }
 
     /** Match accuracy from the answer key: share of judged suggestions that
@@ -2065,22 +2029,28 @@
      *  border or the block close up builds the whole of it. Each assembly is
      *  put on the box picture as it grows; its open spots are then shown on
      *  the view this frame lined up with. */
-    findSpots(dets, seg, proc, still) {
+    findSpots(dets, seg, proc, still, photo) {
       this.spotView = null;
       if (!still) return;
       // The piece size from loose pieces is only a hint here: a view of just
       // the assembled block has none, and its own estimate can be the block.
       const unit = this.unitLive || seg.unitArea;
       const side = unit && unit < proc.w * proc.h * 0.05 ? Math.sqrt(unit) : null;
-      const blobs = dets.filter((d) => d.big || d.area > (side ? side * side * 3.5 : proc.w * proc.h * 0.06)).sort((x, y) => y.area - x.area).slice(0, 2);
+      const blobs = dets.filter((d) => d.big || d.area > (side ? side * side * 3.5 : proc.w * proc.h * 0.06))
+        .sort((x, y) => y.area - x.area).slice(0, photo ? 6 : 2);
       if (!blobs.length) return;
       if (!PH.Assembly) return; // js/vision/assembly.js not loaded (some tests)
       if (!this.asms) this.asms = [];
       let L = null;
       for (const d of blobs) {
-        const g = PH.sectionSpots(d, side, proc.w, proc.h);
+        const g = PH.sectionSpots(d, side, proc.w, proc.h, (seg.unitN || 0) >= 6);
         if (PH.DEBUG_ASM) PH.DEBUG_ASM('grid', g ? (g.failed ? 'failed crisp ' + g.crisp.toFixed(2) + ' pitch ' + g.pitch.toFixed(1) : g.occ.length + ' filled ' + g.empty.length + ' empty crisp ' + g.crisp.toFixed(2) + ' pitch ' + g.pitch.toFixed(1)) : 'null', 'area', Math.round(d.area), 'big', !!d.big);
         if (!g || g.failed || g.occ.length < 4) continue;
+        // A clump of a few loose pieces touching each other is small and
+        // ragged (solidity well under ~0.8); a small assembled block is
+        // compact. Bigger ones count whatever their shape (a border run is an
+        // L or a hollow ring).
+        if (d.solidity < 0.78 && g.occ.length < 8) continue;
         if (!L) {
           const cv = PH.cv, m = new cv.Mat(proc.h, proc.w, cv.CV_8UC1);
           for (let p = 0, n = proc.w * proc.h; p < n; p++) m.data[p] = seg.lab[3 * p];
@@ -2090,22 +2060,42 @@
         const X = PH.gridPatches(g, g.occ, L, proc.w, proc.h), NP = PH.PATCH * PH.PATCH;
         const fc = g.occ.map(([i, j], n) => ({ i, j, filled: true, patch: X.subarray(n * NP, (n + 1) * NP) }))
           .concat(g.empty.map(([i, j]) => ({ i, j, filled: false, patch: null })));
-        const reg = this.registerView(fc, g);
+        const reg = this.registerView(fc, g, photo);
         if (PH.DEBUG_ASM) PH.DEBUG_ASM('reg', reg ? JSON.stringify({ k: reg.k, di: reg.di, dj: reg.dj, corr: +reg.corr.toFixed(2), agree: +reg.agree.toFixed(2), n: reg.n }) : 'none');
         if (!reg) continue;
         const A = reg.A;
         A.add(fc, g.sides, reg.k, reg.di, reg.dj);
+        this.noteAsmTable(A, g, reg);
         this.asmLast = { id: A.id, k: reg.k, di: reg.di, dj: reg.dj, g, t: now() };
         A.locate(this.box);
         this.asmDirty = true;
         if (!this.spotView) this.spotView = { A, g, k: reg.k, di: reg.di, dj: reg.dj };
       }
     }
+    /** Where an assembly lies on the table map (for the Map): when a view
+     *  lines up with it while the pose is known, its cells' centres in the
+     *  frame -> table map give pairs (assembly cell -> table point); a
+     *  similarity is fitted to the recent ones of the current scan group. */
+    noteAsmTable(A, g, reg) {
+      if (!this.pose || !this.island) return;
+      if (!A.tab || A.tab.island !== this.island) A.tab = { island: this.island, T: null, pairs: [] };
+      const P = A.tab.pairs || (A.tab.pairs = []);
+      const step = Math.max(1, Math.floor(g.occ.length / 12));
+      for (let n = 0; n < g.occ.length; n += step) {
+        const [i, j] = g.occ[n];
+        const [x, y] = g.toXY(g.u0 + (i + 0.5) * g.pitch, g.v0 + (j + 0.5) * g.pitch);
+        const [a, b] = PH.rotCell(reg.k, i, j);
+        P.push({ src: [a + reg.di + 0.5, b + reg.dj + 0.5], dst: PH.simApply(this.pose, x, y) });
+      }
+      if (P.length > 240) P.splice(0, P.length - 240);
+      const r = P.length >= 6 ? PH.simRansac(P, (this.unitTable() || 30) * 0.4, 60, this.rnd) : null;
+      if (r && r.inliers.length >= P.length * 0.5) A.tab.T = r.T;
+    }
     /** Which assembly (and where in it) a view's cells belong to; a new
      *  assembly when nothing known overlaps. Two assemblies that one view
      *  lines up with are joined. */
-    registerView(fc, g) {
-      const good = (r) => r && r.corr >= 0.55 && r.agree >= 0.8 && r.n >= 4;
+    registerView(fc, g, photo) {
+      const good = (r) => r && r.corr >= 0.6 && r.agree >= 0.85 && r.n >= 6;
       const last = this.asmLast && now() - this.asmLast.t < 4000 ? this.asmLast : null;
       let best = null;
       if (last) {
@@ -2122,11 +2112,13 @@
         const r = A && A.register(fc, near);
         if (good(r)) best = Object.assign(r, { A });
       }
-      // Full search (slower): when the local one failed, at most every 1.5 s.
-      if (!best && now() - (this.asmGlobalAt || 0) > 1500) {
+      // Full search when the local one failed: its cost grows with the
+      // assemblies' size, so small ones every frame, big ones up to every 1.5 s.
+      const known = (this.asms || []).reduce((n, A) => n + A.cells.size, 0);
+      if (!best && (photo || now() - (this.asmGlobalAt || 0) > Math.min(1500, known * 1.5))) {
         this.asmGlobalAt = now();
         const hits = [];
-        for (const A of this.asms) { const r = A.register(fc, null); if (good(r)) hits.push(Object.assign(r, { A })); }
+        for (const A of this.asms) { const r = A.register(fc, null); if (PH.DEBUG_ASM) PH.DEBUG_ASM('global', A.id, r && JSON.stringify({ k: r.k, di: r.di, dj: r.dj, corr: +r.corr.toFixed(2), agree: +r.agree.toFixed(2), n: r.n })); if (good(r)) hits.push(Object.assign(r, { A })); }
         hits.sort((a, b) => b.score - a.score);
         best = hits[0] || null;
         for (const h of hits.slice(1)) this.joinAssemblies(best, h);
@@ -2135,10 +2127,11 @@
           // enough cells, and not while a recent one is just failing to line
           // up (a blurred or misread view would split it).
           this.asmMiss = (this.asmMiss || 0) + 1;
-          if (g.occ.length >= 8 && (!this.asms.length || this.asmMiss >= 3)) {
+          // (a photo is one sharp view: each block in it starts its own)
+          if (g.occ.length >= (photo ? 6 : 8) && (photo || !this.asms.length || this.asmMiss >= 3)) {
             const A = new PH.Assembly(this.nextAsm = (this.nextAsm || 0) + 1);
             this.asms.push(A);
-            if (this.asms.length > 6) this.asms.sort((a, b) => b.cells.size - a.cells.size).length = 6;
+            if (this.asms.length > 6) this.asms.sort((a, b) => (b.place ? 1e6 : 0) + b.views * 100 + b.cells.size - ((a.place ? 1e6 : 0) + a.views * 100 + a.cells.size)).length = 6;
             this.asmMiss = 0;
             return { A, k: 0, di: 0, dj: 0, corr: 1, agree: 1, n: 0 };
           }
@@ -2175,13 +2168,34 @@
       this.asms = this.asms.filter((x) => x !== B);
       A.locate(this.box, true);
     }
-    /** The biggest assembly's state, for the page and reports. */
-    assemblyInfo() {
-      const A = this.asms && this.asms.length ? this.asms.reduce((a, b) => (b.cells.size > a.cells.size ? b : a)) : null;
+    /** An assembly worth showing: placed on the box, or confirmed by a few
+     *  views (a one-off view - a misread blob in a photo - is not). */
+    asmShown(A) { return !!A.place || A.views >= 3; }
+    /** The main assembly: placed ones first, then the most cells. */
+    mainAssembly() {
+      let best = null;
+      const filled = (A) => { let n = 0; for (const c of A.cells.values()) if (A.filled(c)) n++; return n; };
+      for (const A of this.asms || []) {
+        if (!this.asmShown(A)) continue;
+        const key = (A.place ? 1e6 : 0) + filled(A);
+        if (!best || key > best.key) best = { A, key };
+      }
+      return best && best.A;
+    }
+    /** The main assembly's state, for the page and reports. */
+    assemblyInfo(withCells) {
+      const A = this.mainAssembly();
       if (!A) return null;
       let filled = 0;
       for (const c of A.cells.values()) if (A.filled(c)) filled++;
-      return { n: this.asms.length, cells: filled, views: A.views, place: A.place, border: A.borderStatus(this.box), spots: A.spots(this.box).length };
+      const out = { n: this.asms.length, cells: filled, views: A.views, place: A.place, border: A.borderStatus(this.box), spots: A.spots(this.box).length };
+      // Its box cells (filled / open) for the page's box picture: only when they changed.
+      const key = A.id + ':' + A.version + ':' + !!A.place;
+      if (withCells && key !== this.asmSentKey) {
+        this.asmSentKey = key;
+        out.boxCells = A.place ? { filled: [...A.filledBoxCells(this.box)], open: A.spots(this.box).filter((s) => s.cell).map((s) => s.cell[1] * this.box.cols + s.cell[0]) } : { filled: [], open: [] };
+      }
+      return out;
     }
     /** Loose pieces for box cell (col,row) whose edges agree with the spot's
      *  needs (box directions; '?' = unknown), best first (PH fillSpot ranking). */
@@ -2213,7 +2227,7 @@
      *  with. Piece suggestions are cached per assembly/catalogue version. */
     spotsOut(inv, byId) {
       const V = this.spotView;
-      if (!V) return [];
+      if (!V || !this.asmShown(V.A)) return [];
       const A = V.A, g = V.g;
       if (!A.spotCache || A.spotCache.version !== A.version || A.spotCache.pieces !== this.version) {
         const list = A.spots(this.box).sort((a, b) => b.n - a.n);
@@ -2252,7 +2266,7 @@
       const outDets = dets.map((d) => {
         const p = d.id ? this.pieces.get(d.id) : null;
         let status = 'unknown';
-        if (d.merged) status = p && p.kind === 'section' && p.sec && p.sec.cells ? 'section' : 'merged';
+        if (d.merged) status = 'merged';
         else if (p) status = p.inPuzzle ? 'done' : p.t2 && p.t2.conf >= 0.35 ? 'placed' : p.t1 ? 'shaped' : 'seen';
         if (p) byId.set(p.id, d);
         // `r` lets the page draw a marker without walking the outline at all.
@@ -2271,11 +2285,7 @@
           hl.push(Object.assign({ id, role, x: f[0], y: f[1], visible: false }, extra));
         }
       };
-      if (this.selection && this.pieces.get(this.selection.id) && this.pieces.get(this.selection.id).kind === 'section') {
-        const S = this.pieces.get(this.selection.id);
-        locate(S.id, 'sel');
-        for (const p of this.sectionPartners(S)) locate(p.id, 'gold', { edge: p.edges[0] });
-      } else if (this.selection) {
+      if (this.selection) {
         const sid = this.selection.id;
         // Arrow from the piece toward its top edge (as it sits in the puzzle):
         // table-map direction -> this frame through the inverse pose.
@@ -2289,7 +2299,6 @@
         }
         locate(sid, 'sel', up ? { up } : undefined);
         const P = this.pieces.get(sid);
-        if (P) for (const a of this.attachmentsOf(P)) locate(a.section, 'section');
         const res = this.matchesFor(sid);
         // Gold only for a likely match; otherwise candidates are just "maybe".
         // Gold = a likely match between two confirmed shapes (or one closed into
@@ -2364,7 +2373,7 @@
         procW: proc.w, procH: proc.h, scale: proc.scale,
         dets: outDets, highlights: hl, links,
         tracking: !!this.pose, island: this.island,
-        spots: this.spotsOut(inv, byId), assembly: this.assemblyInfo(),
+        spots: this.spotsOut(inv, byId), assembly: this.assemblyInfo(true),
         counts: this.counts(),
         bg: this.bg, thresh: this.thresh,
       };
@@ -2372,11 +2381,12 @@
 
     // ---------- persistence ----------
     exportPiece(p) {
-      return { id: p.id, kind: p.kind, sec: p.sec, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created, rd: p.rd || null, pic: p.pic || null, missing: !!p.missing, inPuzzle: p.inPuzzle || 0, cutSeen: p.cutSeen || 0 };
+      return { id: p.id, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created, rd: p.rd || null, pic: p.pic || null, missing: !!p.missing, inPuzzle: p.inPuzzle || 0, cutSeen: p.cutSeen || 0 };
     }
     importState(state) {
       this.reset();
       for (const q of state.pieces || []) {
+        if (q.kind === 'section') { this.dirty.add(q.id); continue; } // v0.16 and older: replaced by the assembly
         const p = Object.assign({ miss: 0, t1Fail: 0, wrong: [], joined: [false, false, false, false] }, q);
         this.pieces.set(p.id, p);
         if (p.t1) this.calibrate(p.t1);

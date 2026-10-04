@@ -6,7 +6,7 @@ const path = require('path');
 const S = require('./synth');
 const { readImage, writeJpg } = require('./imageio');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
 (async () => {
   let cv = require('@techstark/opencv-js'); if (cv instanceof Promise) cv = await cv; else if (!cv.Mat) await new Promise((r) => (cv.onRuntimeInitialized = r)); PH.cv = cv;
@@ -28,6 +28,6 @@ const PH = globalThis.PH;
     const e = new PH.Engine({ autoTilt: auto });
     if (eng.box) e.setBox(eng.box);
     const r = e.processSnap(src);
-    console.log(`  ${auto ? 'with' : 'without'} tilt correction: ${r.found} pieces catalogued, ${r.counts.sections} sections, ${r.shaped} shapes read (tilt used ${r.tilt}°${r.autoTilt && r.autoTilt.check ? `, outlines ${r.autoTilt.check.before} -> ${r.autoTilt.check.after}` : ''})`);
+    console.log(`  ${auto ? 'with' : 'without'} tilt correction: ${r.found} pieces catalogued,  ${r.shaped} shapes read (tilt used ${r.tilt}°${r.autoTilt && r.autoTilt.check ? `, outlines ${r.autoTilt.check.before} -> ${r.autoTilt.check.after}` : ''})`);
   }
 })();

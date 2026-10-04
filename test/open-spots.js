@@ -61,7 +61,7 @@ const biggest = (eng) => (eng.asms || []).reduce((a, b) => (!a || b.cells.size >
       const g = scat.gt.find((q) => q.r === r && q.c === c);
       let best = null, bd = Infinity;
       for (const p of eng.pieces.values()) {
-        if (!p.t1 || p.kind === 'section') continue;
+        if (!p.t1) continue;
         const cs = p.t1.corners, cx = (cs[0][0] + cs[1][0] + cs[2][0] + cs[3][0]) / 4, cy = (cs[0][1] + cs[1][1] + cs[2][1] + cs[3][1]) / 4;
         const d = Math.hypot(cx - g.x, cy - g.y);
         if (d < bd) { bd = d; best = p.id; }
@@ -90,7 +90,8 @@ const biggest = (eng) => (eng.asms || []).reduce((a, b) => (!a || b.cells.size >
     const sp = shown.find((s) => s.cell && s.cell[0] === pocket[1] && s.cell[1] === pocket[0]);
     check('A: the missing piece is offered first for the hole', !!sh && sh.best.length > 0 && sh.best[0].id === holeId, sh ? `offered ${sh.best.map((b) => '#' + b.id).join(', ') || 'nothing'}` : 'hole not drawn on the last view');
     check('A: the missing piece is offered first for the pocket', !!sp && sp.best.length > 0 && sp.best[0].id === pocketId, sp ? `offered ${sp.best.map((b) => '#' + b.id).join(', ') || 'nothing'}` : 'pocket not drawn on the last view');
-    check('A: the block is never catalogued as loose pieces', [...eng.pieces.values()].filter((p) => p.kind === 'section').length <= 2, `${[...eng.pieces.values()].filter((p) => p.kind === 'section').length} section entries`);
+    const looseN = T.P.pieces.length - T.B.cells.length;
+    check('A: the block is never catalogued as loose pieces', eng.pieces.size <= looseN, `${eng.pieces.size} entries for ${looseN} loose pieces`);
   }
 
   // ---------- B: a finished border followed close up ----------

@@ -1,7 +1,7 @@
-/* Pointed check: an assembled block is catalogued AND located on the box from
- * LIVE camera frames (not just from a Snap photo). The full browser e2e covers
- * this too, but takes minutes and its frame pacing is wall-clock dependent, so
- * this runs the same engine path directly in a few seconds.
+/* Pointed check: an assembled block is built up (js/vision/assembly.js) AND
+ * located on the box from LIVE camera frames, never catalogued as loose
+ * pieces, and loose pieces are offered for its open spots. Runs the engine
+ * path directly in a few seconds (test/open-spots.js covers more cases).
  * Run: node test/live-sections.js
  */
 'use strict';
@@ -9,7 +9,7 @@ const path = require('path');
 const S = require('./synth');
 
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
 
 let failures = 0;
@@ -56,30 +56,48 @@ async function loadCv() {
     dir = -dir;
   }
 
-  let sawSectionStatus = false, sawMerged = false;
+  let sawMerged = false;
   stops.forEach(([x, y], i) => {
     const fr = S.cameraFrame(cv, scat.table, x, y, Math.sin(i * 0.15) * 0.08, zoom, FW, FH);
     const out = eng.processFrame(S.matSource(cv, fr), { still: true });
-    for (const d of out.dets) {
-      if (d.status === 'section') sawSectionStatus = true;
-      if (d.status === 'merged') sawMerged = true;
-    }
+    for (const d of out.dets) if (d.status === 'merged') sawMerged = true;
     fr.delete();
   });
 
-  const all = [...eng.pieces.values()].filter((p) => p.kind === 'section');
-  const placed = all.filter((p) => p.sec && p.sec.cells);
+  const A = (eng.asms || []).reduce((a, b) => (!a || b.cells.size > a.cells.size ? b : a), null);
   const trueCells = scat.blocks[0].cells;
-  const best = placed.map((p) => ({ p, ov: p.sec.cells.filter((c) => trueCells.includes(c)).length / trueCells.length }))
-    .sort((a, b) => b.ov - a.ov)[0];
+  const f = A ? A.filledBoxCells(box) : new Set();
+  const ov = trueCells.filter((c) => f.has(c)).length / trueCells.length;
+  const spots = A ? A.spots(box).filter((s) => s.cell) : [];
+  const offered = spots.filter((sp) => {
+    const need = ['?', '?', '?', '?'];
+    sp.need.forEach((t, d) => (need[(d + A.place.k) % 4] = t));
+    return eng.spotPieces(sp.cell[0], sp.cell[1], need, 3).length > 0;
+  }).length;
+  console.log(`live: ${eng.pieces.size} catalogued for ${subset.length} loose pieces; assembly ${A ? A.cells.size : 0} cells, place ${JSON.stringify(A && A.place)}`);
+  check('a merged blob is seen during a live sweep', sawMerged);
+  check('the assembled block is built up and located on the box', !!(A && A.place) && ov >= 0.6, `${(ov * 100).toFixed(0)}% of its cells`);
+  check('the block is not catalogued as loose pieces', eng.pieces.size <= subset.length * 1.05, `${eng.pieces.size} for ${subset.length}`);
+  check('loose pieces are offered for its open spots', offered > 0, `${offered} of ${spots.length} spots`);
 
-  console.log(`live sections: ${all.length} catalogued, ${placed.length} located; counts ${JSON.stringify(eng.counts())}`);
-  check('a merged blob is seen at all during a live sweep', sawMerged || sawSectionStatus);
-  check('the assembled block is catalogued as a section', all.length >= 1, `${all.length} section entr${all.length === 1 ? 'y' : 'ies'}`);
-  check('the section is located on the box picture', !!best && best.ov >= 0.6, best ? `best overlap ${(best.ov * 100).toFixed(0)}%` : 'none located');
-  check('the overlay reports it as a section', sawSectionStatus);
-  check('loose pieces are offered for the section', !best || eng.sectionPartners(best.p).length > 0,
-    best ? `${eng.sectionPartners(best.p).length} partners` : 'n/a');
+  // The Map draws it: cells and open spots at its place on the table map.
+  const md = eng.mapData();
+  const ma = (md.asm || [])[0];
+  check('the Map gets the assembled part', !!ma && ma.cells.length >= 6 && ma.spots.length > 0, ma ? `${ma.cells.length} cells, ${ma.spots.length} spots` : 'not on the Map');
+  // Tidy up drops an "edge piece" whose box spot is already in the assembled part.
+  const fakeCell = trueCells[0];
+  const real = [...eng.pieces.values()].find((p) => p.t1);
+  const fake = eng.newPiece({ fp: real.fp }, [0, 0], eng.island, real.area);
+  fake.t1 = JSON.parse(JSON.stringify(real.t1)); fake.t1.flats = [true, false, false, false];
+  fake.t1.edges[0].type = 'F'; fake.t1.edges[0].unc = false;
+  fake.t2 = { cands: [{ col: fakeCell % cols, row: (fakeCell / cols) | 0, rot: 0, score: 0 }], conf: 0.9 };
+  const td = eng.tidy();
+  check('Tidy up removes an edge piece that is part of the assembled puzzle', !eng.pieces.has(fake.id) && td.falseEdges >= 1, `${td.falseEdges} removed`);
+  // Old catalogues: section entries (v0.16 and older) are dropped on import.
+  const st = { pieces: [...eng.pieces.values()].map((p) => eng.exportPiece(p)).concat([{ id: 9999, kind: 'section', pos: [0, 0], island: 1 }]), box };
+  const e2 = new PH.Engine();
+  e2.importState(st);
+  check('old section entries are dropped when a catalogue is loaded', !e2.pieces.has(9999) && e2.pieces.size === eng.pieces.size);
 
   console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
   process.exit(failures ? 1 : 0);

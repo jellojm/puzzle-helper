@@ -351,7 +351,7 @@ const handlers = {
   selectKind(msg) {
     let pick = null;
     for (const p of engine.pieces.values()) {
-      if (msg.kind === 'section' ? (p.kind === 'section' && p.sec && p.sec.cells) : p.kind !== 'section' && p.t1) { pick = p; break; }
+      if (p.t1) { pick = p; break; }
     }
     post({ type: 'selected', desc: pick ? engine.select(pick.id) : null });
   },
@@ -410,7 +410,7 @@ const handlers = {
     const r = engine.tidy();
     const { put, del } = engine.takeDirty();
     if (db) await tx('pieces', 'readwrite', (s) => { for (const p of put) s.put(p); for (const id of del) s.delete(id); });
-    post({ type: 'tidied', removed: r.removed, counts: engine.counts() });
+    post({ type: 'tidied', removed: r.removed, falseEdges: r.falseEdges || 0, counts: engine.counts() });
   },
   // Diagnostic snapshot for "Send report".
   async report() {
@@ -473,8 +473,8 @@ const handlers = {
     const all = [...engine.pieces.values()];
     const ages = all.filter((p) => p.lastSeen).map((p) => (Date.now() - p.lastSeen) / 1000).sort((a, b) => a - b);
     const catalog = {
-      entries: all.length, withShape: all.filter((p) => p.t1).length, sectionsFailed: all.filter((p) => p.kind === 'section' && p.sec && p.sec.failed).length,
-      neverShaped: all.filter((p) => !p.t1 && p.kind !== 'section').length, shapeFailing: all.filter((p) => !p.t1 && (p.t1Fail || 0) >= 3).length,
+      entries: all.length, withShape: all.filter((p) => p.t1).length, assembly: engine.assemblyInfo(), assemblies: (engine.asms || []).map((A) => ({ id: A.id, cells: A.cells.size, views: A.views, place: A.place, onMap: !!(A.tab && A.tab.T) })),
+      neverShaped: all.filter((p) => !p.t1).length, shapeFailing: all.filter((p) => !p.t1 && (p.t1Fail || 0) >= 3).length,
       lastSeenSecMedian: ages.length ? Math.round(ages[ages.length >> 1]) : null,
       perIsland: all.reduce((m, p) => { m[p.island] = (m[p.island] || 0) + 1; return m; }, {}),
       placedConfHist: all.filter((p) => p.t2 && p.t2.cands.length).reduce((h, p) => { const b = Math.min(9, Math.floor(p.t2.conf * 10)); h[b] = (h[b] || 0) + 1; return h; }, {}),

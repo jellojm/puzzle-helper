@@ -13,7 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const S = require('./synth');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
 
 let failures = 0;
@@ -92,7 +92,7 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
     const d2 = e2.mapData(), sizes = [];
     let without = 0;
     for (const p of d2.pieces) {
-      if (p.kind === 'section' || !p.shaped || !seen.has(p.id)) continue;
+      if (!p.shaped || !seen.has(p.id)) continue;
       const q = e2.pieces.get(p.id);
       if (!q.rd || q.rd.stale || q.rd === before.get(p.id)) { without++; continue; }
       // what is drawn: the stored corners through the stored placement

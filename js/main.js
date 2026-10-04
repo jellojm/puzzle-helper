@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.17.0';
+const APP_VERSION = '0.18.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -81,6 +81,7 @@ function onWorkerMessage(e) {
     case 'status': setStatus(m.text); break;
     case 'ready':
       S.ready = true;
+      S.asmCells = null; // a new or reopened catalogue: its assembled part arrives with the next frames
       if (m.camWorker !== undefined) { S.camWorkerOk = !!m.camWorker; if (!S.camWorkerOk) S.camPath = 'bitmap (no MediaStreamTrackProcessor in the worker)'; startWorkerCam(); }
       setStatus('');
       $('modeHint').textContent = modeHint(S.mode);
@@ -117,7 +118,9 @@ function onWorkerMessage(e) {
       if (S.history.length > 240) S.history.shift();
       // Did this frame change anything? If not, ease off the frame pump.
       const c = m.counts, pc = S.prevCounts;
-      const changed = !pc || c.pieces !== pc.pieces || c.shaped !== pc.shaped || c.placed !== pc.placed || c.sections !== pc.sections;
+      const changed = !pc || c.pieces !== pc.pieces || c.shaped !== pc.shaped || c.placed !== pc.placed;
+      // The assembled part's box cells (sent only when they change): shaded on the box picture.
+      if (m.assembly && m.assembly.boxCells) { S.asmCells = m.assembly.boxCells; drawMinimap(); }
       S.prevCounts = c;
       // The view itself moving must also wake the pump, and it has to be
       // judged from the picture, not the motion sensor: on iOS Chrome the
@@ -184,7 +187,7 @@ function onWorkerMessage(e) {
       break;
     case 'feedbackStats': showAccuracy(m.stats); break;
     case 'tidied':
-      toast(m.removed ? `Tidied up: removed ${m.removed} duplicate or leftover entries. ${m.counts.pieces} pieces now.`
+      toast(m.removed ? `Tidied up: removed ${m.removed} duplicate or leftover entries${m.falseEdges ? ` (${m.falseEdges} of them "edge pieces" that are really part of the assembled puzzle)` : ''}. ${m.counts.pieces} pieces now.`
         : 'Nothing to tidy — no duplicates found.', 5000);
       updateStats(m.counts);
       break;
@@ -659,7 +662,6 @@ function updateStats(c, tracking) {
   if (!c) return;
   S.counts = c;
   const parts = [`${c.pieces} pieces`];
-  if (c.sections) parts.push(`${c.sections} section${c.sections > 1 ? 's' : ''}`);
   if (S.box) parts.push(`${c.placed} placed`);
   if (c.inPuzzle) parts.push(`${c.inPuzzle} in puzzle`);
   const tilt = tiltDegOf(S.lastTilt);
@@ -895,7 +897,6 @@ function showFind(desc) {
   $('findPanel').hidden = false;
   $('menu').hidden = true;
   applyPower();
-  if (desc.section) { showSection(desc); return; }
   const p = desc.piece;
   drawThumb($('selThumb'), p, null);
   $('selTitle').textContent = `Piece #${p.id}` + (p.code ? ` · ${p.code.split('').map((c) => SIDE[c][0].toUpperCase()).join('')}` : '');
@@ -923,13 +924,16 @@ function showFind(desc) {
   if (p.up != null) drawUpright($('selUpright'), p, p.up);
   const rows = $('edgeRows');
   rows.innerHTML = '';
-  if (desc.attach && desc.attach.length) {
+  if (desc.spot) {
+    // Its box cell is an open spot of the assembled part (js/vision/assembly.js).
+    const sp = desc.spot;
     const note = document.createElement('div');
     note.className = 'edge-row';
-    note.innerHTML = '<h4><span class="sw" style="background:#c084fc"></span> Attaches to an assembled section</h4>';
+    note.innerHTML = '<h4><span class="sw" style="background:#00e5ff"></span> Goes in an open spot of the assembled part</h4>';
     const t = document.createElement('div');
     t.className = 'empty';
-    t.textContent = desc.attach.map((a) => `Section #${a.section} (edge ${a.edges.map((e) => e + 1).join(' & ')} of this piece touches it)${a.located ? '' : ' — not in view'}`).join('; ') + '. It is outlined in purple.';
+    t.textContent = `Column ${sp.col + 1}, row ${sp.row + 1} — ${sp.n} piece${sp.n > 1 ? 's' : ''} already around it. ` +
+      (sp.fit ? 'Its edges fit the spot.' : 'Its edges don\'t match what the spot needs, so check the picture before trying it.');
     note.append(t);
     rows.append(note);
   }
@@ -1036,38 +1040,6 @@ function showFill(f) {
   S.desc = null; // not a piece: nothing else reads it
   S.fillOpen = true; // closing the panel also clears the spot's highlights
   S.needDraw = true;
-}
-
-// An assembled section: where it sits on the box and which scanned loose
-// pieces attach to it (they glow gold on the table).
-function showSection(desc) {
-  $('inPuzzleBtn').hidden = true; $('uprightBox').hidden = true;
-  const ctx = $('selThumb').getContext('2d');
-  ctx.clearRect(0, 0, 72, 72); ctx.fillStyle = '#c084fc'; ctx.fillRect(8, 8, 56, 56);
-  $('selTitle').textContent = `Assembled section #${desc.piece.id}`;
-  const sec = desc.sec;
-  $('selSub').textContent = desc.status || (sec ? `About ${sec.cells.length} pieces · around column ${Math.round(sec.center[0]) + 1}, row ${Math.round(sec.center[1]) + 1} of the box` : '');
-  const rows = $('edgeRows');
-  rows.innerHTML = '';
-  if (!sec) return;
-  const row = document.createElement('div');
-  row.className = 'edge-row';
-  row.innerHTML = `<h4>${desc.partners.length ? `${desc.partners.length} scanned piece${desc.partners.length > 1 ? 's' : ''} attach to it (gold on the table)` : 'No scanned pieces attach to it yet'}</h4>`;
-  const list = document.createElement('div');
-  list.className = 'cands';
-  desc.partners.slice(0, 12).forEach((m) => {
-    const c = document.createElement('div');
-    c.className = 'cand gold';
-    const cv = document.createElement('canvas');
-    cv.width = cv.height = 144;
-    drawThumb(cv, m, m.edges[0], '#c084fc');
-    const label = document.createElement('div');
-    label.textContent = `#${m.id} · col ${m.cell[0] + 1}, row ${m.cell[1] + 1}${m.located ? '' : ' · ?'}`;
-    c.append(cv, label);
-    list.append(c);
-  });
-  row.append(list);
-  rows.append(row);
 }
 
 // ---------- Table view (Map mode) ----------
@@ -1262,13 +1234,13 @@ function drawMinimap() {
     ctx.strokeStyle = '#ff4fd8'; ctx.lineWidth = 2;
     ctx.strokeRect(c0 * cw, r0 * ch, (c1 - c0 + 1) * cw, (r1 - r0 + 1) * ch);
   }
-  const secOf = S.desc && S.desc.section ? S.desc.sec : null;
-  if (secOf) {
-    ctx.fillStyle = 'rgba(192,132,252,0.45)';
-    for (const id of secOf.cells) ctx.fillRect((id % b.cols) * cw, Math.floor(id / b.cols) * ch, cw, ch);
-    ctx.setLineDash([3, 2]); ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 1.5;
-    for (const id of secOf.open) ctx.strokeRect((id % b.cols) * cw, Math.floor(id / b.cols) * ch, cw, ch);
-    ctx.setLineDash([]);
+  // The assembled part (js/vision/assembly.js): its cells shaded, its open spots outlined.
+  const ac = S.asmCells;
+  if (ac && ac.filled.length) {
+    ctx.fillStyle = 'rgba(192,132,252,0.4)';
+    for (const id of ac.filled) ctx.fillRect((id % b.cols) * cw, Math.floor(id / b.cols) * ch, cw, ch);
+    ctx.strokeStyle = '#00e5ff'; ctx.lineWidth = 1.5;
+    for (const id of ac.open) ctx.strokeRect((id % b.cols) * cw + 0.5, Math.floor(id / b.cols) * ch + 0.5, cw - 1, ch - 1);
   }
   if (S.desc && S.desc.edges) {
     for (const e of S.desc.edges) {
@@ -1631,11 +1603,19 @@ window.__phPick = (want) => {
 };
 
 window.__phSelectStatus = (want) => { const d = S.last && S.last.dets.find((x) => x.id && x.status === want); if (!d) return false; setMode('find'); W.post({ type: 'select', id: d.id }); return true; };
-// Select a catalogued piece/section even when it isn't in view right now.
+// Select a catalogued piece even when it isn't in view right now.
 window.__phSelectKind = (kind) => { setMode('find'); W.post({ type: 'selectKind', kind }); return true; };
 window.__phBorder = () => S.last && S.last.pframe; // test hook: the marked border in the last result
 window.__phCamPath = () => S.camPath || 'bitmap'; // test hook: how camera frames reach the worker
 window.__phTrap = () => W.post({ type: '__trap' }); // test hook: make the vision library "crash"
+window.__phAsm = () => { // test hook: the assembled part, and the screen point of an open spot with a box cell
+  const sp = S.last && S.map && (S.last.spots || []).find((x) => x.cell);
+  const r = overlay.getBoundingClientRect(), pt = sp ? S.map.toScreen(sp.cx, sp.cy) : null;
+  return { info: S.last && S.last.assembly, shaded: S.asmCells ? S.asmCells.filled.length : 0, spot: pt ? [pt[0] + r.left, pt[1] + r.top] : null };
+};
+// test hook: open an open spot of the assembled part as a tap on it would (the
+// fake camera keeps moving, so a click can land beside it)
+window.__phOpenSpot = () => { const sp = S.last && (S.last.spots || []).find((x) => x.cell); if (sp) openSpot(sp); return !!sp; };
 window.__phRestarts = () => ({ restarts: STATS.workerRestarts || 0, ready: !!S.ready, pieces: S.counts ? S.counts.pieces : null });
 window.__phStatuses = () => S.last && S.last.dets.map((d) => d.status + (d.border ? '/border' : ''));
 

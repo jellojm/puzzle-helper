@@ -8,7 +8,7 @@ const fs = require('fs');
 const S = require('./synth');
 
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
 
 const args = process.argv.slice(2);
@@ -303,51 +303,50 @@ function savePng(cv, mat, name) {
     check('swapped pieces are re-identified, not duplicated', live.pieces.size <= before + 1, `${before} -> ${live.pieces.size}`);
   }
 
-  // ---------- 6a. Assembled sections ----------
+  // ---------- 6a. Assembled blocks (js/vision/assembly.js) ----------
   {
     const blocks = [{ r0: 2, c0: 1, rows: 3, cols: 3 }, { r0: 4, c0: 5, rows: 2, cols: 3 }];
     const inBlock = (p) => blocks.some((b) => p.r >= b.r0 && p.r < b.r0 + b.rows && p.c >= b.c0 && p.c < b.c0 + b.cols);
     const subset = P.pieces.map((p, i) => i).filter((i) => !inBlock(P.pieces[i]));
     const sc2 = S.scatter(cv, P, { scale: 2.2, seed: 21, subset, blocks });
     savePng(cv, sc2.table, 'sections');
-    if (process.env.DBG) { const f = PH.placeSection; PH.placeSection = function (...a) { const r = f.apply(this, a); console.log('placeSection crop', a[1].w, a[1].h, 'side', a[3].toFixed(1), '->', r && JSON.stringify({ score: r.score && +r.score.toFixed(3), rot: r.rot, sc: r.scale, cells: r.cells && r.cells.length, failed: r.failed })); return r; }; }
     const e3 = new PH.Engine();
     e3.setBox(box);
     const t0 = Date.now();
     e3.processSnap(S.matSource(cv, sc2.table));
-    const secs = [...e3.pieces.values()].filter((p) => p.kind === 'section' && p.sec && p.sec.cells);
-    let located = 0, partnersOk = 0, partnersTot = 0;
+    const placedAsms = (e3.asms || []).filter((A) => A.place);
+    // true cell of a catalogued loose piece (nearest ground truth by position)
+    const trueCell = (q) => {
+      let g = null, bd = Infinity;
+      const cx = q.t1.corners.reduce((s, c) => s + c[0], 0) / 4, cy = q.t1.corners.reduce((s, c) => s + c[1], 0) / 4;
+      for (const gg of sc2.gt) { const d = Math.hypot(gg.x - cx, gg.y - cy); if (d < bd) { bd = d; g = gg; } }
+      return g && bd < sc2.core * 0.3 ? g.r * cols + g.c : null;
+    };
+    const byCell = new Map();
+    for (const q of e3.pieces.values()) if (q.t1) { const c = trueCell(q); if (c !== null) byCell.set(c, q.id); }
+    let located = 0, offeredOk = 0, offeredTot = 0;
     for (const bg of sc2.blocks) {
-      // the catalogued section nearest to this block
       let best = null;
-      for (const sp of secs) {
-        const ov = sp.sec.cells.filter((c) => bg.cells.includes(c)).length / bg.cells.length;
-        if (!best || ov > best.ov) best = { ov, sp };
+      for (const A of placedAsms) {
+        const f = A.filledBoxCells(box), ov = bg.cells.filter((c) => f.has(c)).length / bg.cells.length;
+        if (!best || ov > best.ov) best = { ov, A };
       }
-      if (process.env.DBG) console.log('block', JSON.stringify(bg.cells), 'best section cells', best && JSON.stringify(best.sp.sec.cells), 'overlap', best && best.ov.toFixed(2));
-      if (best && best.ov >= 0.6) {
-        located++;
-        // loose pieces whose true cell borders the block should be offered
-        const trueOpen = new Set();
-        for (const c of bg.cells) for (const [dc, dr] of DIRS) {
-          const cc = (c % cols) + dc, rr = ((c / cols) | 0) + dr;
-          if (cc >= 0 && rr >= 0 && cc < cols && rr < rows && !bg.cells.includes(rr * cols + cc)) trueOpen.add(rr * cols + cc);
-        }
-        const offered = new Set(e3.sectionPartners(best.sp).map((q) => q.id));
-        for (const q of e3.pieces.values()) {
-          if (q.kind === 'section' || !q.t2 || !q.t2.cands.length) continue;
-          // ground-truth cell of this loose piece: nearest gt by position isn't available here, so use the snap engine's map
-          let g = null, bd = Infinity;
-          const cx = q.t1.corners.reduce((s, c) => s + c[0], 0) / 4, cy = q.t1.corners.reduce((s, c) => s + c[1], 0) / 4;
-          for (const gg of sc2.gt) { const d = Math.hypot(gg.x - cx, gg.y - cy); if (d < bd) { bd = d; g = gg; } }
-          if (!g || bd > sc2.core * 0.3) continue;
-          if (trueOpen.has(g.r * cols + g.c)) { partnersTot++; if (offered.has(q.id)) partnersOk++; }
-        }
+      if (!best || best.ov < 0.6) continue;
+      located++;
+      // the loose piece that truly belongs in each open spot is offered for it (top 3)
+      for (const sp of best.A.spots(box)) {
+        if (!sp.cell) continue;
+        const id = byCell.get(sp.cell[1] * cols + sp.cell[0]);
+        if (!id) continue;
+        const need = ['?', '?', '?', '?'];
+        sp.need.forEach((t, d) => (need[(d + best.A.place.k) % 4] = t));
+        offeredTot++;
+        if (e3.spotPieces(sp.cell[0], sp.cell[1], need, 3).some((x) => x.id === id)) offeredOk++;
       }
     }
-    console.log(`sections: ${secs.length} placed of ${[...e3.pieces.values()].filter((p) => p.kind === 'section').length} catalogued (${Date.now() - t0} ms snap); ${located}/${sc2.blocks.length} blocks located; loose neighbors offered ${partnersOk}/${partnersTot}`);
-    check('assembled sections are located on the box', located === sc2.blocks.length, `${located}/${sc2.blocks.length}`);
-    check('loose pieces that attach to a section are offered', partnersTot > 0 && partnersOk / partnersTot >= 0.7, `${partnersOk}/${partnersTot}`);
+    console.log(`assembled blocks: ${placedAsms.length} placed of ${(e3.asms || []).length} built (${Date.now() - t0} ms snap); ${located}/${sc2.blocks.length} blocks located; right piece offered for ${offeredOk}/${offeredTot} open spots`);
+    check('assembled blocks are located on the box', located === sc2.blocks.length, `${located}/${sc2.blocks.length}`);
+    check('the right loose piece is offered for their open spots', offeredTot > 0 && offeredOk / offeredTot >= 0.6, `${offeredOk}/${offeredTot}`);
   }
 
   // ---------- 6b. Phone held at an angle (tilt correction) ----------

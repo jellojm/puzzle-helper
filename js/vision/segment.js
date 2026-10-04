@@ -611,7 +611,7 @@
         const pieces = PH.splitBlob(b.cnt, labMat, unitA, w, h) || (opts.concave !== false && concaveOk ? PH.splitConcave(b.cnt, unitA) : null);
         if (pieces) { b.cnt.delete(); for (const p of pieces) parts.push({ cnt: p, split: true, parent: { area: b.area / unitA, solidity: b.solidity } }); continue; }
       }
-      parts.push({ cnt: b.cnt, split: false });
+      parts.push({ cnt: b.cnt, split: false, solidity: b.solidity });
     }
     if (labMat) labMat.delete();
     mark('split');
@@ -641,6 +641,7 @@
         border,
         split: part.split,
         parent: part.parent || null, // a split part: its blob's size (in pieces) and solidity
+        solidity: part.solidity, // area / convex hull (an assembled block is compact; a clump of loose pieces isn't)
         perim: cv.arcLength(cnt, true),
       };
       if (big) det.big = true;
