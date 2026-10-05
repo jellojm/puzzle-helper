@@ -650,7 +650,7 @@
       const one = new cv.MatVector();
       one.push_back(cnt);
       cv.drawContours(pm, one, 0, new cv.Scalar(255), -1, cv.LINE_8, noHier, 0, new cv.Point(-r.x, -r.y));
-      det.fp = PH.fingerprint(lab, w, r, pm.data, dd, thresh);
+      det.fp = PH.fingerprint(lab, w, r, pm.data, dd, thresh, h, bg, opts.boardRef || null);
       det.rect = cv.minAreaRect(cnt);
       // Holes inside an assembled section (missing pieces): blob filled minus
       // the mask, piece-sized-ish ones only.
@@ -812,10 +812,74 @@
     return out;
   };
 
-  /** T0 fingerprint: mean Lab, L spread, 64-bin Lab histogram, size/shape scalars. */
-  PH.fingerprint = function (lab, w, r, maskData, distData, thresh) {
+  /** The board's colour right around a piece (its local "white"): median Lab
+   *  of background pixels in a band just outside the bbox. The phone's own
+   *  shadow and the camera's exposure change how bright a piece looks by up
+   *  to ~4x (owner's video: the same piece at L 68 and L 15), but they change
+   *  the board next to it by the same factor. null when too little board
+   *  shows (a pile, the frame edge). */
+  PH.localWhite = function (lab, w, h, r, distData, thresh) {
+    const pad = Math.max(3, Math.round(0.15 * Math.max(r.width, r.height)));
+    const x0 = Math.max(0, r.x - pad), y0 = Math.max(0, r.y - pad);
+    const x1 = Math.min(w - 1, r.x + r.width + pad), y1 = Math.min(h - 1, r.y + r.height + pad);
+    const Ls = [], As = [], Bs = [];
+    const lim = thresh * 0.7;
+    for (let y = y0; y <= y1; y += 2) {
+      const inY = y >= r.y && y < r.y + r.height;
+      for (let x = x0; x <= x1; x += 2) {
+        if (inY && x >= r.x && x < r.x + r.width) { x = r.x + r.width - 1; continue; } // skip the piece's own box
+        const p = y * w + x;
+        if (distData[p] >= lim) continue;
+        Ls.push(lab[3 * p]); As.push(lab[3 * p + 1]); Bs.push(lab[3 * p + 2]);
+      }
+    }
+    if (Ls.length < 16) return null;
+    return { L: PH.median(Ls), a: PH.median(As), b: PH.median(Bs) };
+  };
+  /** How to take the light out of colours read next to board colour `w`
+   *  ([L, a, b] or {L, a, b}), against `ref` - this session's usual board
+   *  colour (Engine.boardRef, a slow running average): lightness scaled by
+   *  ref/board (0.6-1.7x) and the change in colour cast removed. On any board
+   *  the usual factor is ~1 (a dark cloth or the glass table's wood is never
+   *  "brightened" until white pieces clip); a shadow or an exposure change
+   *  that darkens or tints the board is undone. Identity without a ref. */
+  PH.LIGHT_K = [0.6, 1.7]; // how far the light correction may scale lightness
+  PH.lightFix = function (w, ref) {
+    if (!w || !ref) return { k: 1, da: 0, db: 0 };
+    const g = (v, i, key) => (Array.isArray(v) ? v[i] : v[key]);
+    const L = g(w, 0, 'L'), rL = g(ref, 0, 'L');
+    if (!(L > 15) || !(rL > 15)) return { k: 1, da: 0, db: 0 };
+    return { k: PH.clamp(rL / L, PH.LIGHT_K[0], PH.LIGHT_K[1]), kRaw: rL / L, da: g(w, 1, 'a') - g(ref, 1, 'a'), db: g(w, 2, 'b') - g(ref, 2, 'b') };
+  };
+  /** Soft (trilinear) vote of one Lab colour into the 4x4x4 histogram, so a
+   *  small shift moves weight gradually instead of jumping a whole bin. */
+  function histVote(hist, L, a, b) {
+    const fl = Math.min(3, Math.max(0, L / 64 - 0.5)), fa = Math.min(3, Math.max(0, (a - 88) / 20 - 0.5)), fb = Math.min(3, Math.max(0, (b - 88) / 20 - 0.5));
+    const l0 = Math.floor(fl), a0 = Math.floor(fa), b0 = Math.floor(fb);
+    const wl = fl - l0, wa = fa - a0, wb = fb - b0;
+    for (let i = 0; i < 2; i++) {
+      const li = Math.min(3, l0 + i), kl = i ? wl : 1 - wl;
+      if (!kl) continue;
+      for (let j = 0; j < 2; j++) {
+        const ai = Math.min(3, a0 + j), ka = kl * (j ? wa : 1 - wa);
+        if (!ka) continue;
+        for (let k = 0; k < 2; k++) {
+          const bi = Math.min(3, b0 + k), kb = ka * (k ? wb : 1 - wb);
+          if (kb) hist[(li << 4) | (ai << 2) | bi] += kb;
+        }
+      }
+    }
+  }
+  /** T0 fingerprint: mean Lab, L spread and a 64-bin Lab histogram, all
+   *  with the light taken out (PH.lightFix: the board around the piece,
+   *  PH.localWhite, against this session's usual board `ref`). `raw` keeps the
+   *  plain mean colour (capture coach, reports). `h`/`bg` are optional
+   *  (without them the colours are used as they are). */
+  PH.fingerprint = function (lab, w, r, maskData, distData, thresh, h, bg, ref) {
     const hist = new Float32Array(PH.HIST_BINS);
-    let n = 0, sL = 0, sa = 0, sb = 0, sLL = 0;
+    const white = h ? PH.localWhite(lab, w, h, r, distData, thresh) || bg || null : bg || null;
+    const fx = PH.lightFix(white, ref), kL = fx.k, da = fx.da, db = fx.db;
+    let n = 0, sL = 0, sa = 0, sb = 0, sLL = 0, rL = 0, ra = 0, rb = 0;
     const strict = thresh * 1.15;
     for (let y = 0; y < r.height; y++) {
       for (let x = 0; x < r.width; x++) {
@@ -823,9 +887,11 @@
         const p = (r.y + y) * w + (r.x + x);
         if (distData[p] < strict) continue; // skip anti-aliased rim pixels
         const i = p * 3;
-        const L = lab[i], a = lab[i + 1], b = lab[i + 2];
-        hist[PH.histBin(L, a, b)]++;
+        const L0 = lab[i], a0 = lab[i + 1], b0 = lab[i + 2];
+        const L = Math.min(255, L0 * kL), a = a0 - da, b = b0 - db;
+        histVote(hist, L, a, b);
         sL += L; sa += a; sb += b; sLL += L * L; n++;
+        rL += L0; ra += a0; rb += b0;
       }
     }
     if (n) for (let k = 0; k < hist.length; k++) hist[k] /= n;
@@ -834,11 +900,26 @@
       hist,
       L: mL, a: n ? sa / n : 128, b: n ? sb / n : 128,
       sdL: n ? Math.sqrt(Math.max(0, sLL / n - mL * mL)) : 0,
+      raw: n ? [rL / n, ra / n, rb / n] : [0, 128, 128],
+      white: white ? [Math.round(white.L), Math.round(white.a), Math.round(white.b)] : null,
     };
   };
 
+  /** Running fingerprint: `old` moved toward `obs` by weight k. A fingerprint
+   *  in plain colours (saved before v0.20) is replaced outright. */
+  PH.blendFp = function (old, obs, k) {
+    if (!old || !old.white || !obs.white) return obs.white || !old ? obs : old;
+    const hist = new Float32Array(old.hist.length);
+    for (let i = 0; i < hist.length; i++) hist[i] = old.hist[i] * (1 - k) + obs.hist[i] * k;
+    const mix = (a, b) => a * (1 - k) + b * k;
+    return { hist, L: mix(old.L, obs.L), a: mix(old.a, obs.a), b: mix(old.b, obs.b), sdL: mix(old.sdL, obs.sdL),
+      raw: old.raw && obs.raw ? old.raw.map((v, i) => mix(v, obs.raw[i])) : obs.raw, white: obs.white };
+  };
   /** Similarity between two T0 fingerprints in 0..1 (1 = identical). */
   PH.fpSimilarity = function (f1, f2) {
+    // A fingerprint saved before v0.20 is in plain colours, not relative to
+    // the board: compare those by colour alone (lightness depends on light).
+    if (!f1.white !== !f2.white) return Math.exp(-Math.hypot(f1.a - f2.a, f1.b - f2.b) / 12);
     const hi = PH.histIntersect(f1.hist, f2.hist);
     const de = PH.dE(f1.L, f1.a, f1.b, f2.L, f2.a, f2.b, 0.6);
     return hi * Math.exp(-de / 25);

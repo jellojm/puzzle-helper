@@ -1,10 +1,10 @@
 // Page controller: camera, frame pump to the vision worker, overlay, UI.
-import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COLORS, ZONE_COLORS } from './overlay.js';
+import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COLORS, ZONE_COLORS, STATUS, ROLE, drawCheckingMark } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.19.0';
+const APP_VERSION = '0.20.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -172,7 +172,7 @@ function onWorkerMessage(e) {
     case 'selected': showFind(m.desc); mapShowSelection(m.desc); break;
     case 'mapData': tableView.setData(m.data); mapApplyFilter(); break;
     case 'camTrackFailed': stopWorkerCam(m.why); break;
-    case 'library': showLibrary(m); if (m.saved) toast(`Saved "${m.saved.name}" (${m.saved.pieces} pieces).`); break;
+    case 'library': showLibrary(m); if (m.counts) updateStats(m.counts); if (m.saved) toast(`Saved "${m.saved.name}" (${m.saved.pieces} pieces).`); break;
     case 'inPuzzle':
       updateStats(m.counts);
       toast(m.on ? `#${m.id} marked as in the puzzle — its spot won't be offered for other pieces. Tap the button again to undo.` : `#${m.id} is back among the loose pieces.`, 3500);
@@ -196,11 +196,6 @@ function onWorkerMessage(e) {
       showMatches();
       break;
     case 'feedbackStats': showAccuracy(m.stats); break;
-    case 'tidied':
-      toast(m.removed ? `Tidied up: removed ${m.removed} duplicate or leftover entries${m.falseEdges ? ` (${m.falseEdges} of them "edge pieces" that are really part of the assembled puzzle)` : ''}. ${m.counts.pieces} pieces now.`
-        : 'Nothing to tidy — no duplicates found.', 5000);
-      updateStats(m.counts);
-      break;
     case 'report': finishReport(m.data, m.analyzed, m.boxImg); break;
     case 'error':
       S.busy = false; S.snapping = false;
@@ -235,7 +230,7 @@ function restartWorker(m) {
   worker = new Worker('js/worker.js');
   worker.onmessage = onWorkerMessage;
   worker.onerror = onWorkerError;
-  W.post({ type: 'init' });
+  W.post({ type: 'init', closeSide: +(new URLSearchParams(location.search).get('closeSide') || 0) });
 }
 
 function setStatus(t) {
@@ -428,7 +423,7 @@ async function startVideoFile(file) {
 function enterApp() {
   $('start').hidden = true;
   $('app').hidden = false;
-  if (!S.workerStarted) { S.workerStarted = true; W.post({ type: 'init' }); }
+  if (!S.workerStarted) { S.workerStarted = true; W.post({ type: 'init', closeSide: +(new URLSearchParams(location.search).get('closeSide') || 0) }); }
   S.running = true;
   noteActivity();
   setMode('scan');
@@ -627,6 +622,7 @@ function loop() {
       S.map = M;
       const d0 = performance.now();
       drawOverlay(ctx, S.last, M, { mode: S.mode, marks: !S.outlines });
+      minimapAside(M);
       const dm = performance.now() - d0;
       STATS.drawMs = STATS.drawMs * 0.9 + dm * 0.1; if (dm > STATS.drawMax) STATS.drawMax = dm;
       S.drawn = S.last;
@@ -665,14 +661,18 @@ function setMode(mode) {
 document.querySelectorAll('#toolbar [data-mode]').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
 
 function modeHint(mode) {
-  return mode === 'scan' ? 'Sweep slowly over the pieces' : mode === 'map' ? 'Table map — camera off. Tap a piece for its matches' : 'Tap a piece, or pick a group below';
+  return mode === 'scan' ? 'Sweep slowly over the pieces' : mode === 'map' ? 'Map · camera off' : 'Tap a piece, or pick a group below';
 }
 
 function updateStats(c, tracking) {
   if (!c) return;
   S.counts = c;
+  // Only checked pieces are counted (v0.20); entries still being checked
+  // show as amber "scan closer" rings and are counted apart.
   const parts = [`${c.pieces} pieces`];
-  if (S.box) parts.push(`${c.placed} placed`);
+  if (c.gone) parts.push(`${c.gone} moved, not found yet`);
+  if (S.box) parts.push(`${c.placed} on box picture`);
+  if (c.unchecked) parts.push(`scan closer at ${c.unchecked} ◌`);
   if (c.inPuzzle) parts.push(`${c.inPuzzle} in puzzle`);
   const tilt = tiltDegOf(S.lastTilt);
   if (tilt >= 4) parts.push(`${Math.round(tilt)}° tilt`);
@@ -689,23 +689,19 @@ function updateStats(c, tracking) {
     + (c.inPuzzle ? `, ${c.inPuzzle} marked as in the puzzle${c.expected ? ` (${Math.round((100 * c.inPuzzle) / c.expected)}% done)` : ''}` : '')
     + (c.islands > 1 ? `, in ${c.islands} scan groups.` : '.')
     + (S.box ? ` Corners found: ${c.corner} of 4${c.cornerUnplaced ? ` (+${c.cornerUnplaced} corner-shaped piece${c.cornerUnplaced > 1 ? 's' : ''} not placed on the box yet)` : ''}.` : '')
-    + (c.cornerDoubt ? ` ${c.cornerDoubt} more piece${c.cornerDoubt > 1 ? 's look' : ' looks'} like a corner but a better one already holds that corner (duplicate or misread) — Tidy up merges duplicates.` : '');
+    + (c.cornerDoubt ? ` ${c.cornerDoubt} more piece${c.cornerDoubt > 1 ? 's look' : ' looks'} like a corner but a better one already holds that corner.` : '');
   // The catalog can't honestly hold more pieces than the puzzle has. When it
   // does, tracking broke and the same pieces were catalogued twice.
-  const warn = $('countWarn');
-  warn.hidden = !over && !(c.islands > 3);
-  if (!warn.hidden) {
-    warn.textContent = over
-      ? `That's more than the ${c.expected} pieces this puzzle has — the same pieces were probably catalogued more than once after tracking was lost. Tidy up to fold them back together.`
-      : `${c.islands} separate scan groups: tracking keeps breaking, so pieces may be catalogued twice. Tidy up to fold them back together.`;
-  }
+  // (Duplicates are folded back together automatically - no Tidy up button
+  // since v0.20; a count over the puzzle's size is flagged in reports.)
+  $('countWarn').hidden = true;
   // Chip counts, so you know whether it's worth tapping.
   const chip = (k, n, label) => { const b = $('findBar').querySelector(`[data-filter=${k}]`); b.textContent = n ? `${label} (${n})` : label; b.disabled = !n; };
   // The chip counts what lighting it up will show: corners placed + candidates.
   chip('corner', c.corner + (c.cornerUnplaced || 0), 'Corners');
   chip('border', c.border, 'Edges');
   chip('unplaced', Math.max(0, c.shaped - c.placed), 'Unplaced');
-  chip('unread', Math.max(0, c.pieces - c.shaped), 'Unread');
+  chip('unread', c.unchecked || 0, 'Need closer look');
   chip('zones', S.box ? c.placed : 0, 'Zones');
   $('pairsBtn').disabled = c.shaped < 2;
   const dot = $('trackDot');
@@ -859,6 +855,8 @@ overlay.addEventListener('pointerup', (e) => {
   const spot = (S.last.spots || []).find((s) => pointInPoly(fx, fy, s.poly));
   if (spot) { openSpot(spot); return; }
   const hit = S.last.dets.find((d) => d.id && pointInPoly(fx, fy, d.pts));
+  const ring = !hit && S.last.dets.find((d) => d.status === 'checking' && pointInPoly(fx, fy, d.pts));
+  if (ring) { toast(ring.close ? 'Checking this piece — hold steady a moment.' : 'Not checked yet — bring the phone closer (about two pieces across the screen) and hold steady.', 3500); return; }
   if (hit) {
     if (S.mode !== 'find') setMode('find');
     W.post({ type: 'select', id: hit.id });
@@ -892,6 +890,14 @@ function pointInPoly(x, y, pts) {
 // ---------- find panel ----------
 const SIDE = { T: 'tab', B: 'blank', F: 'flat edge' };
 // Plain-words match verdicts (PH.matchVerdict): what the percentage means.
+// Why colour couldn't be trusted for a fit (PH.colourDoubt)
+const COLOUR_DOUBT = {
+  glare: 'glare or washed-out light on the edge',
+  dark: 'the piece was read too dark',
+  bright: 'the piece was read too bright',
+  'glare+dark': 'glare, and the piece was read too dark',
+  'glare+bright': 'glare, and the piece was read too bright',
+};
 const VERDICT = { strong: 'Strong match', likely: 'Likely', maybe: 'Maybe', weak: 'Unlikely', alike: 'Look-alike' };
 function showFind(desc) {
   S.desc = desc;
@@ -988,18 +994,17 @@ function showFind(desc) {
     }
     e.matches.slice(0, 4).forEach((m, i) => {
       const c = document.createElement('div');
-      const trusted = m.loopOk || (p.confirmed && m.confirmed);
-      c.className = 'cand ' + (i === 0 && likely && trusted ? 'gold' : i < 3 ? 'silver' : '') + (m.confirmed ? '' : ' unconfirmed') + (m.verdict === 'weak' ? ' weak' : '');
+      c.className = 'cand ' + (m.sure ? 'gold' : i < 3 ? 'silver' : '') + (m.confirmed ? '' : ' unconfirmed') + (m.verdict === 'weak' ? ' weak' : '');
       const cv = document.createElement('canvas');
       cv.width = cv.height = 144;
       drawThumb(cv, m, m.edgeB, EDGE_COLORS[e.edge]);
       const label = document.createElement('div');
       const v = document.createElement('div');
       v.className = 'verdict';
-      v.textContent = VERDICT[m.verdict] || '';
-      label.textContent = `#${m.id} · ${Math.round((m.prob || 0) * 100)}%${m.loops >= 2 ? ' · 2×3 ✓' : m.loopOk ? ' · 2×2 ✓' : m.mutual ? ' · picks it too' : m.adj > 0.3 ? ' · box ✓' : ''}${m.confirmed ? '' : ' · ?'}`;
+      v.textContent = m.tie ? '2 possible fits' : VERDICT[m.verdict] || '';
+      label.textContent = `#${m.id} · ${Math.round((m.prob || 0) * 100)}%${m.loops >= 2 ? ' · 2×3 ✓' : m.loopOk ? ' · 2×2 ✓' : m.mutual ? ' · picks it too' : m.adj > 0.3 ? ' · box ✓' : ''}${m.confirmed ? '' : ' · ?'}${m.gone ? ' · moved — scan to find it' : ''}${m.colDoubt ? ' · colour not checked' : ''}`;
       label.prepend(v);
-      label.title = (m.located ? '' : 'Not on the table map right now. ') + (m.confirmed ? '' : 'Its shape has been read only once (dashed frame).');
+      label.title = (m.gone ? 'This piece was moved and hasn’t been found again yet: sweep the table to find it. ' : m.located ? '' : 'Not on the table map right now. ') + (m.confirmed ? '' : 'Its shape has been read only once (dashed frame).') + (m.colDoubt ? ` Colour wasn’t used for this fit: ${COLOUR_DOUBT[m.colDoubt] || COLOUR_DOUBT.glare} — rescan these pieces in even light to check it.` : '');
       const acts = document.createElement('div');
       acts.className = 'acts';
       const yes = document.createElement('button'); yes.className = 'yes'; yes.textContent = 'Fits';
@@ -1070,7 +1075,7 @@ function mapShowSelection(desc) {
   const roles = new Map([[desc.piece.id, 'sel']]), lines = [];
   for (const e of desc.edges || []) {
     (e.matches || []).slice(0, 3).forEach((m, i) => {
-      const gold = i === 0 && m.prob >= 0.5 && (m.loopOk || (desc.piece.confirmed && m.confirmed));
+      const gold = !!m.sure; // (the same rule as the camera view: PH.sureFit)
       if (!roles.has(m.id)) roles.set(m.id, gold ? 'gold' : 'silver');
       lines.push([desc.piece.id, m.id, gold ? '#ffcc00' : 'rgba(201,206,214,0.8)']);
     });
@@ -1388,13 +1393,6 @@ $('frameShot').onclick = async () => {
   frameSetup.open(bmp, currentTilt());
 };
 $('frameForget').onclick = () => { $('menu').hidden = true; W.post({ type: 'frameClear' }); toast('Border mark forgotten.'); applyPower(); };
-$('tidyBtn').onclick = () => {
-  $('menu').hidden = true;
-  noteActivity(); applyPower();
-  closeFind(); closeMatches(); clearFilter();
-  toast('Tidying up…', 30000);
-  W.post({ type: 'tidy' });
-};
 $('sens').oninput = (e) => {
   const v = parseInt(e.target.value, 10);
   $('sensVal').textContent = v;
@@ -1458,6 +1456,67 @@ function afterReset() {
 // Taught table colours survive a reset unless forgotten here: on a different
 // table (or under different light) they make the board itself look like a
 // piece, which is what happened moving from the white board to the glass table.
+// The small box picture steps to the other side of the screen when a lit-up
+// piece is under it (owner's screenshot 6:11: it covered pieces being found).
+function minimapAside(M) {
+  if (minimap.hidden || minimap.classList.contains('big') || !S.last || !S.last.highlights) return;
+  const r = minimap.getBoundingClientRect(), o = overlay.getBoundingClientRect(), pad = 12;
+  const under = S.last.highlights.some((h) => {
+    if (!h.visible) return false;
+    const [x, y] = M.toScreen(h.x, h.y);
+    return x + o.left > r.left - pad && x + o.left < r.right + pad && y + o.top > r.top - pad && y + o.top < r.bottom + pad;
+  });
+  if (under) minimap.classList.toggle('right');
+}
+
+// ---------- More > What the colours mean ----------
+// Built from the overlay's own colour tables (STATUS / ROLE), so the key can't
+// drift from what is drawn (owner, 2026-10-05: explain the piece colouring).
+function buildColorKey() {
+  const box = $('colorKeyList');
+  if (!box || box.childElementCount) return;
+  const sw = (draw) => {
+    const c = document.createElement('canvas'); c.width = c.height = 56;
+    const g = c.getContext('2d'); g.scale(2, 2); draw(g); return c;
+  };
+  const dot = (col) => (g) => { g.fillStyle = col; g.beginPath(); g.arc(14, 14, 6, 0, Math.PI * 2); g.fill(); };
+  const ring = (col, w, dash) => (g) => { g.strokeStyle = col; g.lineWidth = w || 3; g.setLineDash(dash || []); g.beginPath(); g.arc(14, 14, 10, 0, Math.PI * 2); g.stroke(); };
+  const star = (col) => (g) => { ring(col, 4)(g); g.fillStyle = col; g.font = 'bold 12px sans-serif'; g.textAlign = 'center'; g.fillText('★', 14, 18); };
+  const groups = [
+    ['Dots on pieces', [
+      [(g) => drawCheckingMark(g, 14, 14, 9, 1), '<b>Amber ring with +</b> — needs more scanning: bring the phone closer and hold steady. Not counted yet.'],
+      [dot(STATUS.shaped.stroke), 'Blue — a checked piece.'],
+      [dot(STATUS.placed.stroke), 'Green — checked and matched to a spot on the box picture.'],
+      [ring(STATUS.merged.stroke, 2.5, STATUS.merged.dash), 'Orange dashed — pieces touching; spread them apart.'],
+      [ring(STATUS.done.stroke, 2.5, STATUS.done.dash), 'Faint dashed — marked as already in the puzzle.'],
+    ]],
+    ['Highlights (Find, Border, Map)', [
+      [ring(ROLE.sel.color, 4), 'White — the piece you tapped.'],
+      [star(ROLE.gold.color), 'Gold ★ — a sure fit.'],
+      [ring(ROLE.silver.color, 3), 'Silver — a possible fit ("2 possible fits": the shapes can’t tell them apart yet).'],
+      [ring(ROLE.border.color, 4), 'Teal — edge pieces (one straight side).'],
+      [ring(ROLE.corner.color, 4), 'Orange — corner pieces (two straight sides).'],
+      [ring(ROLE.find.color, 4), 'Pink — pieces picked by the filter you chose.'],
+      [(g) => ZONE_COLORS.forEach((c, i) => { g.fillStyle = c; g.fillRect(2 + (i % 3) * 8, 6 + Math.floor(i / 3) * 8, 7, 7); }), 'Zone colours — sorting areas A–F, the same colours on the box picture.'],
+      [(g) => EDGE_COLORS.forEach((c, i) => { g.fillStyle = c; g.fillRect(4 + i * 5, 8, 4, 12); }), 'Red / cyan / yellow / purple side marks — the four sides of the selected piece, as named in its match list.'],
+    ]],
+    ['Map', [
+      [(g) => { g.fillStyle = 'rgba(160,120,220,0.55)'; g.fillRect(4, 4, 20, 20); }, 'Shaded block — the assembled part of the puzzle.'],
+      [(g) => { g.strokeStyle = '#35e0d8'; g.lineWidth = 2; g.setLineDash([3, 3]); g.strokeRect(6, 6, 16, 16); }, 'Dashed squares — open spots in it.'],
+      [(g) => { g.fillStyle = '#555'; g.font = '12px sans-serif'; g.fillText('—', 8, 18); }, 'A piece that was moved and not found yet is left off the Map until a sweep finds it again.'],
+    ]],
+  ];
+  for (const [title, rows] of groups) {
+    const h = document.createElement('h4'); h.textContent = title; box.append(h);
+    for (const [draw, text] of rows) {
+      const r = document.createElement('div'); r.className = 'key-row';
+      const t = document.createElement('span'); t.innerHTML = text;
+      r.append(sw(draw), t); box.append(r);
+    }
+  }
+}
+buildColorKey();
+
 // ---------- puzzle library ----------
 function showLibrary(m) {
   $('libCurrent').textContent = m.current ? `— now: ${m.current}` : '';
@@ -1542,7 +1601,7 @@ async function finishReport(workerData, analyzed, boxImg) {
   bump('reports');
   const data = {
     app: APP_VERSION, time: new Date().toISOString(), userAgent: navigator.userAgent,
-    screen: { w: screen.width, h: screen.height, dpr: devicePixelRatio, viewW: innerWidth, viewH: innerHeight },
+    screen: { w: screen.width, h: screen.height, dpr: devicePixelRatio, viewW: innerWidth, viewH: innerHeight, appH: Math.round($('app').getBoundingClientRect().height), toolbarBottom: Math.round($('toolbar').getBoundingClientRect().bottom), standalone: matchMedia('(display-mode: standalone)').matches },
     video: { w: video.videoWidth, h: video.videoHeight, settings: S.track && S.track.getSettings ? S.track.getSettings() : null,
       // What the camera could do (focus/exposure/zoom ranges, torch), for tuning.
       capabilities: (() => { try { return S.track && S.track.getCapabilities ? S.track.getCapabilities() : null; } catch (_) { return null; } })(),

@@ -39,7 +39,7 @@ const CASES = [
     const eng = new PH.Engine();
     eng.processSnap(S.matSource(cv, m));
     m.delete();
-    const n = eng.counts().pieces;
+    const n = eng.counts().entries;
     const ok = n >= c.minPieces;
     if (!ok) failures++;
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${c.file.padEnd(15)} ${n} pieces catalogued (need >= ${c.minPieces})`);

@@ -51,10 +51,22 @@
     // Box-photo pixels per piece side: below ~48 placement gets unreliable
     // (Piece Finder's threshold); the page warns.
     const srcPx = Math.min((d(corners[0], corners[1]) + d(corners[3], corners[2])) / 2 / cols, (d(corners[0], corners[3]) + d(corners[1], corners[2])) / 2 / rows);
-    const box = { cols, rows, S, W, H, lab, preview, srcPx: Math.round(srcPx) };
+    // `pieces`: the count typed on the box screen - a 1000-piece box's grid
+    // is 27 x 37 = 999, which named saves "999 pieces" (owner, 2026-10-05).
+    const box = { cols, rows, S, W, H, lab, preview, srcPx: Math.round(srcPx), pieces: opts.pieces > 0 ? Math.round(opts.pieces) : PH.standardCount(cols * rows) };
     PH.computeCells(box);
     return box;
   };
+
+  /** The piece count a puzzle is sold as, from its grid: a grid within 3% of
+   *  a standard size (27 x 37 = 999 -> 1000) is that size. Boxes saved before
+   *  the typed count was kept. */
+  PH.STANDARD_COUNTS = [100, 150, 200, 250, 300, 500, 750, 1000, 1500, 2000, 3000];
+  PH.standardCount = function (n) {
+    for (const c of PH.STANDARD_COUNTS) if (Math.abs(n - c) <= c * 0.03) return c;
+    return n;
+  };
+  PH.boxPieces = (box) => (box ? box.pieces || PH.standardCount(box.cols * box.rows) : 0);
 
   /** Sorting zones (tray sorting, PuzAI's main feature): the box picture in
    *  6 areas - 3 x 2, or 2 x 3 for a tall box - lettered A-F in reading

@@ -21,12 +21,20 @@ button { font: inherit; color: inherit; }
 .small { font-size: 13px; }
 
 #app { position: fixed; inset: 0; }
+/* Home-Screen app on iPhone: the layout viewport stopped ~48 pt short of the
+   screen's bottom (reports: 848 of 896 pt), leaving a dark band under the tab
+   bar. Size the app to the whole screen there (100lvh); the tab bar keeps its
+   safe-area padding. Browser tabs keep inset: 0 (their toolbars come and go). */
+@media (display-mode: standalone) {
+  html, body { height: 100lvh; }
+  #app { bottom: auto; height: 100lvh; }
+}
 #video, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
 #video { object-fit: cover; background: #000; }
 #overlay { touch-action: none; }
 /* Table view (Map mode): fills the screen above the camera layers. */
 #tableMap { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; background: #1a1f26; } /* after #video/#overlay in the DOM: paints above them, below the bars */
-#mapCtrls { position: absolute; right: 10px; top: calc(var(--safe-t) + 56px); z-index: 6; display: flex; flex-direction: column; gap: 8px; }
+#mapCtrls { position: absolute; right: 10px; top: calc(var(--top-h, 52px) + 8px); /* below the top bar, which can wrap to 2-3 lines */ z-index: 6; display: flex; flex-direction: column; gap: 8px; }
 #mapCtrls button { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: rgba(0, 0, 0, 0.62); color: var(--text); font-size: 13px; }
 
 #topbar { position: absolute; top: calc(var(--safe-t) + 8px); left: 50%; transform: translateX(-50%);
@@ -62,8 +70,11 @@ button { font: inherit; color: inherit; }
 /* Find-mode chips: piece classes to light up, match cycling, map toggle. */
 /* The gaps between chips stay click-through, so the chip row never steals a
    tap meant for a piece underneath it. */
+/* One row that scrolls sideways (v0.20; two wrapped rows plus the tab bar
+   left the camera ~60% of the screen). */
 #findBar { position: absolute; left: 0; right: 0; bottom: calc(var(--safe-b) + 68px); z-index: 6;
-  display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; padding: 6px 10px; pointer-events: none; }
+  display: flex; flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; gap: 6px; padding: 6px 10px;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 #findBar::-webkit-scrollbar { display: none; }
 body.panel-open #findBar, body.panel-open #matchBar { display: none; }
 #findBar button { pointer-events: auto; flex: none; border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px;
@@ -74,7 +85,7 @@ body.panel-open #findBar, body.panel-open #matchBar { display: none; }
 #findBar button[data-filter=border].on { background: #35e0d8; color: #111418; }
 #findBar button:disabled { opacity: 0.45; }
 
-#matchBar { position: absolute; left: 8px; right: 8px; bottom: calc(var(--safe-b) + 160px); z-index: 6;
+#matchBar { position: absolute; left: 8px; right: 8px; bottom: calc(var(--safe-b) + 120px); z-index: 6;
   display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 14px;
   background: rgba(22, 26, 32, 0.94); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5); }
 #matchBar > button { border: 0; background: rgba(255, 255, 255, 0.1); border-radius: 10px;
@@ -110,12 +121,15 @@ body.panel-open #findBar, body.panel-open #matchBar { display: none; }
 #matchLabel { margin-top: 4px; color: var(--muted); }
 .warn-note { color: #ffb347; }
 
-#minimap { position: absolute; left: 10px; bottom: calc(var(--safe-b) + 78px); width: 42vw; max-width: 340px;
+/* A corner thumbnail (owner's screenshots: at 42% of the width it covered a
+   quarter of the camera view); tap to enlarge. */
+#minimap { position: absolute; left: 10px; bottom: calc(var(--safe-b) + 78px); width: 28vw; max-width: 220px;
   border-radius: 8px; border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); touch-action: none; }
 #minimap.big { width: calc(100vw - 20px); max-width: 720px; }
+#minimap.right:not(.big) { left: auto; right: 10px; }
 /* Keep the box picture clear of the chip bar / match cycler stacked above the toolbar. */
-body.findbar #minimap { bottom: calc(var(--safe-b) + 150px); } /* find bar can wrap to two rows */
-body.findbar.matchbar #minimap { bottom: calc(var(--safe-b) + 262px); }
+body.findbar #minimap { bottom: calc(var(--safe-b) + 116px); } /* above the one-row find bar */
+body.findbar.matchbar #minimap { bottom: calc(var(--safe-b) + 226px); }
 
 #toolbar { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-around;
   padding: 8px 6px calc(var(--safe-b) + 8px); background: linear-gradient(transparent, rgba(0, 0, 0, 0.75) 35%); }
@@ -162,6 +176,9 @@ body.findbar.matchbar #minimap { bottom: calc(var(--safe-b) + 262px); }
 .menu-actions .danger { color: var(--danger); }
 details summary { cursor: pointer; color: var(--accent); }
 details ul { padding-left: 18px; }
+#colorKeyList h4 { margin: 10px 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
+#colorKeyList .key-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
+#colorKeyList canvas { width: 28px; height: 28px; flex: none; }
 
 .screen { position: fixed; inset: 0; background: var(--bg); z-index: 10; display: flex; flex-direction: column; }
 #start { align-items: center; justify-content: center; padding: 24px; }

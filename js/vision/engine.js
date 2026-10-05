@@ -58,6 +58,7 @@
       this.calibW = null; // match-probability weights refitted on the answer key (null = PH.CALIB_PRIOR)
       this.bestCache = new Map(); // 'id:edge' -> {v, best}: best partner per edge (mutual-best check)
       this.rejects = {}; // why detections were not catalogued (reports)
+      this.boardRef = null; this.boardSeen = null; // the scan's board colour (noteBoard)
     }
 
     // ---------- catalog helpers ----------
@@ -79,11 +80,19 @@
       this.touch(p);
       return p;
     }
+    /** Shown, counted and matched only once checked (owner, 2026-10-05:
+     *  "don't show pieces not fully checked"). */
+    // (opts.checkedOnly === false: tests of other features - the Map, assembled
+    // parts - may treat every read entry as shown)
+    isChecked(p) { return p.state === 'checked' || (this.opts.checkedOnly === false && !!p.t1); }
+    checkedPieces() { const out = []; for (const p of this.pieces.values()) if (this.isChecked(p)) out.push(p); return out; }
     counts() {
-      let shaped = 0, placed = 0, located = 0, pieces = 0, border = 0, cornerShaped = 0, cornerDoubt = 0;
+      let shaped = 0, placed = 0, located = 0, pieces = 0, border = 0, cornerShaped = 0, cornerDoubt = 0, unchecked = 0, gone = 0;
       const islands = new Set();
       const doubt = this.cornerDoubts();
       for (const p of this.pieces.values()) {
+        if (!this.isChecked(p)) { unchecked++; continue; }
+        if (p.gone) gone++;
         pieces++;
         if (p.t1) shaped++;
         if (p.t2 && p.t2.conf >= 0.35) placed++;
@@ -101,7 +110,7 @@
       // every undoubted corner shape was counted: 6 corners on a 15x20 box.
       const corner = this.box ? doubt.winners.size : cornerShaped;
       const cornerUnplaced = this.box ? cornerShaped - doubt.winners.size : 0;
-      return { inPuzzle: [...this.pieces.values()].filter((p) => p.inPuzzle).length, pieces, shaped, placed, located, border, corner, cornerUnplaced, cornerDoubt, islands: islands.size, expected: this.box ? this.box.cols * this.box.rows : 0 };
+      return { inPuzzle: [...this.pieces.values()].filter((p) => p.inPuzzle && this.isChecked(p)).length, pieces, checked: pieces, unchecked, gone, entries: this.pieces.size, shaped, placed, located, border, corner, cornerUnplaced, cornerDoubt, islands: islands.size, expected: PH.boxPieces(this.box) };
     }
 
     /**
@@ -122,7 +131,7 @@
       const isCornerCell = (c, r) => (c === 0 || c === cols - 1) && (r === 0 || r === rows - 1);
       const best = new Map();
       for (const p of this.pieces.values()) {
-        if (!edgeFlags(p).corner || !p.t2 || !p.t2.cands.length || p.t2.conf < 0.35) continue;
+        if (!this.isChecked(p) || !edgeFlags(p).corner || !p.t2 || !p.t2.cands.length || p.t2.conf < 0.35) continue;
         const c = p.t2.cands[0];
         if (!isCornerCell(c.col, c.row)) { doubt.add(p.id); continue; } // corner shape but placed mid-edge: misread
         const key = c.row * cols + c.col;
@@ -229,6 +238,181 @@
       return { merged, islands: joinedIslands };
     }
 
+    /**
+     * Housekeeping (v0.20; replaces the Tidy up button): runs by itself, a
+     * few ms per frame, and in full when a saved scan is loaded.
+     *  - same-spot duplicates: two entries on one spot (within half a piece,
+     *    one scan group, alike in size) that were never detected in the same
+     *    frame are one piece - merged, unless two close reads clearly differ;
+     *  - "checked": an entry becomes a counted, shown piece once it has two
+     *    agreeing close reads (or one from a still photo), 4+ steady
+     *    sightings at 2+ separate moments, and its own spot;
+     *  - entries that never check out after many close views are dropped;
+     *  - the box-picture duplicate clean-up (dedupeByCell).
+     */
+    housekeep(budgetMs) {
+      const t0 = now(), end = budgetMs === Infinity ? Infinity : t0 + budgetMs;
+      const unitT = this.unitTable();
+      const st = this.hk || (this.hk = { merged: 0, dropped: 0, checked: 0 });
+      if (unitT) {
+        const cell = unitT, grid = new Map();
+        const key = (isl, gx, gy) => isl + ':' + gx + ':' + gy;
+        for (const p of this.pieces.values()) {
+          if (!p.pos || p.gone) continue;
+          const k = key(p.island, Math.floor(p.pos[0] / cell), Math.floor(p.pos[1] / cell));
+          if (!grid.has(k)) grid.set(k, []);
+          grid.get(k).push(p);
+        }
+        const near = (A) => {
+          const out = [], gx = Math.floor(A.pos[0] / cell), gy = Math.floor(A.pos[1] / cell);
+          for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+            for (const B of grid.get(key(A.island, gx + dx, gy + dy)) || []) {
+              if (B !== A && this.pieces.has(B.id) && Math.hypot(A.pos[0] - B.pos[0], A.pos[1] - B.pos[1]) < unitT * 0.5) out.push(B);
+            }
+          }
+          return out;
+        };
+        // round robin: each frame's slice continues where the last one stopped
+        const list = [...this.pieces.values()], L = list.length, start = L ? (this.hkCursor || 0) % L : 0;
+        for (let i = 0; i < L; i++) {
+          if (now() > end) { this.hkCursor = (start + i) % L; break; }
+          const A = list[(start + i) % L];
+          if (!this.pieces.has(A.id) || !A.pos || A.gone) continue;
+          let own = true;
+          for (const B of near(A)) {
+            if ((A.seenWith && A.seenWith.has(B.id)) || (B.seenWith && B.seenWith.has(A.id))) continue; // two pieces side by side
+            const ar = (A.area || 1) / (B.area || 1);
+            const veto = A.t1 && B.t1 && PH.isCloseRead(A.t1) && PH.isCloseRead(B.t1) && PH.clearlyDifferent(A.t1, B.t1);
+            if (ar < 0.6 || ar > 1.6 || veto) { own = false; A.sharedSpot = true; continue; }
+            this.mergeEntries(A, B);
+            st.merged++;
+            if (!this.pieces.has(A.id)) break;
+          }
+          if (!this.pieces.has(A.id)) continue;
+          if (own) A.sharedSpot = false;
+          if (A.state !== 'checked') {
+            const close = A.t1 && PH.isCloseRead(A.t1);
+            const reads = close && ((A.closeAgree || 0) >= 2 || A.photoRead);
+            const seen = A.photoRead || ((A.sightings || 0) >= 4 && (A.moments || 0) >= 2);
+            if (reads && seen && own) { A.state = 'checked'; A.checkedAt = Date.now(); st.checked++; this.touch(A); this.version++; this.matchCache.clear(); }
+            else if (!close && (A.closeViews || 0) >= 20 || (!A.t1 && (A.t1Fail || 0) >= 6 && (A.sightings || 0) >= 20)) {
+              // seen up close many times and still no good close read: not a piece
+              this.removePiece(A.id); st.dropped++;
+            }
+          }
+        }
+      }
+      if (this.box && now() < end) this.dedupeByCell(Math.max(1, end - now()));
+      if (budgetMs === Infinity || (this.frameNo || 0) % 60 === 30) this.groupsAndEdges();
+      let nc = 0; for (const p of this.pieces.values()) if (this.isChecked(p)) nc++;
+      this.nChecked = nc;
+      return st;
+    }
+    /** A short log of what changed entries (reports, tests): merges,
+     *  re-finds, drops, gone. */
+    logEvt(kind, a, b) {
+      const L = this.events || (this.events = []);
+      const pa = a && this.pieces.get(a);
+      L.push({ f: this.fNo || 0, kind, a, b: b || null, pos: pa && pa.pos ? pa.pos.map(Math.round) : null });
+      if (L.length > 400) L.shift();
+    }
+    /** Entry `from` turned out to be entry `to` (merged): kept so reports and
+     *  tests can follow an entry number to the piece it became. */
+    noteMerged(from, to) {
+      this.logEvt('merge', from, to);
+      const m = this.mergedInto || (this.mergedInto = new Map());
+      m.set(from, to);
+      if (m.size > 20000) m.delete(m.keys().next().value);
+    }
+    /** The entry number `id` became after merges (itself if never merged). */
+    finalId(id) {
+      const m = this.mergedInto;
+      for (let k = 0; m && m.has(id) && k < 50; k++) id = m.get(id);
+      return id;
+    }
+    /** Why entries are not checked yet (reports, tests): counts per missing
+     *  requirement over the unchecked entries. */
+    whyUnchecked() {
+      const why = { noRead: 0, farOnly: 0, oneClose: 0, fewSightings: 0, oneMoment: 0, sharedSpot: 0, n: 0 };
+      for (const p of this.pieces.values()) {
+        if (p.state === 'checked') continue;
+        why.n++;
+        if (!p.t1) why.noRead++;
+        else if (!PH.isCloseRead(p.t1)) why.farOnly++;
+        else if ((p.closeAgree || 0) < 2 && !p.photoRead) why.oneClose++;
+        if ((p.sightings || 0) < 4) why.fewSightings++;
+        if ((p.moments || 0) < 2) why.oneMoment++;
+        if (p.sharedSpot) why.sharedSpot++;
+      }
+      return why;
+    }
+    /** How far colour can be trusted in this scan (reports): checked pieces'
+     *  edges whose colour was read in bad conditions, by reason; and the
+     *  fits the box picture backs (both pieces placed with confidence, side
+     *  by side there) that colour agrees with, rejects ("would hurt": the
+     *  colour test would throw out a real fit), or can't judge. */
+    colourHealth() {
+      const out = { edges: 0, doubt: {}, box: { pairs: 0, agree: 0, reject: 0, doubt: 0 }, rejects: [] };
+      const ps = this.checkedPieces().filter((p) => p.t1 && !p.gone), cell = new Map();
+      for (const p of ps) {
+        for (const e of p.t1.edges) if (e.type !== 'F') { out.edges++; if (e.cdoubt) out.doubt[e.cdoubt] = (out.doubt[e.cdoubt] || 0) + 1; }
+        const c = p.t2 && p.t2.conf >= PH.BOX_VETO_CONF && p.t2.cands && p.t2.cands[0];
+        if (c) cell.set(c.col + ',' + c.row, { p, c });
+      }
+      const DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+      for (const { p, c } of cell.values()) for (let k = 0; k < 4; k++) {
+        const side = (k + c.rot) % 4;
+        if (side !== 1 && side !== 2) continue; // each pair once
+        const nb = cell.get((c.col + DIRS[side][0]) + ',' + (c.row + DIRS[side][1]));
+        if (!nb) continue;
+        const m = (((side + 2) % 4) - nb.c.rot + 4) % 4, eA = p.t1.edges[k], eB = nb.p.t1.edges[m];
+        if (eA.type === 'F' || eB.type === 'F') continue;
+        const r = PH.edgeScore(eA, eB);
+        if (!r) continue;
+        out.box.pairs++;
+        if (r.colDoubt) out.box.doubt++;
+        else if (r.colShare === undefined) continue;
+        else if (r.colShare >= PH.COL_SHARE) out.box.agree++;
+        else {
+          out.box.reject++;
+          if (out.rejects.length < 20) out.rejects.push({ a: p.id, b: nb.p.id, share: +r.colShare.toFixed(2), clip: [eA.cc && +eA.cc.clip.toFixed(2), eB.cc && +eB.cc.clip.toFixed(2)], k: [p.t1.lf && p.t1.lf.kRaw && +p.t1.lf.kRaw.toFixed(2), nb.p.t1.lf && nb.p.t1.lf.kRaw && +nb.p.t1.lf.kRaw.toFixed(2)] });
+        }
+      }
+      return out;
+    }
+    /** Fold entry `drop` into `keep` (the same physical piece catalogued
+     *  twice): the checked one, else the better-read one, else the older one
+     *  keeps its number; evidence, shapes and the owner's answers are joined. */
+    mergeEntries(A, B) {
+      const rank = (p) => (p.state === 'checked' ? 1e6 : 0) + (p.t1 && PH.isCloseRead(p.t1) ? 1e4 : 0) + (p.closeAgree || 0) * 100 + (p.sightings || 0) - p.id * 1e-6;
+      const keep = rank(A) >= rank(B) ? A : B, drop = keep === A ? B : A;
+      if (drop.t1) {
+        if (!keep.t1 || (PH.isCloseRead(drop.t1) && !PH.isCloseRead(keep.t1))) { keep.t1 = drop.t1; keep.t2 = drop.t2; keep.closeAgree = drop.closeAgree || 0; }
+        else if (PH.isCloseRead(drop.t1) === PH.isCloseRead(keep.t1)) {
+          const m = PH.samePiece(drop.t1, keep.t1); // (read, stored): the turn fuseShapes takes
+          if (m.ok && (keep.t1.nObs || 1) < 8) PH.fuseShapes(keep.t1, drop.t1, m.r);
+          keep.closeAgree = Math.max(keep.closeAgree || 0, drop.closeAgree || 0) + (m.ok && PH.isCloseRead(keep.t1) ? 1 : 0);
+        }
+      }
+      keep.sightings = (keep.sightings || 0) + (drop.sightings || 0);
+      keep.moments = Math.max(keep.moments || 0, drop.moments || 0) + (drop.moments ? 1 : 0);
+      keep.closeViews = (keep.closeViews || 0) + (drop.closeViews || 0);
+      keep.photoRead = keep.photoRead || drop.photoRead;
+      keep.wrong = [...new Set((keep.wrong || []).concat(drop.wrong || []))];
+      for (let k = 0; k < 4; k++) keep.joined[k] = keep.joined[k] || (drop.joined && drop.joined[k]);
+      keep.inPuzzle = Math.max(keep.inPuzzle || 0, drop.inPuzzle || 0);
+      keep.created = Math.min(keep.created || Infinity, drop.created || Infinity);
+      if (drop.seenWith) { const sw = keep.seenWith || (keep.seenWith = new Set()); for (const id of drop.seenWith) if (id !== keep.id) sw.add(id); }
+      for (const p of this.pieces.values()) if (p.seenWith && p.seenWith.delete(drop.id)) p.seenWith.add(keep.id);
+      if (!keep.pos && drop.pos) { keep.pos = drop.pos; keep.island = drop.island; }
+      if (drop.fp && keep.fp) keep.fp = PH.blendFp(keep.fp, drop.fp, 0.3);
+      for (const f of this.fbLog || []) { if (f.a === drop.id) f.a = keep.id; if (f.b === drop.id) f.b = keep.id; }
+      this.noteMerged(drop.id, keep.id);
+      this.touch(keep); this.removePiece(drop.id);
+      this.matchCache.clear();
+      return keep;
+    }
+
     // ---------- tracking ----------
     link(dets, unitF) {
       const prev = this.tracks;
@@ -297,7 +481,9 @@
       this.island = main.isl;
       // Outliers: a confidently tracked piece that disagrees with the consensus moved.
       const inl = new Set(res.inliers);
+      const frozen = this.frameCtx && this.frameCtx.offLight; // (odd light: pieces anchor the pose, nothing is moved)
       main.g.forEach((pr, k) => {
+        if (frozen) { if (!inl.has(k)) pr.d.id = null; return; }
         if (inl.has(k)) {
           // gentle refinement keeps the map consistent
           const q = PH.simApply(T, pr.src[0], pr.src[1]);
@@ -322,12 +508,43 @@
       return true;
     }
 
+    /** The camera barely moves between two analysed frames, so the last
+     *  pose still nearly fits: pieces are matched by spot and size alone
+     *  (no colours - a sudden exposure change or the phone's shadow broke the
+     *  colour links, and the map was lost and restarted, cataloguing every
+     *  piece again) and the pose is refitted. Needs 3+ pieces agreeing. */
+    poseBySpots(dets, unitF) {
+      const T0 = this.pose, unitT = this.unitTable();
+      if (!T0 || !this.island || !unitT) return false;
+      const s0 = PH.simScale(T0), pairs = [], used = new Set();
+      for (const d of dets) {
+        if (d.merged || d.border) continue;
+        const q = PH.simApply(T0, d.cx, d.cy);
+        let best = null, bd = Infinity, n = 0;
+        for (const p of this.pieces.values()) {
+          if (!p.pos || p.gone || p.island !== this.island) continue;
+          const dist = Math.hypot(p.pos[0] - q[0], p.pos[1] - q[1]);
+          if (dist > unitT * 0.6) continue;
+          const ar = (d.area * s0 * s0) / (p.area || 1);
+          if (ar < 0.6 || ar > 1.6) continue;
+          n++; if (dist < bd) { bd = dist; best = p; }
+        }
+        if (best && n === 1 && !used.has(best.id)) { used.add(best.id); pairs.push({ src: [d.cx, d.cy], dst: best.pos, d, p: best }); }
+      }
+      if (pairs.length < 3) return false;
+      const r = PH.simRansac(pairs, unitT * 0.35, 60, this.rnd);
+      if (!r || r.inliers.length < 3 || r.inliers.length < pairs.length * 0.6 || Math.abs(Math.log(PH.simScale(r.T) / s0)) > 0.2) return false;
+      this.pose = r.T;
+      for (const k of r.inliers) pairs[k].d.id = pairs[k].p.id;
+      this.rejects.poseBySpots = (this.rejects.poseBySpots || 0) + 1;
+      return true;
+    }
     // Find the pose from scratch by matching fingerprints against located pieces.
     relocalize(dets, unitF, onlyIsland) {
       const unitT = this.unitTable();
       if (!unitT) return null;
       const placed = [];
-      for (const p of this.pieces.values()) if (p.pos && (onlyIsland === undefined || p.island === onlyIsland)) placed.push(p);
+      for (const p of this.pieces.values()) if (p.pos && !p.gone && (onlyIsland === undefined || p.island === onlyIsland)) placed.push(p);
       if (placed.length < 3) return null;
       const expScale = unitT / unitF;
       const cand = [];
@@ -376,7 +593,7 @@
       if (!d.t1) return [];
       const out = [];
       for (const p of this.pieces.values()) {
-        if (!p.t1 || !p.pos || (filter && !filter(p))) continue;
+        if (!p.t1 || !p.pos || p.gone || (filter && !filter(p))) continue;
         // Outline (looser than SAME_SHAPE: views differ in zoom/angle) plus
         // matching print; RANSAC consensus then guards against the rest.
         const m = PH.samePiece(d.t1, p.t1);
@@ -489,10 +706,15 @@
       }
       const seg = PH.segment(proc, this.liveSegOpts(info, { timings: segT }));
       this.bg = seg.bg; this.thresh = seg.thresh;
+      // the board as this frame shows it (seg.bg is the chosen model's colour,
+      // which stays put when the light changes)
+      const boardNow = this.measureBoard(seg, proc) || seg.bg;
+      this.noteBoard(boardNow, info.still !== false);
       this.updateUnitLive(seg, proc, source);
       this.lastSegUnit = seg.unitArea; // the unit actually used this frame (for tests/reports)
       const t1 = now();
-      const dets = this.classify(seg.dets, seg.unitArea);
+      let dets = this.classify(seg.dets, seg.unitArea);
+      if (this.opts.dropDets) dets = dets.filter((d) => !this.opts.dropDets(d)); // tests: detections missed at random
       // Capture coach: pieces whose colour barely differs from the board
       // (pale pieces on a pale board: on synthetic tables half of them, vs
       // <= 3% on good setups; a dark cloth fixes it), and glare.
@@ -500,7 +722,8 @@
       for (const d of dets) {
         if (d.border || !d.fp) continue;
         cN++;
-        if (PH.dE(d.fp.L, d.fp.a, d.fp.b, seg.bg.L, seg.bg.a, seg.bg.b, 1) < 25) cLow++;
+        const c = d.fp.raw || [d.fp.L, d.fp.a, d.fp.b]; // plain colours: the board's own contrast
+        if (PH.dE(c[0], c[1], c[2], seg.bg.L, seg.bg.a, seg.bg.b, 1) < 25) cLow++;
       }
       this.coachNow = { n: cN, low: cLow, glare: +(seg.glare || 0).toFixed(3), boardL: Math.round(seg.bg.L) };
       // Pale pieces on a pale board: turn the texture channel on (with
@@ -516,10 +739,20 @@
       this.link(dets, unitF);
       // Set before the pose work so the shape-based fallback below can read
       // outlines; nothing in it depends on the pose.
-      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs, live: true, fg: seg.fg, procW: proc.w, procH: proc.h };
+      this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs, live: true, fg: seg.fg, procW: proc.w, procH: proc.h,
+        rgba: proc.invalid ? proc.data : null }; // (a straightened tilted view has empty corners outside the camera image: alpha 0)
       this.frameCtx.view = this.viewGeometry(this.unitLive || seg.unitArea, proc.scale, source.w, source.h);
+      // A frame much darker or brighter than the scan's usual board (the
+      // phone's shadow over the whole view, an exposure jump): its colours and
+      // even its outlines are off. It may keep pieces linked to their spots,
+      // but decides nothing new - no new entries, no "gone" or "swapped", no
+      // re-finding by shape (plan item 7).
+      this.frameCtx.offLight = !!(this.boardRef && boardNow && Math.abs(Math.log((boardNow.L || 1) / this.boardRef.L)) > Math.log(1.25));
+      this.frameCtx.boardL = boardNow ? Math.round(boardNow.L) : null;
+      if (this.frameCtx.offLight) this.rejects.offLight = (this.rejects.offLight || 0) + 1;
       for (const [k, c] of this.cands) if (this.fNo - c.last > 6) this.cands.delete(k); // lost from view
       let ok = this.fitPose(dets, unitF);
+      if (!ok) ok = this.poseBySpots(dets, unitF);
       if (!ok) {
         const r = this.relocalize(dets, unitF);
         if (r) {
@@ -611,8 +844,9 @@
         if (this.box && info.still !== false) this.autoBorder(proc, seg);
       }
       segT.spots = now() - ts;
-      // Background duplicate clean-up, a few ms every ~20 frames.
-      if ((this.frameNo = (this.frameNo || 0) + 1) % 20 === 0) this.dedupeByCell(3);
+      // Housekeeping (duplicates, "checked", leftovers), a few ms per frame.
+      this.frameNo = (this.frameNo || 0) + 1;
+      this.housekeep(this.opts.housekeepMs === undefined ? 4 : this.opts.housekeepMs);
       this.tracks = dets.map((d) => ({ id: d.id, cid: d.cid, x: d.cx, y: d.cy, fp: d.fp }));
       const pfOut = this.puzzleFrameOut(proc, pfFound); // (also sets this.pfViewH for the spots)
       const out = this.output(dets, proc);
@@ -659,6 +893,7 @@
       const snapModel = snapBest ? snapBest.c : null;
       const seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel } : { bg: this.bg, bgSmooth: 0.5 }));
       if (!this.bg) this.bg = seg.bg;
+      if (!this.boardRef && seg.bg && seg.bg.L > 15) { this.boardRef = { L: seg.bg.L, a: seg.bg.a, b: seg.bg.b }; this.boardRefDirty = true; } // (a first photo sets the scan's board)
       this.frameCtx = { source, scale: proc.scale, bg: seg.bg, thresh: seg.thresh, lut: seg.lut, unitArea: seg.unitArea, still: true, deadline: Infinity, fg: seg.fg, procW: proc.w, procH: proc.h };
       const dets = this.classify(seg.dets, seg.unitArea);
       const unitF = this.unitFrame(dets);
@@ -683,6 +918,17 @@
       const merged = this.mergeIslandsByShape(dets);
       this.assign(dets, unitF, proc);
       const work = this.runQueue(dets, Infinity);
+      // A still photo is the best view there will be: a close read in it
+      // checks the piece on its own (live scanning needs two agreeing ones).
+      for (const d of dets) {
+        const p = d.id && this.pieces.get(d.id);
+        if (!p) continue;
+        p.sightings = (p.sightings || 0) + 1;
+        if (d.t1 && PH.isCloseRead(d.t1) && p.t1 && PH.isCloseRead(p.t1)) p.photoRead = true;
+      }
+      this.housekeep(Infinity);
+      // (housekeeping may have merged entries: follow the photo's detections to the survivors)
+      for (const d of dets) if (d.id && !this.pieces.has(d.id)) { const f = this.finalId(d.id); d.id = this.pieces.has(f) ? f : null; }
       this.findSpots(dets, seg, proc, true, true); // assembled parts in the photo
       if (this.cellsDirty) this.assignCellsNow();
       Object.assign(this, saved);
@@ -692,7 +938,7 @@
         located, mergedIslands: merged,
         tilt: info.tilt ? Math.round(PH.tiltDeg(info.tilt.down)) : 0, autoTilt: autoTilt && { pitch: autoTilt.pitch, roll: autoTilt.roll, gain: +autoTilt.gain.toFixed(3), check: autoTilt.check },
         // pieces this photo recognized from earlier views (for checking/stitch UI)
-        recognized: dets.filter((d) => d.id && known.has(d.id)).map((d) => ({ id: d.id, corners: d.t1 ? d.t1.corners : null, firstCorners: this.pieces.get(d.id).t1 ? this.pieces.get(d.id).t1.corners : null })),
+        recognized: dets.filter((d) => d.id && known.has(d.id) && this.pieces.has(d.id)).map((d) => ({ id: d.id, corners: d.t1 ? d.t1.corners : null, firstCorners: this.pieces.get(d.id).t1 ? this.pieces.get(d.id).t1.corners : null })),
         shaped: work.t1, placed: work.t2,
         ms: now() - t0,
         counts: this.counts(),
@@ -898,7 +1144,7 @@
       const doubt = this.cornerDoubts();
       const out = [];
       for (const p of this.pieces.values()) {
-        if (!p.pos) continue;
+        if (!p.pos || !this.isChecked(p) || p.gone) continue; // the Map shows checked pieces where they are now
         const f = edgeFlags(p);
         const t1 = p.t1, pic = p.rd && p.pic;
         out.push({
@@ -1025,6 +1271,7 @@
         const o = idn.same;
         o.pos = p.pos; o.island = p.island; o.miss = 0; o.missing = false; o.lastSeen = Date.now();
         this.markMoved(o); this.touch(o);
+        this.noteMerged(p.id, o.id);
         this.removePiece(p.id); d.id = o.id;
         this.rejects.relinked = (this.rejects.relinked || 0) + 1;
         return 'merged';
@@ -1080,6 +1327,7 @@
 
     segOpts(extra) {
       return Object.assign({
+        boardRef: this.boardRef || null, // this session's usual board colour (PH.lightFix)
         minDE: this.opts.minDE, lightW: this.opts.lightW,
         taught: this.taught, palette: this.opts.useBoxPalette !== false && this.box ? this.box.palette : null,
         paletteWhite: this.box ? this.box.white : null,
@@ -1127,19 +1375,35 @@
       const claimed = new Set(dets.filter((d) => d.id).map((d) => d.id));
       const nearest = (d, T) => {
         const q = PH.simApply(T, d.cx, d.cy);
-        let best = null;
+        let best = null, spot = null, spots = 0;
         for (const p of this.pieces.values()) {
-          if (!p.pos || p.island !== this.island || claimed.has(p.id)) continue;
+          if (!p.pos || p.gone || p.island !== this.island || claimed.has(p.id)) continue; // a gone piece is found again by its shape, not its old spot
           const dist = Math.hypot(p.pos[0] - q[0], p.pos[1] - q[1]);
           if (dist > unitT * (d.merged ? 1.2 : 0.55)) continue;
           const sim = PH.fpSimilarity(d.fp, p.fp);
+          // The spot comes first (v0.20): one piece-sized thing on a piece's
+          // spot is that piece, even when its colours look different - the
+          // phone's shadow and exposure changed them (owner's report 11:14:
+          // 25 pieces catalogued twice on their own spots). Only a clear
+          // shape disagreement between two close reads says otherwise.
+          if (!d.merged && dist < unitT * 0.5) {
+            const ar = (d.area * s * s) / (p.area || 1);
+            if (ar > 0.6 && ar < 1.6) { spots++; if (!spot || dist < spot.dist) spot = { p, dist, sim }; }
+          }
           // A piece flagged missing is matched at its last-known spot too, but
           // needs a closer colour match (another piece may have taken the spot).
           if (sim < (p.missing ? 0.6 : 0.5)) continue;
           const c = dist / unitT + (1 - sim);
           if (!best || c < best.c) best = { c, p };
         }
-        return best && best.p;
+        if (best) return best.p;
+        if (spot && spots === 1 && !this.shapeVeto(d, spot.p)) { d.bySpot = true; return spot.p; }
+        if (PH.DEBUG_ASSIGN) {
+          let nb = null, nd = Infinity;
+          for (const p of this.pieces.values()) { if (!p.pos || p.island !== this.island) continue; const dd = Math.hypot(p.pos[0] - q[0], p.pos[1] - q[1]); if (dd < nd) { nd = dd; nb = p; } }
+          PH.DEBUG_ASSIGN({ det: Math.round(d.area), nearest: nb && nb.id, dist: +(nd / unitT).toFixed(2), claimed: nb && claimed.has(nb.id), gone: nb && nb.gone, sim: nb && +PH.fpSimilarity(d.fp, nb.fp).toFixed(2), area: nb && +((d.area * s * s) / nb.area).toFixed(2), spots, veto: spot ? 'checked' : 'nospot' });
+        }
+        return null;
       };
       // Pass 1: match by position; then refit the pose on every match so a
       // slightly-off pose (just relocalized, few anchors) doesn't cause misses.
@@ -1166,10 +1430,11 @@
         // Before adding a new piece, check whether a known piece was moved here
         // (or went missing earlier). Look-alikes are common (sky!), so a
         // candidate with a shape model must also match by shape.
-        const moved = this.findMoved(d, s, claimed);
+        const moved = this.frameCtx.offLight ? null : this.findMoved(d, s, claimed); // (colours are off in odd light)
         if (moved === 'defer') continue; // out of time this frame; decide next frame
         if (moved) {
           moved.pos = q; moved.island = this.island; moved.miss = 0; moved.missing = false; this.markMoved(moved); d.id = moved.id; claimed.add(moved.id); this.touch(moved);
+          if (moved.gone) { moved.gone = false; moved.refound = (moved.refound || 0) + 1; this.version++; }
           continue;
         }
         // Only good shots make new pieces: steady, close enough to read, piece-
@@ -1177,8 +1442,20 @@
         // the detection is then provisional until seen in a few such frames in
         // a row - one-off blur smears, shadow blobs and fragments never reach
         // the catalog.
-        const why = this.shotQuality(d);
+        const why = this.frameCtx.offLight ? 'offLightNew' : this.shotQuality(d);
         if (why) { this.rejects[why] = (this.rejects[why] || 0) + 1; continue; }
+        // A far view never starts a new entry right next to a checked piece
+        // that isn't accounted for in this frame: far away the map can be
+        // half a piece off (owner's video: false rings in the last overview),
+        // and a far read can't tell which piece it is. Close up, it can.
+        if (Math.sqrt(d.area) / this.frameCtx.scale / 1.1 < PH.CLOSE_SIDE) {
+          let besideChecked = false;
+          for (const p of this.pieces.values()) {
+            if (p.state !== 'checked' || !p.pos || p.gone || p.island !== this.island || claimed.has(p.id)) continue;
+            if (Math.hypot(p.pos[0] - q[0], p.pos[1] - q[1]) < unitT * 1.0) { besideChecked = true; break; }
+          }
+          if (besideChecked) { this.rejects.farNearChecked = (this.rejects.farNearChecked || 0) + 1; continue; }
+        }
         // Far away a piece must be seen in more steady frames first (detailTier);
         // its first shape read then decides whether it's new (verifyNew).
         if (this.frameCtx.live && !this.promote(d, this.detailTier(d).need)) continue;
@@ -1199,15 +1476,170 @@
       const inv = PH.simInvert(T);
       const seen = new Set(dets.map((d) => d.id));
       const margin = unitF;
-      if (this.frameCtx.still) for (const p of this.pieces.values()) {
-        if (!p.pos || p.missing || p.island !== this.island || seen.has(p.id)) continue;
+      // Where this frame's matched pieces really are vs where the map puts
+      // them: the map bends a little over a long sweep (owner's video: up to
+      // about a piece), so a spot is checked relative to its neighbours.
+      const anchors = [];
+      for (const d of dets) {
+        const q = d.id && this.pieces.get(d.id);
+        if (!q || !q.pos || q.island !== this.island || d.merged || d.border) continue;
+        const f = PH.simApply(inv, q.pos[0], q.pos[1]);
+        anchors.push({ pos: q.pos, dx: d.cx - f[0], dy: d.cy - f[1] });
+      }
+      if (this.frameCtx.still) for (const p of [...this.pieces.values()]) {
+        if (!p.pos || p.gone || p.island !== this.island || seen.has(p.id)) continue;
         const f = PH.simApply(inv, p.pos[0], p.pos[1]);
+        const nb = anchors.filter((a) => Math.hypot(a.pos[0] - p.pos[0], a.pos[1] - p.pos[1]) < unitT * 3);
+        if (nb.length >= 2) { f[0] += PH.median(nb.map((a) => a.dx)); f[1] += PH.median(nb.map((a) => a.dy)); }
         if (f[0] < margin || f[1] < margin || f[0] > proc.w - margin || f[1] > proc.h - margin) continue;
         const covered = dets.some((d) => (d.merged || d.border) && f[0] >= d.bbox[0] && f[1] >= d.bbox[1] && f[0] <= d.bbox[0] + d.bbox[2] && f[1] <= d.bbox[1] + d.bbox[3]);
         if (covered) continue;
+        // Gone (owner, 2026-10-05: "drop the dot if you know that it
+        // disappeared"): proof, not a missed detection - the spot is in a
+        // steady view close enough to read the piece, and the board shows
+        // across its footprint, at 2 separate moments. A pale piece the
+        // detector missed leaves no bare board there, so it never counts.
+        const sideF = Math.sqrt(p.area || 1) / s; // the piece's size in this frame (processing px)
+        // close enough that the piece would have been read up close: far
+        // views (the map is least exact there) never prove a piece gone
+        const readable = sideF / this.frameCtx.scale / 1.1 >= PH.CLOSE_SIDE;
+        // (the map can be off by part of a piece during a close sweep: a
+        // detection near the spot may well be this piece - no proof then)
+        const nearDet = dets.some((d) => !d.border && Math.hypot(d.cx - f[0], d.cy - f[1]) < sideF * 1.0);
+        if (readable && !nearDet && nb.length >= 2 && !this.frameCtx.offLight && this.bareBoard(f, sideF * 0.4) >= 0.85) { // (no neighbours seen: the spot can't be placed well enough to prove anything)
+          if (this.fNo - (p.goneF === undefined ? -1e9 : p.goneF) >= 6) { p.goneVotes = (p.goneVotes || 0) + 1; p.goneF = this.fNo; }
+          if (p.goneVotes >= 2) {
+            p.goneVotes = 0;
+            if (this.isChecked(p)) { p.gone = true; p.goneAt = Date.now(); p.missing = true; this.touch(p); this.version++; this.matchCache.clear(); this.logEvt('gone', p.id); }
+            else this.removePiece(p.id); // an unchecked ring on bare board was nothing
+            continue;
+          }
+        } else if (readable) p.goneVotes = 0; // something is there: not proof of absence
         if (++p.miss > 12) { p.missing = true; p.miss = 0; this.touch(p); }
       }
-      for (const d of dets) if (d.id) { const p = this.pieces.get(d.id); p.miss = 0; p.missing = false; p.lastSeen = Date.now(); }
+      const steady = this.frameCtx && this.frameCtx.still;
+      const seenNow = [];
+      for (const d of dets) {
+        if (!d.id) continue;
+        const p = this.pieces.get(d.id);
+        p.miss = 0; p.missing = false; p.lastSeen = Date.now(); p.goneVotes = 0;
+        if (p.gone) { p.gone = false; p.refound = (p.refound || 0) + 1; this.touch(p); this.version++; }
+        if (d.merged || d.border) continue;
+        seenNow.push(p);
+        if (!steady) continue;
+        // Evidence for "checked": steady sightings, at separate moments
+        // (>= 6 analysed frames apart, ~1 s on the phone).
+        p.sightings = (p.sightings || 0) + 1;
+        if (this.fNo - (p.momentF === undefined ? -1e9 : p.momentF) >= 6) { p.moments = (p.moments || 0) + 1; p.momentF = this.fNo; }
+        if (Math.sqrt(d.area) / this.frameCtx.scale / 1.1 >= PH.CLOSE_SIDE) p.closeViews = (p.closeViews || 0) + 1;
+        // The entry learns its look from every steady view (a fingerprint
+        // frozen at a first, dim view stopped matching the same piece later).
+        if (d.fp && !this.frameCtx.offLight) p.fp = PH.blendFp(p.fp, d.fp, d.bySpot ? 0.3 : 0.15); // (not from odd-light frames)
+      }
+      // Seen together: two entries detected in the same frame are two
+      // different pieces - the duplicate clean-up never merges them.
+      if (seenNow.length > 1) {
+        const R = unitT * 2;
+        for (let i = 0; i < seenNow.length; i++) for (let j = i + 1; j < seenNow.length; j++) {
+          const A = seenNow[i], B = seenNow[j];
+          if (!A.pos || !B.pos || A.island !== B.island || Math.hypot(A.pos[0] - B.pos[0], A.pos[1] - B.pos[1]) > R) continue;
+          (A.seenWith || (A.seenWith = new Set())).add(B.id);
+          (B.seenWith || (B.seenWith = new Set())).add(A.id);
+        }
+      }
+    }
+    /** Median colour of the frame's board pixels (not foreground), sampled. */
+    measureBoard(seg, proc) {
+      if (!seg.fg || !seg.lab) return null;
+      const W = proc.w, H = proc.h, Ls = [], As = [], Bs = [];
+      for (let y = 2; y < H; y += 7) for (let x = 2; x < W; x += 7) {
+        const p = y * W + x;
+        if (seg.fg[p] || (proc.invalid && !proc.data[4 * p + 3])) continue; // (not outside a straightened view's image)
+        Ls.push(seg.lab[3 * p]); As.push(seg.lab[3 * p + 1]); Bs.push(seg.lab[3 * p + 2]);
+      }
+      return Ls.length >= 50 ? { L: PH.median(Ls), a: PH.median(As), b: PH.median(Bs) } : null;
+    }
+    /** The scan's board colour, the fixed reference colours are corrected
+     *  against (PH.lightFix): the median board of the first steady frames,
+     *  then kept (and saved with the scan) - a reference that followed the
+     *  light would undo the correction. Until it is set, colours are read
+     *  as they are. */
+    noteBoard(bg, steady) {
+      if (this.boardRef || !bg || !(bg.L > 15) || !steady) return;
+      const S = this.boardSeen || (this.boardSeen = []);
+      S.push([bg.L, bg.a, bg.b]);
+      if (S.length < 8) return;
+      this.boardRef = { L: PH.median(S.map((v) => v[0])), a: PH.median(S.map((v) => v[1])), b: PH.median(S.map((v) => v[2])) };
+      this.boardSeen = null; this.boardRefDirty = true;
+    }
+    /** Share of the processing frame's pixels within radius r of point f that
+     *  show bare board (not foreground). */
+    bareBoard(f, r) {
+      const F = this.frameCtx;
+      if (!F || !F.fg) return 0;
+      const W = F.procW, H = F.procH, x0 = Math.max(0, Math.floor(f[0] - r)), x1 = Math.min(W - 1, Math.ceil(f[0] + r));
+      const y0 = Math.max(0, Math.floor(f[1] - r)), y1 = Math.min(H - 1, Math.ceil(f[1] + r)), st = Math.max(1, Math.floor(r / 8));
+      let n = 0, bare = 0;
+      for (let y = y0; y <= y1; y += st) for (let x = x0; x <= x1; x += st) {
+        if ((x - f[0]) ** 2 + (y - f[1]) ** 2 > r * r) continue;
+        if (F.rgba && !F.rgba[4 * (y * W + x) + 3]) continue; // outside the camera image: neither board nor piece
+        n++; if (!F.fg[y * W + x]) bare++;
+      }
+      return n >= 12 ? bare / n : 0;
+    }
+    /** Which checked piece is this close read? Compared by close-read shape
+     *  and print, any orientation, with every checked piece not in `skip`
+     *  (the ones seen elsewhere in this frame). One clear answer or none: a
+     *  runner-up nearly as close means look-alikes, and the read waits. */
+    identifyChecked(t1, skip, at) {
+      if (!PH.isCloseRead(t1)) return null;
+      const unitT = this.unitTable() || 1;
+      let best = null, second = Infinity, nearBest = null;
+      for (const q of this.pieces.values()) {
+        if (!this.isChecked(q) || !q.t1 || !PH.isCloseRead(q.t1) || (skip && skip.has(q.id))) continue;
+        const m = PH.samePiece(t1, q.t1, PH.ANCHOR_SHAPE);
+        if (!m.ok) continue;
+        // nearby: almost always the same piece, a little off on the map (owner's video)
+        // (on essentially the same spot: the same piece; a neighbour a piece
+        // or two away only if its own spot is empty - else it is lying there)
+        const dq = at && q.pos && !q.gone && q.island === this.island ? Math.hypot(q.pos[0] - at[0], q.pos[1] - at[1]) : Infinity;
+        if (dq < unitT * 2.5 && (dq < unitT * 0.6 || !this.spotTaken(q)) && (!nearBest || m.d < nearBest.d)) nearBest = { p: q, d: m.d, r: m.r };
+        if (!best || m.d < best.d) { if (best) second = best.d; best = { p: q, d: m.d, r: m.r }; } else if (m.d < second) second = m.d;
+      }
+      if (nearBest) return nearBest;
+      // far away: a clearly unique match, and not a piece whose own spot is
+      // in view and still taken (then it's there, and this is a look-alike)
+      if (!best || !(second > best.d * 1.5)) return null;
+      if (best.p.pos && !best.p.gone && this.spotTaken(best.p)) return null;
+      return best;
+    }
+    /** Is piece p's spot in the current view with something lying on it? */
+    spotTaken(p) {
+      const F = this.frameCtx, T = this.pose;
+      if (!F || !T || p.island !== this.island || !F.fg) return false;
+      const f = PH.simApply(PH.simInvert(T), p.pos[0], p.pos[1]);
+      if (f[0] < 0 || f[1] < 0 || f[0] >= F.procW || f[1] >= F.procH) return false;
+      const r = Math.sqrt(p.area || 1) / PH.simScale(T) * 0.4;
+      return this.bareBoard(f, r) < 0.5;
+    }
+    /** Another close read agreed with piece p's close shape: one more
+     *  independent confirmation when it comes from a later view (4+ frames). */
+    noteCloseAgree(p, t1) {
+      if (!PH.isCloseRead(t1) || !PH.isCloseRead(p.t1)) return;
+      if (this.fNo - (p.closeAgreeF === undefined ? -1e9 : p.closeAgreeF) < 4) return;
+      p.closeAgree = (p.closeAgree || 1) + 1; p.closeAgreeF = this.fNo;
+    }
+    /** Two close reads of clearly different shapes: detection d is not piece
+     *  p, whatever its spot says. Only decided when both reads are close
+     *  (far reads misread tabs too often: 8 of 49 pieces in the owner's
+     *  overview). Reads d's shape only when there is time left this frame. */
+    shapeVeto(d, p) {
+      if (!p.t1 || !PH.isCloseRead(p.t1) || this.frameCtx.offLight) return false;
+      if (Math.sqrt(d.area) / this.frameCtx.scale / 1.1 < PH.CLOSE_SIDE) return false;
+      if (d.t1 === undefined && now() > this.frameCtx.deadline) return false;
+      const t1 = this.detT1(d);
+      if (!t1 || !PH.isCloseRead(t1)) return false;
+      return PH.clearlyDifferent(t1, p.t1);
     }
 
     findMoved(d, s, claimed) {
@@ -1247,7 +1679,7 @@
       const why = {};
       try {
         const hint = d.split ? Array.from(d.pts, (v, i) => v / scale - (i % 2 ? y0 : x0)) : null;
-        d.t1 = PH.analyzePiece(crop, { bg: F.bg, threshDE: F.thresh, lut: F.lut, hint, lightW: this.opts.lightW, ox: x0, oy: y0, why,
+        d.t1 = PH.analyzePiece(crop, { bg: F.bg, threshDE: F.thresh, lut: F.lut, hint, lightW: this.opts.lightW, ox: x0, oy: y0, why, boardRef: this.boardRef || null,
           // one piece's area in this crop's (source) pixels, for the partial-outline check
           unitArea: F.unitArea ? F.unitArea / (scale * scale) : null });
       } catch (e) { d.t1 = null; }
@@ -1303,28 +1735,54 @@
       for (const d of dets) {
         if (!d.id || !d.t1 || d.fused) continue;
         const p = this.pieces.get(d.id);
+        if (!p) { d.id = null; continue; } // (merged away this frame)
         d.fused = true;
-        if (!p.t1 || p.t1 === d.t1 || (p.t1.nObs || 1) >= 8) continue;
-        const m = PH.samePiece(d.t1, p.t1);
-        if (m.ok) { PH.fuseShapes(p.t1, d.t1, m.r); this.touch(p); this.version++; }
+        if (!p.t1 || p.t1 === d.t1) continue;
+        if (PH.isCloseRead(d.t1) !== PH.isCloseRead(p.t1)) { d.fused = false; continue; } // far and close reads never mix (the job loop below upgrades far to close)
+        let m = PH.samePiece(d.t1, p.t1);
+        if (!m.ok) { const sa = PH.shapeAgree(d.t1, p.t1); if (sa) m = { ok: true, r: sa.r, d: sa.d }; }
+        if (m.ok) {
+          if ((p.t1.nObs || 1) < 8) PH.fuseShapes(p.t1, d.t1, m.r);
+          this.noteCloseAgree(p, d.t1);
+          if (!p.rd || p.rd.stale) this.notePlacement(p, { thumb: d.t1.thumb, corners: [0, 1, 2, 3].map((k) => d.t1.corners[(k - m.r + 4) % 4]) }); // (the job loop skips this read now)
+          this.touch(p); this.version++;
+        } else d.fused = false; // not folded in: the job loop below decides
       }
       if (F.still) {
         const jobs = [];
         for (const d of dets) {
           if (!d.id || d.border || d.merged) continue;
           const p = this.pieces.get(d.id);
+          if (!p) continue; // (merged away this frame)
           const sidePx = Math.sqrt(d.area) / scale;
           let pri = 0;
           if (p.t1) {
-            // A shape is trusted once two independent views agree. Until then
-            // re-read it from a later view (not the next few frames: those are
-            // the same view); after that only from a much closer one.
-            const confirmed = (p.t1.nObs || 1) >= 2;
-            // ... and a piece without a map placement gets one more read, so
-            // the Table view can draw its picture (same budget cap).
-            if (confirmed && p.rd && !p.rd.stale && sidePx < p.t1.meanSide * 1.4) continue;
-            if (!confirmed && this.fNo - (p.t1Frame || 0) < 8) continue;
-            pri = confirmed ? 2 : 1;
+            const closeNow = sidePx / 1.1 >= PH.CLOSE_SIDE, pc = PH.isCloseRead(p.t1);
+            // (a piece with one close read gets its second whatever the blob's
+            // size says - the read's own corner-to-corner size decides)
+            if ((closeNow && !pc) || (pc && (p.closeAgree || 0) < 2 && !p.photoRead)) { // (a photo's close read checks a piece on its own)
+              // Checking a piece needs two agreeing close reads (v0.20): a
+              // far-only shape gets its close read now, a single close read
+              // its second one from a later view (4+ frames on).
+              if (pc && this.fNo - (p.t1Frame || 0) < 4) continue;
+              pri = pc ? 1 : 0.5;
+            } else if (closeNow && pc && this.isChecked(p) && p.rd && !p.rd.stale && this.fNo - (p.verifyF === undefined ? p.t1Frame || 0 : p.verifyF) >= 60) { // (a missing Map placement is read first, below)
+              // Now and then a checked piece in view is read again: pieces get
+              // picked up and swapped (owner: "the biggest thing"). Spare time only.
+              pri = 3;
+            } else {
+              // A shape is trusted once two independent views agree. Until then
+              // re-read it from a later view (not the next few frames: those are
+              // the same view); after that only from a much closer one.
+              const confirmed = (p.t1.nObs || 1) >= 2 || p.photoRead || (p.closeAgree || 0) >= 2;
+              // ... and a piece without a map placement (or a stale one: it
+              // was moved) gets a read first, so the Map draws it where and
+              // how it lies now.
+              const needPlace = !p.rd || p.rd.stale;
+              if (confirmed && !needPlace && sidePx < p.t1.meanSide * 1.4) continue;
+              if (!confirmed && !needPlace && this.fNo - (p.t1Frame || 0) < 8) continue;
+              pri = needPlace ? 0.8 : confirmed ? 2 : 1;
+            }
           }
           if (!p.t1 && p.t1Fail > 0 && (p.t1Fail++ % 8) !== 0) continue;
           jobs.push({ d, p, pri });
@@ -1336,6 +1794,7 @@
         const pc = this.lastProc, cxv = pc ? pc.w / 2 : 0, cyv = pc ? pc.h / 2 : 0, rv = Math.hypot(cxv, cyv) || 1;
         for (const j of jobs) j.centre = pc ? 1 - Math.hypot(j.d.cx - cxv, j.d.cy - cyv) / rv : 0.5;
         jobs.sort((a, b) => a.pri - b.pri || b.centre - a.centre);
+        if (PH.DEBUG_Q) PH.DEBUG_Q('jobs', this.fNo, jobs.map((j) => j.p.id + ':' + j.pri + (j.d.t1 !== undefined ? '*' : '')).join(' '), 'over budget', now() > t1Deadline);
         let confirms = 0;
         for (const j of jobs) {
           // Always read at least 2 shapes per steady frame: when segmentation
@@ -1347,21 +1806,96 @@
           // slow phone, where a read costs ~50-100 ms) at most one every other
           // frame, so revisiting costs about half a read per frame and only
           // until the pieces in view are confirmed (one re-read each).
-          if (j.pri > 0 && j.d.t1 === undefined && now() > t1Deadline && (confirms >= 1 || this.fNo % 2)) break;
+          // (reads a piece needs to get checked - pri <= 1 - get one a frame;
+          // routine re-checks only every other frame)
+          if (j.pri > 0 && j.d.t1 === undefined && now() > t1Deadline && (confirms >= 1 || (j.pri >= 2 && this.fNo % 2))) break;
           if (j.pri > 0) confirms++;
           const t1 = this.detT1(j.d);
           if (t1) t1.centre = +j.centre.toFixed(2);
+          if (PH.DEBUG_Q) PH.DEBUG_Q('  read', j.p.id, 'pri', j.pri, t1 ? 'side ' + Math.round(t1.meanSide) + ' q ' + (t1.quality && t1.quality.q) + ' code ' + t1.code + ' amp ' + t1.edges.map((e) => e.amp.toFixed(2) + (e.unc ? '?' : '')).join('/') : 'FAILED', 'stored', j.p.t1 && j.p.t1.code, 'fused', !!j.d.fused, t1 && j.p.t1 ? 'same ' + JSON.stringify((({ ok, d }) => ({ ok, d: +d.toFixed(3) }))(PH.samePiece(t1, j.p.t1))) : '');
           if (!t1) {
             j.p.t1Fail = (j.p.t1Fail || 0) + 1;
             if (!j.p.t1 && j.d.notPiece && j.p.t1Fail >= 4) { this.removePiece(j.p.id); j.d.id = null; }
             continue;
           }
-          if (j.p.t1) {
+          if (j.d.fused && j.p.t1) continue; // this read was already folded in above
+          const nc = PH.isCloseRead(t1);
+          const inFrame = () => new Set(dets.map((x) => x.id).filter((id) => id && id !== j.p.id));
+          // A close read of an entry that isn't checked yet: is it a checked
+          // piece that was moved here? Then it is that piece - same number,
+          // its matches and answers kept (owner, 2026-10-05).
+          if (nc && !this.isChecked(j.p) && !F.offLight) {
+            const idn = this.identifyChecked(t1, inFrame(), j.p.pos);
+            if (idn) {
+              const Q = idn.p, here = j.p.pos, isl = j.p.island;
+              this.mergeEntries(Q, j.p);
+              if (here) { if (Q.pos && Math.hypot(Q.pos[0] - here[0], Q.pos[1] - here[1]) > (this.unitTable() || 1) * 0.5) this.markMoved(Q); Q.pos = here; Q.island = isl; }
+              if (Q.gone) { Q.gone = false; Q.refound = (Q.refound || 0) + 1; }
+              Q.missing = false; Q.miss = 0;
+              j.d.id = Q.id;
+              if ((Q.t1.nObs || 1) < 8) PH.fuseShapes(Q.t1, t1, idn.r); // (samePiece(read, stored).r, as fuseShapes takes it)
+              this.rejects.refound = (this.rejects.refound || 0) + 1; this.logEvt('refound', Q.id, null);
+              this.touch(Q); this.version++; this.matchCache.clear(); n1++;
+              continue;
+            }
+          }
+          // A checked piece's re-read that clearly disagrees (two close reads):
+          // something else lies on its spot. Twice, at separate moments ->
+          // the piece is not here: gone, or the read is another checked piece
+          // (two pieces swapped). Its stored shape is never overwritten.
+          if (nc && this.isChecked(j.p) && j.p.t1 && PH.isCloseRead(j.p.t1)) {
+            j.p.verifyF = this.fNo;
+            if (F.offLight) { n1++; continue; } // (a read in odd light proves nothing either way)
+            const m = PH.samePiece(t1, j.p.t1, PH.ANCHOR_SHAPE);
+            if (m.ok || !PH.clearlyDifferent(t1, j.p.t1)) {
+              j.p.notHere = 0;
+              if (!m.ok) { // a doubtful read: neither agreement nor proof; the stored shape stays, the Map may use this view's picture
+                j.p.conflicts = (j.p.conflicts || 0) + 1;
+                if (!j.p.rd || j.p.rd.stale) this.notePlacement(j.p, { thumb: t1.thumb, corners: t1.corners, sigs: t1.edges.map((e) => e.sig) });
+                n1++; continue;
+              }
+              const m2 = PH.samePiece(t1, j.p.t1);
+              if (m2.ok && (j.p.t1.nObs || 1) < 8) PH.fuseShapes(j.p.t1, t1, m2.r);
+              this.noteCloseAgree(j.p, t1);
+              if (!j.p.rd || j.p.rd.stale) this.notePlacement(j.p, { thumb: t1.thumb, corners: [0, 1, 2, 3].map((k) => t1.corners[(k - m.r + 4) % 4]) });
+              this.touch(j.p); n1++;
+              continue;
+            }
+            if (this.fNo - (j.p.notHereF === undefined ? -1e9 : j.p.notHereF) >= 6) { j.p.notHere = (j.p.notHere || 0) + 1; j.p.notHereF = this.fNo; }
+            j.p.conflicts = (j.p.conflicts || 0) + 1;
+            if (j.p.notHere >= 3) {
+              const P = j.p, spot = P.pos, isl = P.island;
+              P.notHere = 0; P.gone = true; P.goneAt = Date.now(); P.missing = true; this.touch(P);
+              const idn = this.identifyChecked(t1, new Set([...inFrame(), P.id]));
+              if (idn) {
+                const Q = idn.p;
+                Q.pos = spot; Q.island = isl; this.markMoved(Q);
+                if (Q.gone) { Q.gone = false; Q.refound = (Q.refound || 0) + 1; }
+                Q.missing = false; Q.miss = 0; j.d.id = Q.id; this.touch(Q);
+              } else j.d.id = null; // an unknown piece on this spot: it starts as a new candidate
+              this.rejects.notHere = (this.rejects.notHere || 0) + 1; this.logEvt('notHere', P.id);
+              this.version++; this.matchCache.clear();
+            }
+            n1++; continue;
+          }
+          if (j.p.t1 && PH.isCloseRead(j.p.t1) && !nc) {
+            // A far read of a piece with a close shape: never mixed in (far
+            // reads misread tabs and lengths); it may still place the picture.
+            j.p.t1Frame = this.fNo;
+            const m = PH.samePiece(t1, j.p.t1);
+            if (!j.p.rd || j.p.rd.stale) this.notePlacement(j.p, m.ok ? { thumb: t1.thumb, corners: [0, 1, 2, 3].map((k) => t1.corners[(k - m.r + 4) % 4]) } : { thumb: t1.thumb, corners: t1.corners, sigs: t1.edges.map((e) => e.sig) });
+            n1++; continue;
+          }
+          if (j.p.t1 && !PH.isCloseRead(j.p.t1) && nc) this.uncalibrate(j.p.t1); // the first close read replaces a far one (below)
+          else if (j.p.t1) {
             const old = j.p.t1;
             j.p.t1Frame = this.fNo;
-            const m = PH.samePiece(t1, old);
+            let m = PH.samePiece(t1, old);
+            // (a piece linked to this spot only needs its shape to agree)
+            if (!m.ok) { const sa = PH.shapeAgree(t1, old); if (sa) m = { ok: true, r: sa.r, d: sa.d }; }
             if (m.ok) { // two views agree: the shape is confirmed (averaged)
               if ((old.nObs || 1) < 8) PH.fuseShapes(old, t1, m.r);
+              this.noteCloseAgree(j.p, t1);
               // No map placement yet (moved, or catalogued before v0.10.1):
               // place it from this read, with this read's picture - the stored
               // one may come from another view (e.g. a photo, at a different
@@ -1392,6 +1926,7 @@
           j.p.t1 = t1;
           j.p.t1Frame = this.fNo;
           j.p.t1Fail = 0;
+          j.p.closeAgree = nc ? 1 : 0; j.p.closeAgreeF = this.fNo;
           this.notePlacement(j.p);
           j.p.t2 = null;
           this.calibrate(t1);
@@ -1479,6 +2014,21 @@
       const pf = new PH.PuzzleFrame(proc, corners, this.box.cols, this.box.rows);
       if (PH.DEBUG_BORDER) PH.DEBUG_BORDER('features', pf.feat.n);
       if (pf.feat.n < 60) { this.borderFails = Math.min(3, (this.borderFails || 0) + 1); return; }
+      // A finished border is a closed ring of pieces carrying the box's print
+      // along its edge cells; loose pieces laid out in a grid are mostly bare
+      // board there (owner's 50-piece video, v0.19.0: a "border" over a jar
+      // lid and loose pieces). Most visible edge cells must read as filled.
+      if (PH.readCells) {
+        const r = PH.readCells(proc, pf.Hbox, this.box), { cols, rows } = this.box;
+        let vis = 0, fil = 0;
+        for (let c = 0; c < cols; c++) for (let rr = 0; rr < rows; rr++) {
+          if (c > 0 && c < cols - 1 && rr > 0 && rr < rows - 1) continue;
+          const v = r.cells[rr * cols + c];
+          if (v) { vis++; if (v > 0) fil++; }
+        }
+        if (PH.DEBUG_BORDER) PH.DEBUG_BORDER('edge cells', fil, '/', vis);
+        if (vis < 8 || fil < vis * 0.7) { this.rejects.borderNotFilled = (this.rejects.borderNotFilled || 0) + 1; this.borderFails = Math.min(3, (this.borderFails || 0) + 1); return; }
+      }
       this.pframe = pf;
       this.pfLoc = { H: pf.Hbox, t: now(), fNo: this.fNo || 0, w: proc.w, h: proc.h, inliers: pf.feat.n, pose: this.pose ? Object.assign({}, this.pose) : null, island: this.island };
       this.borderFails = 0;
@@ -1614,7 +2164,7 @@
       const taken = this.takenCells();
       const items = [];
       for (const p of this.pieces.values()) {
-        if (!p.t2 || p.t2.failed) continue;
+        if (!p.t2 || p.t2.failed || !this.isChecked(p)) continue;
         const base = p.t2.orig || p.t2;
         if (p.inPuzzle) { if (p.t2 !== base) { p.t2 = base; this.touch(p); } continue; }
         const cands = base.cands.filter((c) => { const id = taken.get(c.col + ',' + c.row); return !id || id === p.id; });
@@ -1662,6 +2212,7 @@
     setBox(box) {
       this.clearPuzzleFrame(); // the mark is in the old box's grid
       this.box = box;
+      if (box && box.lab && PH.boxColTol) PH.colTol = box.colT = box.colT || PH.boxColTol(box); // this puzzle's colour tolerance along seams
       for (const p of this.pieces.values()) { p.t2 = null; this.touch(p); }
       for (const A of this.asms || []) { A.place = null; A.placeAt = -1e9; A.version++; A.locate(box, true); } // placed again on the new grid
       this.cellVotes = null; this.cellVotesDirty = true; // cell votes are on the old grid
@@ -1723,10 +2274,10 @@
     // by that probability.
     matchesFor(id, opts) {
       const P = this.pieces.get(id);
-      if (!P || !P.t1) return null;
+      if (!P || !P.t1 || !this.isChecked(P)) return null;
       const c = this.matchCache.get(id);
       if (c && c.version === this.version && (c.loops || !(opts && opts.loops))) return c.res;
-      const all = [...this.pieces.values()];
+      const all = this.checkedPieces(); // matches only between checked pieces (close, agreeing reads)
       const res = PH.findMatches(P, all, { topN: 5, skip: this.skipFn(), nullOdds: (k) => this.nullOdds(P, k).odds });
       for (const r of res) r.spot = this.nullOdds(P, r.edge).spot;
       if (opts && opts.loops) PH.confirmWithLoops(res, PH.findLoops(P, all, { K: 6, skip: this.skipFn() }));
@@ -1798,7 +2349,7 @@
      */
     nullOdds(P, k) {
       const total = this.box ? this.box.cols * this.box.rows : this.opts.totalPieces || 1000;
-      const cov = PH.clamp(this.pieces.size / total, 0.02, 1);
+      const cov = PH.clamp((this.nChecked === undefined ? this.pieces.size : this.nChecked) / total, 0.02, 1);
       let odds = Math.max(0.2, (1 - cov) / cov);
       let spot = null;
       const t2 = P.t2;
@@ -1822,7 +2373,7 @@
     select(id) {
       if (!id) { this.selection = null; return null; }
       const P = this.pieces.get(id);
-      if (!P) return null;
+      if (!P || !this.isChecked(P)) return null; // not checked yet: only its "scan closer" ring shows
       this.selection = { id };
       this.region = null;
       this.filter = null;
@@ -1853,7 +2404,7 @@
     describe(id) {
       const P = this.pieces.get(id);
       const res = this.matchesFor(id, { loops: true });
-      const brief = (Q) => ({ id: Q.id, code: Q.t1 ? Q.t1.code : null, thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, t2: Q.t2 ? { cands: Q.t2.cands.slice(0, 3), conf: Q.t2.conf, tex: Q.t2.tex } : null, located: !!Q.pos,
+      const brief = (Q) => ({ id: Q.id, code: Q.t1 ? Q.t1.code : null, thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, t2: Q.t2 ? { cands: Q.t2.cands.slice(0, 3), conf: Q.t2.conf, tex: Q.t2.tex } : null, located: !!Q.pos && !Q.gone, gone: !!Q.gone,
         inPuzzle: !!Q.inPuzzle, up: (this.upOf(Q) || {}).k,
         confirmed: shapeConfirmed(Q), views: Q.t1 ? Q.t1.nObs || 1 : 0, quality: Q.t1 && Q.t1.quality ? Q.t1.quality.q : null, unc: Q.t1 ? Q.t1.edges.map((e) => !!e.unc) : null });
       return {
@@ -1861,7 +2412,7 @@
         spot: this.asmSpotOf(P),
         chain: this.chainFor(P, res),
         status: !P.t1 ? 'Hold steady over this piece to read its shape' : null,
-        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, unc: !!(P.t1.edges[r.edge] && P.t1.edges[r.edge].unc), joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, loops: m.loops || 0, mutual: !!m.mutual, verdict: m.verdict, shape: m.shape, color: m.color, adj: m.adj })) })) : [],
+        edges: res ? res.map((r) => ({ edge: r.edge, type: r.type, unc: !!(P.t1.edges[r.edge] && P.t1.edges[r.edge].unc), joined: P.joined[r.edge], loop: r.loop, pNone: r.pNone, spot: r.spot, matches: r.matches.map((m) => Object.assign(brief(this.pieces.get(m.id)), { edgeB: m.edge, score: m.score, prob: m.prob, loopOk: !!m.loopOk, loops: m.loops || 0, mutual: !!m.mutual, verdict: m.verdict, shape: m.shape, color: m.color, adj: m.adj, tie: !!m.tie, colOk: m.colOk, colShare: m.colShare === undefined ? null : +m.colShare.toFixed(2), colDoubt: m.colDoubt || null, sure: PH.sureFit(m, 0) && m === r.matches[0] })) })) : [],
       };
     }
     /** "Fill this spot" (a cheaper stand-in for PuzPal's gap scan): rank the
@@ -1874,7 +2425,7 @@
       const D = [[0, -1], [1, 0], [0, 1], [-1, 0]];
       const nb = [];
       for (const q of this.pieces.values()) {
-        if (!q.t1 || !q.t2 || !q.t2.cands.length) continue;
+        if (!q.t1 || !q.t2 || !q.t2.cands.length || !this.isChecked(q)) continue;
         const c = q.t2.cands[0];
         if (!q.inPuzzle && q.t2.conf < 0.35) continue;
         for (let d = 0; d < 4; d++) if (c.col === col + D[d][0] && c.row === row + D[d][1]) nb.push({ q, d, rot: c.rot });
@@ -1882,7 +2433,7 @@
       const nbRes = new Map(nb.map((n) => [n.q.id, this.matchesFor(n.q.id)]));
       const out = [];
       for (const p of this.pieces.values()) {
-        if (!p.t1 || p.inPuzzle) continue;
+        if (!p.t1 || p.inPuzzle || !this.isChecked(p) || p.gone) continue;
         const base = p.t2 ? p.t2.orig || p.t2 : null;
         const own = base ? base.cands.filter((c) => c.col === col && c.row === row) : [];
         // print: how much worse this cell is than the piece's own best spot
@@ -1916,7 +2467,7 @@
       this.selection = null;
       const ids = [];
       for (const p of this.pieces.values()) {
-        if (!p.t2 || !p.t2.cands.length) continue;
+        if (!p.t2 || !p.t2.cands.length || !this.isChecked(p) || p.gone) continue;
         const k = p.t2.cands[0];
         if (k.col >= c0 && k.col <= c1 && k.row >= r0 && k.row <= r1 && p.t2.conf >= 0.15) ids.push(p.id);
       }
@@ -1943,10 +2494,13 @@
       // is a misread (owner, 2026-10-04).
       const asm = this.assemblyInfo();
       if (asm && asm.border && asm.border.done >= asm.border.total && ['corner', 'border', 'edges'].includes(this.filter)) return [];
+      // "Need closer look": where entries still wait to be checked (their
+      // amber rings), so the owner knows where to sweep up close.
+      if (this.filter === 'unread') return [...this.pieces.values()].filter((p) => !this.isChecked(p) && p.pos && !p.gone && p.island === this.island).map((p) => p.id);
       const out = [];
       const doubt = this.filter === 'corner' || this.filter === 'edges' ? this.cornerDoubts() : null;
       for (const p of this.pieces.values()) {
-        if (p.inPuzzle) continue; // placed pieces are done
+        if (p.inPuzzle || !this.isChecked(p) || p.gone) continue; // placed pieces are done; unchecked / moved ones aren't shown
         const f = edgeFlags(p);
         const hit = this.filter === 'corner' ? f.corner && !doubt.has(p.id)
           : this.filter === 'edges' ? (f.corner && !doubt.has(p.id)) || (f.border && !f.corner)
@@ -1975,7 +2529,7 @@
       const minProb = opts.minProb || 0.8;
       const deadline = now() + (opts.budgetMs || 1200);
       const ids = [];
-      for (const p of this.pieces.values()) if (p.t1) ids.push(p.id);
+      for (const p of this.pieces.values()) if (p.t1 && this.isChecked(p)) ids.push(p.id);
       ids.sort((a, b) => a - b);
       const from = opts.from || 0;
       let i = from;
@@ -2023,61 +2577,84 @@
       this.pairSel = a && b ? { a, b } : null;
     }
 
-    /** Housekeeping after a messy session: fold scan groups back together by
-     *  shape and drop entries that never turned out to be pieces. Returns what
-     *  it changed so the UI can say so. */
-    tidy() {
-      const before = this.counts();
-      // 0. One spot on the box holds one piece: merge same-spot duplicates
-      //    first, so the pairs they form can align and join the islands.
-      const dd = this.dedupeByCell(Infinity);
-      // 1. Merge islands: a piece whose shape matches a piece in another island
-      //    is the same physical piece seen after tracking broke.
-      const shaped = [...this.pieces.values()].filter((p) => p.t1);
-      const dropped = [];
-      for (let i = 0; i < shaped.length; i++) {
-        const A = shaped[i];
-        if (!this.pieces.has(A.id)) continue;
-        for (let j = i + 1; j < shaped.length; j++) {
-          const B = shaped[j];
-          if (!this.pieces.has(B.id) || B.island === A.island) continue;
-          if (!PH.samePiece(A.t1, B.t1, PH.SAME_SHAPE).ok) continue;
-          // Keep the better-observed copy and fold the other one's evidence in.
-          const keep = (A.t1.nObs || 1) >= (B.t1.nObs || 1) ? A : B, drop = keep === A ? B : A;
-          keep.wrong = [...new Set(keep.wrong.concat(drop.wrong))];
-          for (let k = 0; k < 4; k++) keep.joined[k] = keep.joined[k] || drop.joined[k];
-          this.removePiece(drop.id);
-          dropped.push(drop.id);
-          if (drop === A) break;
+    /** Tidy up's old jobs, now part of housekeeping (no button since v0.20;
+     *  owner: "the app should handle itself"):
+     *  - scan groups (islands) that hold the same checked pieces - matched by
+     *    close-read shape and print - are joined once 3 pieces link them;
+     *    a piece found in two groups with fewer links keeps the entry of the
+     *    group being scanned now;
+     *  - an "edge piece" that can't be one (its box spot is filled in the
+     *    assembled part, the assembled border is complete, or its straight
+     *    side was seen to be a cut through the assembly) is a chunk of the
+     *    assembled puzzle: a checked piece is marked in the puzzle, an
+     *    unchecked entry dropped. Never deletes a checked piece. */
+    groupsAndEdges() {
+      const st = this.hk || (this.hk = { merged: 0, dropped: 0, checked: 0 });
+      // 1. join scan groups by shape
+      const shaped = this.checkedPieces().filter((p) => p.pos && p.t1 && PH.isCloseRead(p.t1));
+      const byIsl = new Map();
+      for (const p of shaped) { if (!byIsl.has(p.island)) byIsl.set(p.island, []); byIsl.get(p.island).push(p); }
+      const isls = [...byIsl.values()];
+      const links = new Map();
+      // only pieces of different groups are compared (usually there is one group: nothing to do)
+      for (let gi = 0; gi < isls.length; gi++) for (let gj = gi + 1; gj < isls.length; gj++) for (const A of isls[gi]) for (const B of isls[gj]) {
+        if (!this.pieces.has(A.id) || !this.pieces.has(B.id)) continue;
+        if (!PH.samePiece(A.t1, B.t1, PH.SAME_SHAPE).ok) continue;
+        const [P, Q] = A.island < B.island ? [A, B] : [B, A];
+        const k = P.island + '>' + Q.island;
+        if (!links.has(k)) links.set(k, []);
+        links.get(k).push({ src: Q.pos, dst: P.pos, P, Q });
+      }
+      const unitT = this.unitTable() || 1;
+      let joined = 0;
+      for (const [k, pairs] of links) {
+        const [ia, ib] = k.split('>').map(Number);
+        const r = pairs.length >= 3 ? PH.simRansac(pairs, unitT * 1.0, 100, this.rnd) : null;
+        if (r && r.inliers.length >= 3) {
+          for (const p of this.pieces.values()) if (p.island === ib && p.pos) { this.moveWithGroup(p, r.T); p.island = ia; this.touch(p); }
+          if (this.island === ib) { this.island = ia; if (this.pose) this.pose = composeSim(r.T, this.pose); }
+          joined++;
+        } else {
+          for (const { P, Q } of pairs) {
+            if (!this.pieces.has(P.id) || !this.pieces.has(Q.id)) continue;
+            const here = Q.island === this.island ? Q : P, other = here === Q ? P : Q;
+            const keep = this.mergeEntries(here, other);
+            if (keep === other) { keep.pos = here.pos; keep.island = here.island; } // the entry stays where the piece is being seen now
+            st.merged++;
+          }
         }
       }
-      // 2. Drop never-identified leftovers: no shape, not on the table map, and
-      //    repeated attempts to read them failed (glare, shadows, crumbs).
-      for (const p of [...this.pieces.values()]) {
-        if (!p.t1 && !p.pos && (p.t1Fail || 0) >= 3) { this.removePiece(p.id); dropped.push(p.id); }
-      }
-      // 3. "Edge pieces" that can't be: a loose piece with a straight side
-      //    whose box spot is already filled in the assembled part, or any of
-      //    them once the assembled border is complete - chunks of the assembly
-      //    read as pieces (owner, 2026-10-04).
-      let falseEdges = 0;
+      // 2. "edge pieces" that are chunks of the assembled puzzle
+      let inPuzzle = 0;
       const asm = this.assemblyInfo();
       const borderDone = !!(asm && asm.border && asm.border.done >= asm.border.total);
       const filled = new Set();
-      for (const A of this.asms || []) for (const id of A.filledBoxCells(this.box)) filled.add(id);
+      for (const A of this.asms || []) if (A.place) for (const id of A.filledBoxCells(this.box)) filled.add(id);
       for (const id of this.cellFilledSet()) filled.add(id);
       for (const p of [...this.pieces.values()]) {
         if (p.inPuzzle || !p.t1) continue;
         const f = edgeFlags(p);
         if (!f.border && !f.corner && !(p.cutSeen >= 2 && p.t1.flats.some(Boolean))) continue;
         const c = this.box && p.t2 && p.t2.cands.length && p.t2.conf >= 0.35 ? p.t2.cands[0] : null;
-        if (borderDone || (c && filled.has(c.row * this.box.cols + c.col)) || (p.cutSeen || 0) >= 2) {
-          this.removePiece(p.id); dropped.push(p.id); falseEdges++;
-        }
+        const inFilled = borderDone || (c && filled.has(c.row * this.box.cols + c.col));
+        if (!(inFilled || (p.cutSeen || 0) >= 2)) continue;
+        // a checked piece only on real evidence that its spot is taken (a cut
+        // seen along its side may have been a neighbour lying against it)
+        if (this.isChecked(p)) { if (inFilled) { p.inPuzzle = Date.now(); this.touch(p); inPuzzle++; } }
+        else { this.removePiece(p.id); st.dropped++; }
       }
-      this.matchCache.clear();
+      if (joined || inPuzzle) { this.version++; this.matchCache.clear(); }
+      return { joined, inPuzzle };
+    }
+    /** Everything housekeeping does, in full (tests; a saved scan loading). */
+    tidy() {
+      const before = this.counts();
+      const m0 = this.hk ? this.hk.merged + this.hk.dropped : 0;
+      this.housekeep(Infinity);
+      const r = this.groupsAndEdges();
+      this.housekeep(Infinity);
       this.selection = null; this.region = null; this.pairSel = null;
-      return { removed: dropped.length + dd.merged, falseEdges, before, after: this.counts(), joinedIslands: dd.islands };
+      return { removed: (this.hk.merged + this.hk.dropped) - m0, falseEdges: r.inPuzzle, before, after: this.counts(), joinedIslands: r.joined };
     }
 
     /** Match accuracy from the answer key: share of judged suggestions that
@@ -2131,7 +2708,7 @@
       this.touch(A); this.touch(B);
       this.version++;
     }
-    removePiece(id) { this.pieces.delete(id); this.dirty.add(id); this.version++; }
+    removePiece(id) { if (this.pieces.has(id) && !(this.mergedInto && this.mergedInto.get(id))) this.logEvt('drop', id); this.pieces.delete(id); this.dirty.add(id); this.version++; }
 
     // ---------- open spots of assembled sections ----------
     /** Every steady view with a big blob (the assembled part) adds to an
@@ -2154,11 +2731,20 @@
       if (!still) return;
       // The piece size from loose pieces is only a hint here: a view of just
       // the assembled block has none, and its own estimate can be the block.
-      const unit = this.unitLive || seg.unitArea;
+      // This frame's own piece size when it has one: the running estimate
+      // lags while the phone comes down, and a single close-up piece then
+      // looked several pieces big (owner's video: false assembled parts).
+      const own = seg.unitN >= 3 && seg.unitOwn ? seg.unitOwn : null;
+      const unit = own && this.unitLive && Math.abs(Math.log(own / this.unitLive)) > Math.log(1.5) ? own : this.unitLive || seg.unitArea;
       const side = unit && unit < proc.w * proc.h * 0.05 ? Math.sqrt(unit) : null;
-      const pick = (ds, P, sd) => ds.filter((d) => d.big || d.area > (sd ? sd * sd * 3.5 : P.w * P.h * 0.06))
+      const pick = (ds, P, sd) => ds.filter((d) => (d.big || d.area > (sd ? sd * sd * 3.5 : P.w * P.h * 0.06)) && (!sd || Math.min(d.bbox[2], d.bbox[3]) >= sd * 1.2)) // (not a thin strip along the frame edge)
         .sort((x, y) => y.area - x.area).slice(0, photo ? 6 : 2);
-      const blobs = pick(dets, proc, side);
+      const blobs = pick(dets, proc, side).filter((d) => {
+        const v = this.puzzleLike(d, seg, proc);
+        if (PH.DEBUG_BLOB) PH.DEBUG_BLOB(d, v);
+        if (!v.ok) this.rejects.notPuzzle = (this.rejects.notPuzzle || 0) + 1;
+        return v.ok;
+      });
       if (!blobs.length) return;
       if (!PH.Assembly) return; // js/vision/assembly.js not loaded (some tests)
       // Only sharp views build the assembled part: a motion-blurred one
@@ -2253,6 +2839,42 @@
       const r = P.length >= 6 ? PH.simRansac(P, (this.unitTable() || 30) * 0.4, 60, this.rnd) : null;
       if (r && r.inliers.length >= P.length * 0.5) A.tab.T = r.T;
     }
+    /** Does big blob d look like part of the puzzle? Owner's 50-piece video
+     *  (v0.19.0): a butter dish, a jar lid and a fruit bowl became "assembled
+     *  parts" with 52 open spots and a border. Measured per blob:
+     *  - pal: share of its pixels whose colour is in the box picture
+     *    (white-balanced like the segmentation's palette model);
+     *  - tex: its print texture (mean lightness step between neighbours)
+     *    over the board's around it.
+     *  Returns {pal, tex, ok}. */
+    puzzleLike(d, seg, P) {
+      const W = P.w, H = P.h, L = seg.lab, fg = seg.fg;
+      const [bx, by, bw, bh] = d.bbox;
+      const st = Math.max(1, Math.floor(Math.sqrt((bw * bh) / 2500)));
+      let corr = null;
+      if (this.box && this.box.white) {
+        const wf = PH.whitePoint(L, W * H), wb = this.box.white;
+        if (wf.L > 120) corr = { k: wb.L / wf.L, fL: wf.L, da: wf.a - wb.a, db: wf.b - wb.b };
+      }
+      let n = 0, inPal = 0, tIn = 0, nIn = 0, tOut = 0, nOut = 0;
+      const pad = Math.round(Math.max(bw, bh) * 0.15);
+      for (let y = Math.max(1, by - pad); y < Math.min(H - 1, by + bh + pad); y += st) {
+        for (let x = Math.max(1, bx - pad); x < Math.min(W - 1, bx + bw + pad); x += st) {
+          const p = y * W + x, inside = x >= bx && x < bx + bw && y >= by && y < by + bh && fg && fg[p];
+          const t = Math.abs(L[3 * p] - L[3 * (p + 1)]) + Math.abs(L[3 * p] - L[3 * (p + W)]);
+          if (inside) {
+            tIn += t; nIn++; n++;
+            if (this.box && this.box.palette && this.box.palette[PH.correctedBin(L[3 * p], L[3 * p + 1], L[3 * p + 2], corr)] > PH.PAL_MIN) inPal++;
+          } else if (!(fg && fg[p])) { tOut += t; nOut++; }
+        }
+      }
+      const pal = this.box && this.box.palette && n ? inPal / n : null;
+      const tex = nIn && nOut ? (tIn / nIn) / Math.max(0.5, tOut / nOut) : null;
+      // (texture is reported, not required: the owner's real assembled puzzle
+      // measured 1.2x its table, loose pieces on a plain counter 4-18x)
+      const ok = pal === null || pal >= PH.PAL_SHARE;
+      return { pal, tex, ok };
+    }
     /** Lightness Laplacian spread of the processing frame (every 2nd pixel). */
     frameSharpness(lab, w, h) {
       let s = 0, ss = 0, n = 0;
@@ -2346,7 +2968,10 @@
     }
     /** An assembly worth showing: placed on the box, or confirmed by a few
      *  views (a one-off view - a misread blob in a photo - is not). */
-    asmShown(A) { return !!A.place || A.views >= 3; }
+    // With a box picture, an assembled part is shown only once it is placed on
+    // it with confidence (v0.20: a butter dish and close-up single pieces
+    // became "assembled parts" with 52 open spots); without one, after 3 views.
+    asmShown(A) { return this.box ? !!A.place : A.views >= 3; }
     /** The main assembly: placed ones first, then the most cells. */
     mainAssembly() {
       let best = null;
@@ -2477,20 +3102,22 @@
         const p = d.id ? this.pieces.get(d.id) : null;
         let status = 'unknown';
         if (d.merged) status = 'merged';
-        else if (p) status = p.inPuzzle ? 'done' : p.t2 && p.t2.conf >= 0.35 ? 'placed' : p.t1 ? 'shaped' : 'seen';
+        else if (p && this.isChecked(p)) status = p.inPuzzle ? 'done' : p.t2 && p.t2.conf >= 0.35 ? 'placed' : 'shaped';
+        else if (!d.border) status = 'checking'; // not a checked piece yet: the "scan closer" ring
         if (p) byId.set(p.id, d);
         // `r` lets the page draw a marker without walking the outline at all.
         // The outline itself is simplified harder than it used to be: it is
         // only used for hit-testing a tap and for the optional outline view,
         // and every point costs a transform (a homography, with tilt on).
-        return { id: d.id, status, cx: d.cx, cy: d.cy, r: Math.round(Math.sqrt(d.area || 1) / 2), pts: simplify(d.pts, this.opts.outlineEps || 2.5), border: d.border };
+        const close = status === 'checking' && Math.sqrt(d.area || 1) / proc.scale / 1.1 >= PH.CLOSE_SIDE; // near enough to check it now
+        return { id: status === 'checking' ? null : d.id, status, close, cx: d.cx, cy: d.cy, r: Math.round(Math.sqrt(d.area || 1) / 2), pts: simplify(d.pts, this.opts.outlineEps || 2.5), border: d.border };
       });
       const hl = [];
       const locate = (id, role, extra) => {
         const d = byId.get(id);
         if (d) return hl.push(Object.assign({ id, role, x: d.cx, y: d.cy, visible: true }, extra));
         const p = this.pieces.get(id);
-        if (p && p.pos && inv && p.island === this.island) {
+        if (p && p.pos && !p.gone && inv && p.island === this.island) { // (no arrow to a moved piece's old spot)
           const f = PH.simApply(inv, p.pos[0], p.pos[1]);
           hl.push(Object.assign({ id, role, x: f[0], y: f[1], visible: false }, extra));
         }
@@ -2515,7 +3142,7 @@
         // a 2x2 block); anything resting on a single, possibly bad read is a
         // "maybe" (silver), however good its score looks.
         if (res) for (const r of res) r.matches.slice(0, 3).forEach((m, i) => {
-          const gold = i === 0 && m.prob >= 0.5 && (m.loopOk || (shapeConfirmed(P) && shapeConfirmed(this.pieces.get(m.id))));
+          const gold = PH.sureFit(m, i);
           locate(m.id, gold ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge, rank: i });
         });
       }
@@ -2549,7 +3176,7 @@
       }
       // Auto-flag: mutual best matches among visible pieces.
       const links = [];
-      const vis = [...byId.keys()].filter((id) => this.pieces.get(id).t1);
+      const vis = [...byId.keys()].filter((id) => this.pieces.get(id).t1 && this.isChecked(this.pieces.get(id)));
       if (vis.length <= 80) {
         let budget = 4; // fresh match computations per frame
         const best = new Map();
@@ -2558,15 +3185,15 @@
           if (!(c && c.version === this.version) && budget-- <= 0) { if (c) best.set(id, c.res); continue; }
           best.set(id, this.matchesFor(id));
         }
-        for (const [id, res] of best) for (const r of res) {
+        for (const [id, res] of best) for (const r of res || []) {
           const m = r.matches[0];
-          if (!m || m.prob < 0.8 || !best.has(m.id) || id > m.id) continue;
+          if (!m || m.prob < 0.8 || m.tie || m.colOk === false || !best.has(m.id) || id > m.id) continue; // (as a sure fit: no tie, colour agrees)
           if (!shapeConfirmed(this.pieces.get(id)) || !shapeConfirmed(this.pieces.get(m.id))) continue; // both shapes seen twice
           if (this.pieces.get(id).inPuzzle && this.pieces.get(m.id).inPuzzle) continue; // both already placed
           // Both confidently placed on the box but not side by side: not a pair.
           const P = this.pieces.get(id), Q = this.pieces.get(m.id);
           // With a box picture, wait until both are placed so it can veto the pair.
-          if (this.box && (!P.t2 || !Q.t2)) continue;
+          if (this.box && (!P.t2 || !Q.t2 || P.t2.conf < 0.2 || Q.t2.conf < 0.2)) continue; // (placed at least loosely, or the box can't veto)
           // The box must agree they're neighbors, unless a placement is too
           // uncertain to judge and the shape/color match is near-certain.
           if (this.box && m.adj === 0 && !((P.t2.conf < 0.3 || Q.t2.conf < 0.3) && m.prob >= 0.95)) continue;
@@ -2591,13 +3218,19 @@
 
     // ---------- persistence ----------
     exportPiece(p) {
-      return { id: p.id, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created, rd: p.rd || null, pic: p.pic || null, missing: !!p.missing, inPuzzle: p.inPuzzle || 0, cutSeen: p.cutSeen || 0 };
+      return { id: p.id, fp: p.fp, area: p.area, pos: p.pos, island: p.island, t1: p.t1, t2: p.t2, wrong: p.wrong, joined: p.joined, created: p.created, rd: p.rd || null, pic: p.pic || null, missing: !!p.missing, inPuzzle: p.inPuzzle || 0, cutSeen: p.cutSeen || 0,
+        // evidence for "checked" (v0.20) and the duplicate clean-up
+        state: p.state || 'checking', sightings: p.sightings || 0, moments: p.moments || 0, closeViews: p.closeViews || 0, closeAgree: p.closeAgree || 0,
+        seenWith: p.seenWith ? [...p.seenWith] : [], gone: !!p.gone, goneAt: p.goneAt || 0, refound: p.refound || 0, photoRead: !!p.photoRead };
     }
     importState(state) {
       this.reset();
+      if (state.boardRef && state.boardRef.L > 15) this.boardRef = state.boardRef;
       for (const q of state.pieces || []) {
         if (q.kind === 'section') { this.dirty.add(q.id); continue; } // v0.16 and older: replaced by the assembly
         const p = Object.assign({ miss: 0, t1Fail: 0, wrong: [], joined: [false, false, false, false] }, q);
+        p.seenWith = new Set(q.seenWith || []);
+        p.momentF = undefined; // frame numbers restart
         this.pieces.set(p.id, p);
         if (p.t1) this.calibrate(p.t1);
         this.nextId = Math.max(this.nextId, p.id + 1);
@@ -2606,8 +3239,12 @@
       if (state.box) {
         this.box = state.box;
         if (!this.box.palette || !this.box.white) PH.computeCells(this.box); // boxes saved before palettes existed
+        if (this.box.lab && PH.boxColTol) PH.colTol = this.box.colT = this.box.colT || PH.boxColTol(this.box);
       }
       this.dirty.clear();
+      // A saved scan is cleaned up as it loads (duplicates from older
+      // versions merged); what changed is saved back (dirty).
+      this.housekeep(Infinity); // (also joins scan groups and settles false edge pieces)
     }
     takeDirty() {
       const ids = [...this.dirty];
@@ -2641,6 +3278,16 @@
   /** A shape is trusted once two independent views agreed on it. */
   function shapeConfirmed(p) { return !!(p && p.t1 && (p.t1.nObs || 1) >= 2); }
   PH.shapeConfirmed = shapeConfirmed;
+  /** A sure fit (gold): only between checked pieces (both close-read, so
+   *  only they get matches at all), likely, not within reading noise of
+   *  another candidate, passing the colour rule along the seam, and backed by
+   *  something independent - each picks the other, a closed 2x2 loop, or
+   *  the box picture putting them side by side. */
+  PH.sureFit = (m, rank) => rank === 0 && (m.prob || 0) >= 0.5 && !m.tie && m.colOk !== false && !!(m.mutual || m.loopOk || (m.adj || 0) >= 0.3);
+  // Assembled-part blob checks (Engine.puzzleLike); set from the owner's video
+  // and the real assembled-puzzle photo, see test/real-50.js.
+  PH.PAL_MIN = 1.2e-4; // a box-palette bin at least as common as an even spread counts as "a puzzle colour"
+  PH.PAL_SHARE = 0.5;  // share of a blob's pixels in puzzle colours
 
   /** Flat-edge summary of a piece: how many straight edges it has, and whether
    * two of them meet (a corner piece). Edges are stored clockwise, so adjacent

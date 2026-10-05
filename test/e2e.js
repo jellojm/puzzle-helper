@@ -78,20 +78,23 @@ function writePng(file, mat) {
   try {
     const page = await browser.newPage({ viewport: { width: 430, height: 932 }, deviceScaleFactor: 2 });
     const errors = [];
-    page.on('pageerror', (e) => errors.push(e.message));
-    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-    await page.goto('http://localhost:8080/');
+    page.on('pageerror', (e) => { errors.push(e.message); console.log('PAGE ERROR', e.message); });
+    page.on('console', (m) => { if (m.type() === 'error') { errors.push(m.text()); console.log('CONSOLE ERROR', m.text()); } });
+    await page.goto('http://localhost:8080/?closeSide=40'); // (synthetic pieces are small; the phone's close reads are 120+ px)
     await page.click('#startBtn');
     await page.waitForSelector('#app:not([hidden])', { timeout: 15000 });
     await page.evaluate(() => { const t = document.getElementById('debugToggle'); t.checked = true; t.dispatchEvent(new Event('change')); });
     // Wait for OpenCV download + first frames.
-    await page.waitForFunction(() => /^[1-9]\d* pieces/.test(document.getElementById('stats').textContent), null, { timeout: 120000 });
+    // (v0.20: the top bar counts checked pieces; entries still being checked
+    // show as "scan closer at N" - together, what has been catalogued)
+    const catalogued = (t) => parseInt(t, 10) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0);
+    await page.waitForFunction(() => { const t = document.getElementById('stats').textContent; return parseInt(t, 10) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0) > 0; }, null, { timeout: 120000 });
     await page.waitForTimeout(15000);
     const stats1 = await page.textContent('#stats');
     const dbg = await page.textContent('#debug');
     console.log('stats after sweep:', stats1, '\n' + dbg);
     await page.screenshot({ path: path.join(OUT, 'e2e-scan.png') });
-    const n1 = parseInt(stats1, 10);
+    const n1 = catalogued(stats1);
     check('live camera catalogs pieces', n1 >= 25 && n1 <= 48, `${n1} pieces for 48 on the table (sweep sees part of the table)`);
 
     // Box picture.
@@ -115,9 +118,9 @@ function writePng(file, mat) {
     await page.waitForTimeout(6000);
     const stats2 = await page.textContent('#stats');
     console.log('stats after snap + box:', stats2);
-    const n2 = parseInt(stats2, 10);
+    const n2 = catalogued(stats2);
     check('snap adds the rest without duplicating', n2 >= 37 && n2 <= 42, `${n2} pieces (39 loose + an assembled 3x3 block on the table)`);
-    check('pieces placed on the box', /(\d+) placed/.test(stats2) && parseInt(stats2.match(/(\d+) placed/)[1], 10) >= 20, stats2);
+    check('pieces placed on the box', /(\d+) on box picture/.test(stats2) && parseInt(stats2.match(/(\d+) on box picture/)[1], 10) >= 20, stats2);
 
     // Tap a piece that has a shape model and check the Find panel.
     const pt = await page.evaluate(() => window.__phPick && window.__phPick());
@@ -335,14 +338,17 @@ function writePng(file, mat) {
     await page.click('#menuBtn');
     await page.click('#libSave');
     const saved = await page.waitForFunction(() => /E2E puzzle/.test(document.getElementById('libList').textContent), null, { timeout: 8000 }).then(() => true).catch(() => false);
+    // (saving runs a full housekeeping pass first - v0.20: the count to get back is the one shown now)
+    await page.waitForTimeout(500);
+    const nSaved = await page.evaluate(() => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1]);
     await page.click('#newPuzzle');
     await page.waitForFunction(() => /^0 pieces/.test(document.getElementById('stats').textContent), null, { timeout: 8000 }).catch(() => {});
     const afterNew = await page.textContent('#stats');
     await page.click('#menuBtn');
     await page.waitForFunction(() => document.querySelectorAll('#libList .lib-row button').length > 0, null, { timeout: 8000 }).catch(() => {});
     await page.evaluate(() => { const row = [...document.querySelectorAll('#libList .lib-row')].find((r) => /E2E puzzle/.test(r.textContent)); if (row) row.querySelector('button').click(); });
-    const reopened = await page.waitForFunction((n) => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1] === n, n0, { timeout: 10000 }).then(() => true).catch(() => false);
-    check('Puzzle library: save, start a new puzzle, open the saved one again', saved && /^0 pieces/.test(afterNew) && reopened, `saved ${saved}; after New: ${afterNew}; reopened with ${n0} pieces: ${reopened}`);
+    const reopened = await page.waitForFunction((n) => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1] === n, nSaved, { timeout: 10000 }).then(() => true).catch(() => false);
+    check('Puzzle library: save, start a new puzzle, open the saved one again', saved && /^0 pieces/.test(afterNew) && reopened, `saved ${saved} (${n0} pieces before, ${nSaved} as saved); after New: ${afterNew}; reopened with ${nSaved} pieces: ${reopened}`);
     await page.click('#closeMenu').catch(() => {});
 
     check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));

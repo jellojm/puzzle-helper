@@ -12,12 +12,17 @@
   // near the threshold) is matched as the type its shape leans to.
   const mType = (e) => (e.type === 'F' && e.unc ? e.alt : e.type);
   PH.UNCERTAIN_PENALTY = 0.4; // score cost of matching an edge read as flat
+  PH.COL_W = 1.5; // score cost per share of disagreeing outline-point colours
+  // Two candidates whose scores differ by less than the reading noise of two
+  // close reads of one edge (owner's video: 90% within 0.29) can't be told
+  // apart by shape: shown as "2 possible fits", never a sure one.
+  PH.TIE_MARGIN = 0.29;
   PH.edgeScore = function (eA, eB) {
     const ta = mType(eA), tb = mType(eB);
     if (!((ta === 'T' && tb === 'B') || (ta === 'B' && tb === 'T'))) return null;
     const lr = Math.log(eA.lenRel / eB.lenRel);
     if (Math.abs(lr) > 0.15) return null;
-    const a = eA.sig, b = eB.sig, n = a.length / 2;
+    const a = eA.sig, n = a.length / 2, b = PH.sigAs ? PH.sigAs(eB.sig, n, eB.gtrim, eA.gtrim || 0) : eB.sig;
     // Compare at a common absolute scale: signatures are in units of each edge's own length.
     const kb = eB.lenRel / eA.lenRel;
     // Map B into A's frame, then align it with the best small rotation +
@@ -51,7 +56,83 @@
     }
     color /= m;
     const unsure = (eA.type === 'F' ? 1 : 0) + (eB.type === 'F' ? 1 : 0); // matched through an uncertain flat
-    return { shape, color, score: shape * 12 + color / 15 + Math.abs(lr) * 4 + unsure * PH.UNCERTAIN_PENALTY };
+    const out = { shape, color, score: shape * 12 + color / 15 + Math.abs(lr) * 4 + unsure * PH.UNCERTAIN_PENALTY };
+    // Colour at every outline point (v0.20): the points facing each other
+    // across the seam (A's point s meets B's point n-1-s) must mostly agree.
+    // ...unless either edge's colour was read in bad conditions: then colour
+    // says nothing about this pair (it would throw out real fits) and the
+    // reason is passed on to be shown.
+    if (eA.cdoubt || eB.cdoubt) out.colDoubt = eA.cdoubt || eB.cdoubt;
+    else { const cs = PH.colourAgree(eA, eB); if (cs !== null) out.colShare = cs; }
+    return out;
+  };
+  /** Share of facing outline points whose colours agree (within the
+   *  puzzle's tolerance PH.colTol, plus the print's own busyness there), or
+   *  null when either edge has no per-point colour (reads saved before
+   *  v0.20). */
+  // Owner: "the adjacent piece should match colorwise within a certain
+  // percentage". Measured on the reef and chickens box pictures
+  // (test/edge-colour.js): requiring at least half of the facing points to
+  // agree keeps ~99% of true seams and rejects ~86-90% of wrong pairs; 80%
+  // of points needed a much wider tolerance and rejected only 73% on the
+  // busy reef print.
+  PH.COL_SHARE = 0.5;
+  PH.COL_SPREAD_W = 0;   // extra tolerance per unit of print busyness at a point (0: it loosened busy prints too much)
+  PH.colTol = 18;       // per-point tolerance (8-bit Lab); set per puzzle from its box picture (PH.boxColTol)
+  /** Facing colour points of two edges, as [s, r] index pairs. Points are
+   *  paired by where they sit along the seam (B's points mirrored into A's
+   *  edge frame, nearest within 8% of the edge): the two pieces' corners are
+   *  found a little differently, so point s of A need not face point n-1-s
+   *  of B (tools/points-bench.js colour: auc .902 vs .898 by index; a
+   *  shift search was worse). Reads without positions pair by index. */
+  PH.colourPairs = function (eA, eB) {
+    const n = eA.pcol.length / 3, m = eB.pcol.length / 3, out = [];
+    if (eA.pxy && eB.pxy && eA.pxy.length === 2 * n && eB.pxy.length === 2 * m) {
+      const a = eA.pxy, b = eB.pxy;
+      for (let s = 0; s < n; s++) {
+        const x = a[2 * s], y = a[2 * s + 1];
+        let br = -1, bd = 0.0064; // 0.08 squared
+        for (let r = 0; r < m; r++) { const q = (1 - b[2 * r] - x) ** 2 + (-b[2 * r + 1] - y) ** 2; if (q < bd) { bd = q; br = r; } }
+        if (br >= 0) out.push([s, br]);
+      }
+      return out;
+    }
+    for (let s = 0; s < n; s++) out.push([s, Math.round(((n - 1 - s) * (m - 1)) / Math.max(1, n - 1))]);
+    return out;
+  };
+  PH.colourAgree = function (eA, eB) {
+    const a = eA.pcol, b = eB.pcol;
+    if (!a || !b) return null;
+    const pairs = PH.colourPairs(eA, eB), T = PH.colTol;
+    if (pairs.length < (a.length / 3) / 2) return 0; // the outlines don't line up along the seam
+    let ok = 0;
+    for (const [s, r] of pairs) {
+      const tol = T + PH.COL_SPREAD_W * ((eA.pspread ? eA.pspread[s] : 0) + (eB.pspread ? eB.pspread[r] : 0));
+      if (PH.dE(a[3 * s], a[3 * s + 1], a[3 * s + 2], b[3 * r], b[3 * r + 1], b[3 * r + 2], 0.7) <= tol) ok++;
+    }
+    return ok / pairs.length;
+  };
+  /** The per-point colour tolerance for a puzzle, from its own box picture:
+   *  every true seam between neighbouring cells, the two pixels either side
+   *  of it (~4% of a cell apart at 24 px/cell; pieces are read ~3% in, so a
+   *  join's two samples are ~6% apart); the tolerance keeps 98% of
+   *  true seams at >= PH.COL_SHARE agreeing points, plus read noise. A busy
+   *  print gets a wider tolerance than a plain one. */
+  PH.COL_NOISE = 3; // two close reads of one edge, colours relative to the board
+  PH.boxColTol = function (box) {
+    const S = box.S, W = box.W, lab = box.lab, need = [];
+    const px = (x, y) => 3 * (y * W + x);
+    const seam = (pts) => {
+      const d = pts.map(([p, q]) => PH.dE(lab[p], lab[p + 1], lab[p + 2], lab[q], lab[q + 1], lab[q + 2], 0.7)).sort((u, v) => u - v);
+      need.push(d[Math.min(d.length - 1, Math.ceil(d.length * PH.COL_SHARE) - 1)]);
+    };
+    for (let r = 0; r < box.rows; r++) for (let c = 0; c < box.cols; c++) {
+      if (c + 1 < box.cols) { const x = (c + 1) * S; seam(Array.from({ length: S }, (_, t) => [px(x - 1, r * S + t), px(x, r * S + t)])); }
+      if (r + 1 < box.rows) { const y = (r + 1) * S; seam(Array.from({ length: S }, (_, t) => [px(c * S + t, y - 1), px(c * S + t, y)])); }
+    }
+    if (!need.length) return 18;
+    need.sort((u, v) => u - v);
+    return PH.clamp(need[Math.floor((need.length - 1) * 0.98)] + PH.COL_NOISE, 6, 45);
   };
 
   // Bonus (0..1) when box placements put B's edge kB right against A's edge kA.
@@ -91,6 +172,14 @@
     const adj = PH.boxAdjacency(P.t2, k, Q.t2, m);
     r.adj = adj;
     r.score -= adj * 1.2;
+    // Colour along the seam: too few agreeing points rules the pair out,
+    // unless the box picture puts the two side by side (a print change
+    // exactly along the cut - ~2% of true seams).
+    if (r.colShare !== undefined) {
+      if (r.colShare < PH.COL_SHARE && adj < 0.3) return null;
+      r.colOk = r.colShare >= PH.COL_SHARE;
+      r.score += (1 - r.colShare) * PH.COL_W;
+    }
     // Both confidently placed on the box but not neighbors there:
     // probably a look-alike (matters most when the real partner
     // hasn't been scanned yet).
@@ -137,6 +226,7 @@
           }
         }
         list.sort((x, y) => x.score - y.score);
+        if (list[1] && list[1].score - list[0].score < PH.TIE_MARGIN) list[0].tie = list[1].tie = true;
         // Probability that each candidate is the true partner: softmax over
         // all candidates plus a "partner not catalogued yet" option.
         if (list.length) {
@@ -338,6 +428,7 @@
   PH.matchVerdict = function (m, next) {
     const p = m.prob || 0, backed = m.loopOk || m.mutual || m.loops >= 2;
     if (p < 0.2) return 'weak'; // (before 'alike': two 0% candidates are not look-alikes)
+    if (m.tie) return 'alike'; // within reading noise of another candidate
     if (next && (next.prob || 0) >= p * 0.7 && p < 0.7) return 'alike';
     if (p >= 0.85 && backed) return 'strong';
     if (p >= 0.5) return 'likely';

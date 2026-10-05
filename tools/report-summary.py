@@ -61,6 +61,16 @@ for f in sys.argv[1:]:
               '| 2x2 loop', f"{fb['loopOk']['fits']}/{fb['loopOk']['n']}")
     gate = w.get('gate')
     if gate: print('  quality gate: rejected', gate.get('rejects'), '| provisional now', gate.get('candidates'), '| piece size', gate.get('pieceMM') and round(gate['pieceMM'], 1), 'mm')
+    if w.get('housekeeping') is not None:  # v0.20+
+        st = {}
+        for p in (w.get('pieces') or []): st[p.get('state')] = st.get(p.get('state'), 0) + 1
+        print('  v0.20 states', st, '| gone', sum(1 for p in (w.get('pieces') or []) if p.get('gone')), '| refound', sum(p.get('refound', 0) for p in (w.get('pieces') or [])),
+              '| housekeeping', w.get('housekeeping'), '| unchecked because', w.get('unchecked'), '| colTol', w.get('colTol'), '| over the box count', w.get('overCount'))
+    ch = w.get('colourHealth')
+    if ch:  # colour read in bad conditions, and box-backed fits colour would have thrown out
+        b = ch.get('box') or {}
+        print('  colour: edges', ch.get('edges'), '| not trusted', ch.get('doubt'), '| box-backed fits', b.get('pairs'), 'colour agrees', b.get('agree'),
+              'would reject', b.get('reject'), "can't judge", b.get('doubt'), '| rejects', ch.get('rejects')[:5])
     if pcs and any('views' in p for p in pcs):
         views = [p.get('views', 0) for p in pcs]
         print('  shapes: confirmed (>=2 views)', sum(1 for v in views if v >= 2), 'of', len(views), '| uncertain edges', sum((p.get('unc') or '').count('1') for p in pcs),

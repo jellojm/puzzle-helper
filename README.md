@@ -7,12 +7,12 @@ An iPhone web app (no App Store) for jigsaw puzzles. Point the camera at pieces 
 - **More → Catalog from a photo:** take a full-resolution photo to catalog every piece in it at once. On browsers that can take a still from the live camera (iOS 18.4+) the photo is taken right in the app; otherwise the camera app opens.
 - **More → Puzzles:** keep several puzzles on the go — each keeps its own pieces, box picture, answers and marked border. Save one under a name, open another (the current one is saved first), and New puzzle files the old one here too.
 - **More → Measure lens angle:** tilt the phone back and forth over the table for 6 seconds (without sliding it); the app measures your camera's real angle for the distance hint and tilt correction.
-- **Box:** photograph the box picture. The app splits it into the puzzle's grid and works out where each piece belongs. Enter the **finished size** printed on the box (optional): with the real piece size the app can tell you how close to hold the phone.
+- **Box:** photograph the box picture. The app splits it into the puzzle's grid and works out where each piece belongs. If the box was photographed sideways, **Rotate 90°** turns which edge is the picture's top. Save names use the piece count you type (a 1000-piece box's 27 × 37 grid no longer shows as "999").
 - **Find:** tap a piece to see its spot on the box and its best partners for each edge. Each partner gets a word and a percentage: **Strong match** (very likely, and backed by a second check — the two pieces pick each other, or a closed 2×2 block), **Likely**, **Maybe**, **Look-alike** (another piece is about as good) or **Unlikely** (dimmed). The percentages are calibrated — "90%" means about 9 in 10 fit — and they keep learning from your **Fits / No** answers on your own puzzle. The box spot is said in words too (sure / likely / several spots look alike), with a warning for plain pieces whose spot is only a rough guess. Matching pieces glow on the table (gold = best). Pieces off-screen get an arrow pointing toward them.
   - **Easy to see:** every highlighted piece — the selected one, its partners, a Matches pair, anything a finder lights up — gets its whole outline drawn and is shaded in its colour, and curved lines arc from the selected piece to its likely partners (also toward ones off screen), so they're easy to follow while panning.
   - **Which way up:** a white arrow on the selected piece points to its top edge as it sits in the finished puzzle (also on the Map), and the panel shows the piece upright.
   - **Mark as in the puzzle:** once you've placed a piece, tap this in its panel. Its spot on the box is no longer offered for other pieces, Border and the finders skip it, it's dimmed on the table and the Map, and More shows how much is done. Tap again to undo.
-  - **Corners / Edges:** light up every corner piece (orange) or edge piece (teal) on the table, with counts. **Unplaced** and **Unread** light up pieces not yet found on the box, or whose shape hasn't been read.
+  - **Corners / Edges:** light up every corner piece (orange) or edge piece (teal) on the table, with counts. **Unplaced** lights up pieces not yet found on the box; **Need closer look** lights up the amber "scan closer" rings.
   - **Matches:** search the whole catalog for pairs that fit, with no box picture needed, and step through them with ‹ ›. Tap **Fits** or **No** on each: the app keeps an answer key and shows its running accuracy under **More**.
   - **Box picture:** hide or show the small box picture when it's in the way.
 - **Map:** turns the camera off and shows every scanned piece from above, as its own picture at its place and angle on the table — so several people can work from one phone or iPad lying on the table. Drag to move, pinch to zoom, twist (or **↻ 90°**) to turn it toward you, **Fit** to see everything. Tap a piece for its matches (lines to its partners); Border, the finders and Matches work here too. Separate scan areas are shown side by side. Pieces moved since scanning: switch to Scan and sweep that area again.
@@ -27,7 +27,7 @@ Everything runs on the phone. Nothing is uploaded, and the catalog is saved on t
 
 **Dense piles and pale pieces:** in a dense pile the gaps between pieces look like pieces too; the app now checks which side carries print, so a pile of white pieces on dark glass is read the right way round, and pieces pressed together without a gap are cut apart along their notches. When pale pieces blend into a pale board, the app also uses the pieces' texture (fine print detail the board lacks) to find them.
 
-**Edge pieces that aren't:** a piece-sized chunk of an assembled section can look like an edge piece (a straight cut along a strong colour change). Such a "piece" has the seam between two real pieces running through it, so it's not catalogued; pieces seen again with more puzzle right past their straight side stop counting as edge pieces, and once the assembled border is complete, Border / Corners / Edges offer nothing more. **More → Tidy up the catalog** removes the ones already catalogued (an "edge piece" whose spot is already assembled, or all of them once the assembled border is complete).
+**Edge pieces that aren't:** a piece-sized chunk of an assembled section can look like an edge piece (a straight cut along a strong colour change). Such a "piece" has the seam between two real pieces running through it, so it's not catalogued; pieces seen again with more puzzle right past their straight side stop counting as edge pieces, and once the assembled border is complete, Border / Corners / Edges offer nothing more. The app settles the ones already catalogued by itself: an "edge piece" whose spot is already assembled is marked in the puzzle (if it was checked) or dropped (if not).
 
 **New pieces need enough detail:** a new piece only counts once its shape has been read well enough for how far away the phone was (close up: two steady views and a fair read; far away: more views and a sharper read). If its shape and print match a catalogued piece that isn't in view, it's that piece, moved — not a new one. All automatic.
 
@@ -74,7 +74,9 @@ Open that address on the iPhone. Safari shows a certificate warning once: tap *S
 - Hold the phone flat, 30–40 cm up, and pause briefly over each area. Shapes are only read while the phone is steady. Holding it at an angle to avoid glare is fine (the app straightens the view), but closer is better: far-away pieces become too small to read.
 - If the dot at the top turns red ("lost my place"), hold still over pieces you've already scanned. The app finds its position again from them.
 - Only good shots make pieces: a piece is catalogued after the camera has seen it clearly in a few steady frames in a row, and not from a blurred, too-distant or partial view. Its shape is **confirmed** when a second, later look agrees; gold matches need confirmed shapes. If the top says "Too far to read pieces", move closer — the distance it suggests depends on the puzzle's piece size.
-- If the piece count goes past the puzzle's size, the same pieces were catalogued twice after tracking was lost. **More → Tidy up the catalog** folds the duplicates back together.
+- Only **checked** pieces are counted and shown: read up close twice with the same shape, seen steadily a few times, on their own spot. Until then a piece is an amber ring with a + ("scan closer here"). Duplicates are folded back together automatically (there is no Tidy up button since v0.20).
+- Pieces may be moved: a checked piece keeps its number; when its spot is seen bare it disappears from the dots and the Map until a sweep finds it again, by its shape and colour.
+- **More → What the colours mean** explains every dot and highlight colour.
 - **More → Scan detail** trades sensitivity for speed and battery; **More → Send report** saves the camera view, the box picture and diagnostic data (share it to Files/OneDrive) when something looks wrong. The data covers speed per stage for the whole session, how smooth the screen was, the motion tracker's cost, the vision engine's state and settings — `python tools/report-summary.py` prints it.
 
 ## How it works (short)
@@ -85,9 +87,9 @@ Open that address on the iPhone. Safari shows a certificate warning once: tap *S
 | Motion | every other display frame (~1 ms, page side) | a 96 px thumbnail matched against the last analysed frame; moves the dots between readings and tells a blurred sweep from a steady view |
 | Fingerprint | every piece, every frame (<1 ms) | color histogram + mean color; tracks pieces between frames |
 | Table map | every frame | known pieces are used as landmarks to fit the camera position (RANSAC similarity). Moved pieces are noticed and updated; separate scan areas merge when seen together. |
-| Shape | once per piece, when steady (~10 ms) | outline → 4 corners → 4 edges typed tab/blank/flat + shape curve + color strip |
+| Shape | once per piece, when steady (~10 ms) | outline → 4 corners → 4 edges typed tab/blank/flat; two point sets per edge: 32 shape points (corners left off — corner finding jitters) and 32 colour points just inside the cut, light-corrected, each marked untrusted when read in glare or too dark |
 | Box placement | once per piece (~10–30 ms) | corners fix rotation to 4 options and the grid fixes scale; color pre-filter over every cell, then pixel comparison over the top ~20 |
-| Matching | on demand (~1 ms per piece) | tab↔blank only; shape distance after Procrustes alignment + color across the seam + box-adjacency bonus → softmax probability with a "partner not scanned yet" option |
+| Matching | on demand (~1 ms per piece) | tab↔blank only; shape distance after Procrustes alignment + colour across the seam (half the facing points must agree, unless either edge's colour is untrusted: then the fit says "colour not checked") + box-adjacency bonus → softmax probability with a "partner not scanned yet" option |
 
 The code is in `js/vision/` (plain JavaScript + OpenCV.js, runs in a Web Worker). The page UI is `index.html` + `js/main.js`.
 
@@ -104,7 +106,11 @@ node test/e2e.js    # runs the real page in headless Edge/Chrome with a fake cam
 Pointed checks (seconds each) — prefer these while working on one area:
 
 ```
-node test/live-sections.js   # an assembled block is built up and located from live frames, never catalogued; Map, Tidy up, old catalogues
+node test/live-sections.js   # an assembled block is built up and located from live frames, never catalogued; Map, housekeeping, old catalogues
+node test/moves.js           # pieces slid, swapped, turned, taken away and put back keep their numbers (~30 s)
+node test/edge-colour.js     # the colour rule along seams on real box pictures (seconds)
+node tools/points-bench.js colour|pairing|geom|why   # tunes the colour and shape point sets (minutes each)
+node test/real-50.js         # the owner's 50-piece video through the engine against a hand-checked answer key (~5 min; needs the video)
 node test/flow-overlay.js    # dots follow the camera: tracker + screen mapping land within ~1 px
 node test/flow-lab.js        # motion tracker accuracy and cost on synthetic shifts
 node test/worker-reset.js    # New puzzle / Clear everything forget taught table colours

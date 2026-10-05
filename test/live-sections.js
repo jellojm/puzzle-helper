@@ -11,6 +11,8 @@ const S = require('./synth');
 globalThis.self = globalThis;
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
+if (process.env.DBGB) PH.DEBUG_BLOB = (d, v) => console.log('blob area', Math.round(d.area), 'bbox', d.bbox.join(','), JSON.stringify(v));
+PH.CLOSE_SIDE = 40; // synthetic pieces are small (the phone's close reads: 150+ px); this test is about other things
 
 let failures = 0;
 function check(name, ok, detail) {
@@ -39,7 +41,9 @@ async function loadCv() {
   const subset = P.pieces.map((p, i) => i).filter((i) => !inBlock(P.pieces[i]));
   const scat = S.scatter(cv, P, { scale: 2.2, seed: 21, subset, blocks });
 
-  const eng = new PH.Engine();
+  // spotEveryMs 0: the assembled-part pace is wall-clock (0.4 s), and node's
+  // frames take a different time than the phone's (as in open-spots.js)
+  const eng = new PH.Engine({ checkedOnly: false, spotEveryMs: 0 }); // (assembled parts; checking is tested in moves.js / real-50.js)
   eng.setBox(box);
 
   // Serpentine sweep, a few frames per stop, as in the main live-sweep test.
@@ -84,15 +88,23 @@ async function loadCv() {
   const md = eng.mapData();
   const ma = (md.asm || [])[0];
   check('the Map gets the assembled part', !!ma && ma.cells.length >= 6 && ma.spots.length > 0, ma ? `${ma.cells.length} cells, ${ma.spots.length} spots` : 'not on the Map');
-  // Tidy up drops an "edge piece" whose box spot is already in the assembled part.
+  // Housekeeping (no Tidy up button since v0.20) settles an "edge piece"
+  // whose box spot is already in the assembled part: an unchecked entry is
+  // dropped, a checked piece is marked in the puzzle - never deleted.
   const fakeCell = trueCells[0];
   const real = [...eng.pieces.values()].find((p) => p.t1);
   const fake = eng.newPiece({ fp: real.fp }, [0, 0], eng.island, real.area);
   fake.t1 = JSON.parse(JSON.stringify(real.t1)); fake.t1.flats = [true, false, false, false];
   fake.t1.edges[0].type = 'F'; fake.t1.edges[0].unc = false;
   fake.t2 = { cands: [{ col: fakeCell % cols, row: (fakeCell / cols) | 0, rot: 0, score: 0 }], conf: 0.9 };
-  const td = eng.tidy();
-  check('Tidy up removes an edge piece that is part of the assembled puzzle', !eng.pieces.has(fake.id) && td.falseEdges >= 1, `${td.falseEdges} removed`);
+  const fake2 = eng.newPiece({ fp: real.fp }, [0, 0], eng.island, real.area);
+  fake2.t1 = fake.t1; fake2.t2 = { cands: [{ col: fakeCell % cols, row: (fakeCell / cols) | 0, rot: 0, score: 0 }], conf: 0.9 }; fake2.state = 'checked';
+  eng.opts.checkedOnly = true; // (here the difference between checked and unchecked is the point)
+  eng.housekeep(Infinity);
+  eng.opts.checkedOnly = false;
+  check('housekeeping drops an unchecked edge piece that is part of the assembled puzzle', !eng.pieces.has(fake.id));
+  check('... and marks a checked one in the puzzle instead of deleting it', eng.pieces.has(fake2.id) && !!eng.pieces.get(fake2.id).inPuzzle);
+  eng.removePiece(fake2.id);
   // Old catalogues: section entries (v0.16 and older) are dropped on import.
   const st = { pieces: [...eng.pieces.values()].map((p) => eng.exportPiece(p)).concat([{ id: 9999, kind: 'section', pos: [0, 0], island: 1 }]), box };
   const e2 = new PH.Engine();

@@ -71,7 +71,8 @@ export function outlinePoints(p) {
     const a = T(p.corners[k]), b = T(p.corners[(k + 1) % 4]);
     const dx = b[0] - a[0], dy = b[1] - a[1];
     const sig = p.sigs && p.sigs[k];
-    if (!sig) { out.push(a); continue; }
+    out.push(a); // the corner itself (the signature may leave the corners off)
+    if (!sig) continue;
     for (let i = 0; i < sig.length; i += 2) out.push([a[0] + sig[i] * dx + sig[i + 1] * dy, a[1] + sig[i] * dy - sig[i + 1] * dx]);
   }
   return out;
@@ -252,12 +253,15 @@ export class TableView {
         ctx.lineWidth = w; ctx.strokeStyle = c; ctx.lineCap = 'round'; ctx.stroke();
       }
     }
-    // rings, shaded inside (as on the camera view: whole piece lit, not just a circle)
+    // rings around the piece's picture, not over it (owner's screenshot 6:13:
+    // filled discs hid the pieces being looked for); a dark under-ring keeps
+    // them readable on any print
     for (const [id, role] of this.hl.roles) {
       const s = at.get(id);
       if (!s) continue;
-      ctx.beginPath(); ctx.arc(s.sx, s.sy, Math.max(8, s.r), 0, Math.PI * 2);
-      ctx.globalAlpha = 0.3; ctx.fillStyle = ROLE[role] || ROLE.find; ctx.fill(); ctx.globalAlpha = 1;
+      const rr = Math.max(9, s.r * 1.15);
+      ctx.beginPath(); ctx.arc(s.sx, s.sy, rr, 0, Math.PI * 2);
+      ctx.lineWidth = role === 'sel' ? 6 : 5.5; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.stroke();
       ctx.lineWidth = role === 'sel' ? 3.5 : 3; ctx.strokeStyle = ROLE[role] || ROLE.find; ctx.stroke();
       // the selected piece's top edge (as it sits in the puzzle)
       const p = role === 'sel' && this.byId.get(id);

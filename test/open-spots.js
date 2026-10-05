@@ -16,6 +16,7 @@ const S = require('./synth');
 globalThis.self = globalThis;
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
+PH.CLOSE_SIDE = 40; // synthetic pieces are small (the phone's close reads: 150+ px); this test is about other things
 
 let failures = 0;
 function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); if (!ok) failures++; }

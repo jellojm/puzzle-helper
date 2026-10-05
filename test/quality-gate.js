@@ -13,6 +13,8 @@ const S = require('./synth');
 globalThis.self = globalThis;
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
+// (v0.20: counts().pieces = checked pieces only; this test is about what gets
+// catalogued at all, i.e. entries)
 
 let failures = 0;
 function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); if (!ok) failures++; }
@@ -42,22 +44,22 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
   const n = P.pieces.length;
 
   const moving = run(stopsAt(1.5, 3), 1.5, false);
-  check('blurred (moving) frames catalogue nothing', moving.counts().pieces === 0, `${moving.counts().pieces} pieces; rejects ${JSON.stringify(moving.rejects)}`);
+  check('blurred (moving) frames catalogue nothing', moving.counts().entries === 0, `${moving.counts().entries} pieces; rejects ${JSON.stringify(moving.rejects)}`);
 
   // Overview from far away: pieces ~25 px across in the camera image.
   const far = run(stopsAt(0.24, 3), 0.24, true);
-  check('a far overview catalogues nothing', far.counts().pieces === 0, `${far.counts().pieces} pieces; rejects ${JSON.stringify(far.rejects)}`);
+  check('a far overview catalogues nothing', far.counts().entries === 0, `${far.counts().entries} pieces; rejects ${JSON.stringify(far.rejects)}`);
 
   // Four views that don't overlap, visited in turn (each three times): every
   // piece is seen three times, but never in two frames in a row.
   const Z = 3, vw = FW / Z, vh = FH / Z;
   const quads = [[vw / 2, vh / 2], [scat.TW - vw / 2, vh / 2], [vw / 2, scat.TH - vh / 2], [scat.TW - vw / 2, scat.TH - vh / 2]];
   const jumpy = run(quads.concat(quads, quads), Z, true);
-  check('sightings that are never consecutive do not become pieces', jumpy.counts().pieces === 0, `${jumpy.counts().pieces} pieces`);
+  check('sightings that are never consecutive do not become pieces', jumpy.counts().entries === 0, `${jumpy.counts().entries} pieces`);
 
   const good = run(stopsAt(1.5, 3), 1.5, true);
   const c = good.counts();
-  check('a steady sweep catalogues the pieces, once each', c.pieces >= n * 0.85 && c.pieces <= n, `${c.pieces} of ${n}`);
+  check('a steady sweep catalogues the pieces, once each', c.entries >= n * 0.85 && c.entries <= n, `${c.entries} of ${n}`);
 
   // v0.10.0 deadlock (owner's 200-piece session: 0 pieces in 3 minutes): a
   // section (merged blob) catalogued in the very first steady frame made the
@@ -84,7 +86,7 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
       fr.delete();
     }
     const cc = eng.counts();
-    check('an assembled block in the first frames does not stall cataloguing', cc.pieces >= loose.length * 0.8, `${cc.pieces} of ${loose.length} loose pieces, tracking ${Math.round(100 * tracked / stops.length)}% of frames`);
+    check('an assembled block in the first frames does not stall cataloguing', cc.entries >= loose.length * 0.8, `${cc.entries} of ${loose.length} loose pieces, tracking ${Math.round(100 * tracked / stops.length)}% of frames`);
   }
 
   // Camera distance from the real piece size: 25 mm pieces, 100 px side in a

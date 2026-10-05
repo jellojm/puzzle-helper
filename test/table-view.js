@@ -15,6 +15,7 @@ const S = require('./synth');
 globalThis.self = globalThis;
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
+PH.CLOSE_SIDE = 40; // synthetic pieces are small (the phone's close reads: 150+ px); this test is about other things
 
 let failures = 0;
 function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); if (!ok) failures++; }
@@ -30,7 +31,7 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
   const scat = S.scatter(cv, P, { scale: 2.2, seed: 5 });
   const FW = 1920, FH = 1080, zoom = 1.5, vw = FW / zoom, vh = FH / zoom, stops = [];
   for (let y = vh / 2; y <= scat.TH - vh / 2 + 1; y += vh * 0.45) for (let x = vw / 2; x <= scat.TW - vw / 2 + 1; x += vw * 0.3) for (let k = 0; k < 3; k++) stops.push([x + k * 6, y]);
-  const eng = new PH.Engine();
+  const eng = new PH.Engine({ checkedOnly: false }); // (Map geometry; checking is tested in moves.js / real-50.js)
   stops.forEach(([x, y], i) => { const fr = S.cameraFrame(cv, scat.table, x, y, Math.sin(i * 0.15) * 0.06, zoom, FW, FH); eng.processFrame(S.matSource(cv, fr), { still: true }); fr.delete(); });
 
   const data = eng.mapData();
@@ -53,7 +54,7 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
   // catalogued at scale 1 (its corners are in true-table pixels); live pieces
   // are paired with it by colour fingerprint, as in run-tests.js, and the map
   // -> true-table similarity is fitted on positions.
-  const ref = new PH.Engine();
+  const ref = new PH.Engine({ checkedOnly: false });
   ref.processSnap(S.matSource(cv, scat.table));
   const refs = [...ref.pieces.values()].filter((q) => q.t1);
   const corr = [];
@@ -83,7 +84,7 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
   // from a live read, drawn at one piece's size - a photo's picture must never
   // be drawn through a live frame's placement (they differ in pixel scale).
   {
-    const e2 = new PH.Engine();
+    const e2 = new PH.Engine({ checkedOnly: false, budgetMs: 400 }); // (placement logic, not read throughput: results must not depend on the machine's load)
     e2.processSnap(S.matSource(cv, scat.table));
     const before = new Map();
     for (const p of e2.pieces.values()) { if (p.id % 2) p.rd = null; else e2.markMoved(p); before.set(p.id, p.rd); }

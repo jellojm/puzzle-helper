@@ -10,6 +10,7 @@ const S = require('./synth');
 globalThis.self = globalThis;
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
+PH.CLOSE_SIDE = 40; // synthetic pieces are small (the phone's close reads: 120+ px); these tests are about other things
 
 const args = process.argv.slice(2);
 const QUICK = args.includes('--quick');
@@ -231,7 +232,8 @@ function savePng(cv, mat, name) {
   });
   const lc = live.counts();
   console.log(`live sweep: ${frames} frames, avg ${(tTot / frames).toFixed(0)} ms (seg ${(times.seg / frames).toFixed(0)}, map ${(times.map / frames).toFixed(0)}, work ${(times.work / frames).toFixed(0)}), worst ${worst.toFixed(0)} ms; counts ${JSON.stringify(lc)}`);
-  check('live sweep catalogs pieces without duplicates', lc.pieces >= n * 0.95 && lc.pieces <= n * 1.05, `${lc.pieces} catalogued for ${n} pieces`);
+  // (entries: a single quick sweep catalogues; checking - two close reads - is tested in moves.js / real-50.js)
+  check('live sweep catalogs pieces without duplicates', lc.entries >= n * 0.95 && lc.entries <= n * 1.05, `${lc.entries} catalogued for ${n} pieces`);
   const islands = new Set([...live.pieces.values()].filter((p) => p.pos).map((p) => p.island));
   check('live sweep keeps one consistent table map', islands.size === 1, `${islands.size} island(s)`);
 

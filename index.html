@@ -61,7 +61,7 @@
       <button data-filter="corner">Corners</button>
       <button data-filter="border">Edges</button>
       <button data-filter="unplaced">Unplaced</button>
-      <button data-filter="unread">Unread</button>
+      <button data-filter="unread">Need closer look</button>
       <button data-filter="zones">Zones</button>
       <button id="pairsBtn">Matches</button>
       <button id="mapBtn">Box picture</button>
@@ -114,12 +114,10 @@
       <p id="compatNote" class="warn-note small" hidden></p>
       <div class="menu-actions">
         <button id="snapBtn">Catalog from a photo</button>
-        <button id="tidyBtn">Tidy up the catalog</button>
         <button id="frameBtn">Mark the finished border</button>
         <button id="frameForget" hidden>Forget the marked border</button>
       </div>
       <p class="muted small">Once the border is assembled, mark it from high enough that the whole border is in view: then a selected piece's real spot inside it is shown on the camera view.</p>
-      <p class="muted small">Folds scan groups back together when the same piece was catalogued twice after losing tracking, and drops blobs that never read as pieces.</p>
       <label class="row"><input id="idleToggle" type="checkbox" checked> Pause the camera when the phone is left still</label>
       <label class="row">Background sensitivity
         <input id="sens" type="range" min="4" max="24" step="1" value="8">
@@ -162,6 +160,10 @@
         <button id="newPuzzle">New puzzle (keep box picture)</button>
         <button id="clearAll" class="danger">Clear everything</button>
       </div>
+      <details id="colorKey">
+        <summary>What the colours mean</summary>
+        <div id="colorKeyList" class="small"></div>
+      </details>
       <details>
         <summary>Tips</summary>
         <ul class="small">
@@ -170,7 +172,7 @@
           <li><b>Glare</b> (shiny pieces, a glass table): light from the side instead of overhead, or tilt the phone a little — the tilt is corrected. A sheet of polarizing film over the lamp plus one over the camera removes most reflections.</li>
           <li>Pieces face up, not touching.</li>
           <li>Light: a lamp off to one side, low over the table, makes every piece cast a thin shadow, which helps separate pieces from a cloth of similar color. Avoid a strong light directly overhead that bleaches the print.</li>
-          <li>Hold the phone flat, 30–40 cm above the table, and sweep slowly. Pause a moment over each area; outlines turn blue then green as pieces are read.</li>
+          <li>Hold the phone flat, 30–40 cm above the table, and sweep slowly. Then bring it closer (two pieces across the screen) and go over every piece once: an amber ring with a + means "scan closer here" — it disappears when the piece is checked.</li>
           <li><b>Border</b> (toolbar) lights up the whole frame of the puzzle at once — corners orange, edge pieces teal. Tap it again to turn it off.</li>
           <li><b>Catalog from a photo</b> (below) takes a full-resolution photo and catalogs every piece in it at once.</li>
           <li>Tap a piece to see where it goes on the box and which pieces fit it. Gold = best match.</li>
@@ -178,7 +180,7 @@
           <li>In <b>Find</b>, tap <b>Corners</b> or <b>Edges</b> to light up every border piece on the table — orange for corners, teal for edges. Arrows point to the ones just off screen.</li>
           <li><b>Matches</b> searches the whole catalog for pairs that fit, with no box picture needed; use ‹ › to step through them.</li>
           <li><b>Check the matches:</b> try each suggested pair and tap <b>Fits</b> or <b>No</b> (in Matches or in a piece's panel). The app keeps score — More shows how often it was right — and Send report shares the answers so the matching can be tuned. A quick way: separate pieces you have already fitted together, scan them, then judge the suggestions.</li>
-          <li>A piece is catalogued only after the camera has seen it clearly a few frames in a row, and its shape counts as <b>confirmed</b> once a second, later view agrees. Matches between confirmed shapes can turn gold; a dashed frame or "?" means a shape read only once.</li>
+          <li>A piece is shown and counted only once it is <b>checked</b>: read up close twice with the same shape, seen steadily a few times, on its own spot. Until then it is an amber ring. A piece that is picked up and moved keeps its number and is found again where you put it.</li>
           <li><b>Box picture</b> (in Find) hides or shows the small box picture when it's in the way.</li>
           <li>The white arrow on a selected piece points to its <b>top edge</b> as it sits in the puzzle; the panel also shows it upright.</li>
           <li><b>Zones</b> (in Find) splits the box picture into six areas, A–F, each in its own colour, and rings every piece on the table in the colour of its area: sort them into six trays. The small box picture shows which area is which.</li>
@@ -230,7 +232,7 @@
     <div class="box-controls">
       <label>Pieces <input id="boxPieces" type="number" inputmode="numeric" min="12" max="10000" value="1000"></label>
       <label>Grid <input id="boxCols" type="number" inputmode="numeric" min="2" max="200"> × <input id="boxRows" type="number" inputmode="numeric" min="2" max="200"></label>
-      <label title="Printed on most boxes, e.g. 69 x 51 cm. Optional: without it a typical size for the piece count is used.">Finished size <input id="boxW" type="number" inputmode="decimal" min="5" max="300" placeholder="cm"> × <input id="boxH" type="number" inputmode="decimal" min="5" max="300" placeholder="cm"></label>
+      <button id="boxRotate" class="link" title="The picture is sideways: turn which edge is its top">Rotate 90°</button>
       <button id="boxRetake" class="link" hidden>Retake</button>
     </div>
     <input id="boxInput" type="file" accept="image/*" hidden>

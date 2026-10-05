@@ -1,7 +1,7 @@
 /* Service worker: makes the app open offline and caches the ~10 MB OpenCV.js
  * download. App files: network first (so updates show up), cache fallback.
  * OpenCV (versioned URL): cache first. */
-const CACHE = 'puzzle-helper-v21';
+const CACHE = 'puzzle-helper-v22';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'manifest.json',
   'js/main.js', 'js/overlay.js', 'js/boxSetup.js', 'js/frameSetup.js', 'js/tableView.js', 'js/worker.js',

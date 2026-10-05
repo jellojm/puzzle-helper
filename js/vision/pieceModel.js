@@ -8,7 +8,43 @@
 (function (G) {
   const PH = G.PH;
   const N = 320;          // outline samples
-  const SIG = 32;         // shape-signature samples per edge
+  // Two separate point systems per edge (owner, 2026-10-05: geometry and
+  // colour "could be different systems of points"):
+  //  - GEOM_PTS: where the outline is sampled for the shape signature;
+  //  - COLOUR_PTS: where colour is read just inside the cut, for matching
+  //    the print across a seam.
+  // Each is tuned on its own (tools/points-bench.js).
+  // GEOM_PTS (tools/points-bench.js geom): the point count makes no difference
+  // (16-64: same ranks - read noise, not sampling, limits shape); leaving
+  // the corners off removes corner-finding jitter: two reads of one edge on
+  // the owner's video stay as close (median 0.164 -> 0.172) while look-alikes
+  // move away (near-ties 32% -> 21%, synthetic joins AUC .884 -> .900).
+  PH.GEOM_PTS = { n: 32, trim: 0.14 };   // points per edge; fraction of the arc left off at each corner
+  PH.COLOUR_PTS = { n: 32, ends: 0, depth: 0.03, depth2: 0, patch: 1 }; // ends: fraction skipped at each corner; depth(s): inset, fraction of the edge length; patch: sample radius (px)
+  // 8-bit Lab lightness: a colour point this bright has lost its colour (glare,
+  // overexposure). Dark print is not counted: deep black in good light is
+  // real colour (the reef's dark water flagged 13% of edges); a dark frame is
+  // caught by the light correction it needed instead.
+  PH.COL_CLIP_HI = 245;
+  // The colour points get their own, wider light correction: a dark frame
+  // needs ~x2 (points-bench why: dark pieces' true joins passed the colour
+  // rule 27% at the x1.7 clamp, 67% at x2.5).
+  PH.COL_LIGHT_K = [0.4, 2.5];
+  // When an edge's colour can't be trusted (owner, 2026-10-05: "indicate
+  // color is a bad match when conditions are not favorable"): 2+ of its 32
+  // colour points washed out (glare, overexposed), or the
+  // light needed more than x2.2 / less than x0.5 correction. points-bench
+  // why: true joins with such an edge passed the colour rule only 55% of the
+  // time (vs 93% for the rest) - there the colour test would throw out real
+  // fits, so it is skipped and the reason shown instead.
+  PH.COL_TRUST = { clip: 0.05, kHi: 2.2, kLo: 0.5 };
+  PH.colourDoubt = function (e, lf) {
+    const T = PH.COL_TRUST, why = [], k = lf && lf.kRaw;
+    if (e.cc && e.cc.clip >= T.clip) why.push('glare');
+    if (k > T.kHi) why.push('dark');
+    else if (k && k < T.kLo) why.push('bright');
+    return why.length ? why.join('+') : null;
+  };
   const STRIP = 16;       // color samples per edge
   PH.SQ = 24;             // core-square size (matches box cell size)
 
@@ -223,10 +259,10 @@
     return best;
   }
 
-  function sampleLab(lab, w, h, x, y) {
+  function sampleLab(lab, w, h, x, y, rad) {
     let sL = 0, sa = 0, sb = 0, n = 0;
-    const xi = Math.round(x), yi = Math.round(y);
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const xi = Math.round(x), yi = Math.round(y), R = rad === undefined ? 1 : rad;
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
       const xx = xi + dx, yy = yi + dy;
       if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
       const i = (yy * w + xx) * 3;
@@ -302,6 +338,25 @@
     const ci = cr.idx;
     const corners = ci.map((i) => [P[2 * i], P[2 * i + 1]]);
 
+    // The board's colour around the piece in this crop (its local "white"):
+    // median of the crop's outer frame where it isn't piece. Colours compared
+    // between reads (print, edge colours) are taken relative to it, so the
+    // phone's shadow and exposure changes cancel out.
+    let white = null;
+    {
+      const fd = seg.filled.data, Ls = [], As = [], Bs = [], fr = Math.max(2, Math.round(Math.min(w, h) * 0.04));
+      for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 2) {
+        if (x >= fr && y >= fr && x < w - fr && y < h - fr) { x = w - fr - 1; continue; }
+        const p = y * w + x;
+        if (fd[p]) continue;
+        Ls.push(lab[3 * p]); As.push(lab[3 * p + 1]); Bs.push(lab[3 * p + 2]);
+      }
+      if (Ls.length >= 12) white = [PH.median(Ls), PH.median(As), PH.median(Bs)];
+    }
+
+    // Colours with the light taken out (PH.lightFix against this session's
+    // usual board, ctx.boardRef).
+    const lf = PH.lightFix(white, ctx.boardRef || null), wk = lf.k, wa = lf.da, wb = lf.db;
     const edges = [];
     for (let e = 0; e < 4; e++) {
       const i0 = ci[e], i1 = ci[(e + 1) % 4];
@@ -312,7 +367,8 @@
       const L = Math.hypot(B[0] - A[0], B[1] - A[1]);
       const dx = (B[0] - A[0]) / L, dy = (B[1] - A[1]) / L;
       const nx = dy, ny = -dx; // outward normal for a clockwise outline (y down)
-      const rs = PH.resampleOpen(pts, SIG);
+      const G = PH.GEOM_PTS, SIG = G.n;
+      const rs = PH.arcPoints(pts, SIG, G.trim, 1 - G.trim).map((q) => [q.x, q.y]);
       const sig = new Float32Array(SIG * 2);
       let maxY = -1e9, minY = 1e9;
       for (let s = 0; s < SIG; s++) {
@@ -342,7 +398,37 @@
         const c = sampleLab(lab, w, h, P[2 * i] - ty * off, P[2 * i + 1] + tx * off);
         strip[3 * s] = c[0]; strip[3 * s + 1] = c[1]; strip[3 * s + 2] = c[2];
       }
-      edges.push({ type, sig, strip, len: L, amp, unc, alt });
+      // Colour at every outline point (owner, 2026-10-05: "the puzzle points
+      // should also capture color"): at each of the SIG shape points, ~3% of
+      // the edge length inside the cut (box-picture seams: 98% of true
+      // neighbours agree there, vs 69% at 5%), relative to the board; and
+      // how busy the print is there (change to ~6% in) - a busy spot gets
+      // more tolerance when two edges are compared (matcher.js).
+      // (its own point system: PH.COLOUR_PTS)
+      const C = PH.COLOUR_PTS, NC = C.n;
+      const cp = PH.arcPoints(pts, NC, C.ends, 1 - C.ends);
+      const pcol = new Float32Array(NC * 3), pspread = new Float32Array(NC), pxy = new Float32Array(NC * 2);
+      const d1 = Math.max(2, C.depth * L), d2 = Math.max(3, 2 * C.depth * L), dB = C.depth2 ? Math.max(2, C.depth2 * L) : 0;
+      let clip = 0; // points washed out (glare, overexposure): their colour is lost
+      const wkC = lf.kRaw ? PH.clamp(lf.kRaw, PH.COL_LIGHT_K[0], PH.COL_LIGHT_K[1]) : wk;
+      for (let s = 0; s < NC; s++) {
+        const q = cp[s];
+        // where it sits in the edge's own frame (x along the corner-to-corner
+        // line, y outward, in edge lengths): colour points of two edges are
+        // paired by position, not by index (their corners jitter apart)
+        const ux = q.x - A[0], uy = q.y - A[1];
+        pxy[2 * s] = (ux * dx + uy * dy) / L; pxy[2 * s + 1] = (ux * nx + uy * ny) / L;
+        let c1 = sampleLab(lab, w, h, q.x - q.ty * d1, q.y + q.tx * d1, C.patch);
+        if (dB) { const cb = sampleLab(lab, w, h, q.x - q.ty * dB, q.y + q.tx * dB, C.patch); c1 = [(c1[0] + cb[0]) / 2, (c1[1] + cb[1]) / 2, (c1[2] + cb[2]) / 2]; }
+        const c2 = sampleLab(lab, w, h, q.x - q.ty * d2, q.y + q.tx * d2, C.patch);
+        pcol[3 * s] = Math.min(255, c1[0] * wkC); pcol[3 * s + 1] = c1[1] - wa; pcol[3 * s + 2] = c1[2] - wb;
+        pspread[s] = PH.dE(c1[0] * wkC, c1[1], c1[2], c2[0] * wkC, c2[1], c2[2], 0.7);
+        if (c1[0] >= PH.COL_CLIP_HI) clip++;
+      }
+      const cc = { clip: clip / NC, busy: PH.median(Array.from(pspread)) };
+      const e1 = { type, sig, gtrim: G.trim, strip, len: L, amp, unc, alt, pcol, pspread, pxy, cc };
+      e1.cdoubt = PH.colourDoubt(e1, lf); // null: colour trusted
+      edges.push(e1);
     }
     const meanSide = edges.reduce((t, e) => t + e.len, 0) / 4;
     for (const e of edges) e.lenRel = e.len / meanSide;
@@ -413,7 +499,7 @@
     return {
       corners: corners.map((c) => [c[0] + ox, c[1] + oy]),
       edges, code, flats, meanSide, square, sharp, thumb, quality,
-      cornerScore: cr.score,
+      cornerScore: cr.score, white, lf,
     };
   };
 
@@ -430,9 +516,9 @@
       for (let k = 0; k < 4 && ok; k++) {
         const ea = a.edges[k], eb = b.edges[(k + r) % 4];
         if ((ea.type !== eb.type && !ea.unc && !eb.unc) || Math.abs(ea.lenRel - eb.lenRel) > 0.08) { ok = false; break; }
-        const n = ea.sig.length / 2;
+        const n = ea.sig.length / 2, sb = PH.sigAs(eb.sig, n, eb.gtrim, ea.gtrim || 0);
         let s = 0;
-        for (let i = 0; i < n; i++) s += Math.hypot(ea.sig[2 * i] - eb.sig[2 * i], ea.sig[2 * i + 1] - eb.sig[2 * i + 1]);
+        for (let i = 0; i < n; i++) s += Math.hypot(ea.sig[2 * i] - sb[2 * i], ea.sig[2 * i + 1] - sb[2 * i + 1]);
         d += s / n / 4;
       }
       if (ok && d < best) { best = d; bestR = r; }
@@ -461,12 +547,18 @@
     let bl = b.square.lab, bm = b.square.mask;
     for (let t = 0; t < (4 - r) % 4; t++) { bl = rot90cw(bl, S, 3); bm = rot90cw(bm, S, 1); }
     const al = a.square.lab, am = a.square.mask;
+    // Colours relative to each read's own board (t1.white): the same piece in
+    // the phone's shadow and in full light compares as the same colour.
+    // (each read's own correction, PH.lightFix, stored with it as t1.lf)
+    const both = a.lf && b.lf;
+    const fa = both ? a.lf : { k: 1, da: 0, db: 0 }, fb = both ? b.lf : { k: 1, da: 0, db: 0 };
+    const ka = fa.k, kb = fb.k, daA = fa.da, dbA = fa.db, daB = fb.da, dbB = fb.db;
     let n = 0, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, de = 0;
     for (let p = 0; p < S * S; p++) {
       if (!am[p] || !bm[p]) continue;
-      const La = al[3 * p], Lb = bl[3 * p];
+      const La = Math.min(255, al[3 * p] * ka), Lb = Math.min(255, bl[3 * p] * kb);
       sa += La; sb += Lb; saa += La * La; sbb += Lb * Lb; sab += La * Lb; n++;
-      de += PH.dE(La, al[3 * p + 1], al[3 * p + 2], Lb, bl[3 * p + 1], bl[3 * p + 2], 0.5);
+      de += PH.dE(La, al[3 * p + 1] - daA, al[3 * p + 2] - dbA, Lb, bl[3 * p + 1] - daB, bl[3 * p + 2] - dbB, 0.5);
     }
     if (n < S * S * 0.25) return { ncc: 0, dE: 99, tex: 0 };
     const va = saa / n - (sa / n) ** 2, vb = sbb / n - (sb / n) ** 2;
@@ -485,9 +577,12 @@
     const ap = PH.appearance(a, b, al.r);
     // Near-identical outline (well under the ~0.05 look-alike floor): the print
     // only has to be consistent. Merely close outline: the print must agree.
+    // (v0.20: a near-identical outline passes on either rule - it used to be
+    // held to a stricter print test than a merely close one, which kept 9 of
+    // 48 copies apart in test/dedupe.js: d ~0.01, print dE 15-20, ncc 0.8)
     const tight = al.d < 0.025;
-    const ok = tight ? ap.dE < 15 && ap.ncc > -0.1
-      : ap.tex > 8 ? ap.ncc > 0.5 && ap.dE < 25 : ap.dE < 10 && ap.ncc > 0.2;
+    const normal = ap.tex > 8 ? ap.ncc > 0.5 && ap.dE < 25 : ap.dE < 10 && ap.ncc > 0.2;
+    const ok = normal || (tight && ap.dE < 15 && ap.ncc > -0.1);
     // combined distance for ranking: shape plus appearance disagreement
     return { ok, d: al.d + (1 - Math.max(0, ap.ncc)) * 0.05 + ap.dE / 400, r: al.r, ap };
   };
@@ -504,14 +599,23 @@
       const eb = base.edges[j], eo = obs.edges[(j - r + 4) % 4];
       // An uncertain edge is settled by a view that reads it clearly.
       if (eb.unc && !eo.unc && eb.type !== eo.type) {
-        eb.type = eo.type; eb.unc = false; eb.alt = eo.alt; eb.sig = Float32Array.from(eo.sig); eb.amp = eo.amp; retyped = true;
+        eb.type = eo.type; eb.unc = false; eb.alt = eo.alt; eb.sig = Float32Array.from(eo.sig); eb.gtrim = eo.gtrim; eb.amp = eo.amp; retyped = true;
         continue;
       }
       if (eb.type !== eo.type) continue;
       if (eb.unc && !eo.unc) eb.unc = false;
-      for (let i = 0; i < eb.sig.length; i++) eb.sig[i] = (eb.sig[i] * n + eo.sig[i]) / (n + 1);
+      const os = PH.sigAs(eo.sig, eb.sig.length / 2, eo.gtrim, eb.gtrim || 0);
+      for (let i = 0; i < eb.sig.length; i++) eb.sig[i] = (eb.sig[i] * n + os[i]) / (n + 1);
       eb.lenRel = (eb.lenRel * n + eo.lenRel) / (n + 1);
       eb.amp = (eb.amp * n + eo.amp) / (n + 1);
+    }
+    // Colour: a read in good conditions replaces colour read in bad ones
+    // (glare, too dark) - scanning again in better light fixes it.
+    for (let j = 0; j < 4; j++) {
+      const eb = base.edges[j], eo = obs.edges[(j - r + 4) % 4];
+      if (eb.cdoubt && eo.cdoubt === null && eo.pcol && eb.type === eo.type) {
+        eb.pcol = eo.pcol; eb.pspread = eo.pspread; eb.pxy = eo.pxy; eb.cc = eo.cc; eb.cdoubt = null;
+      }
     }
     base.nObs = n + 1;
     if (retyped) { base.code = base.edges.map((e) => e.type).join(''); base.flats = base.edges.map((e) => e.type === 'F'); }
@@ -555,6 +659,56 @@
   };
   PH.MIN_CORNER_SCORE = 0.03; // real pieces ~0.05-0.3, fragments ~0.01-0.02 // below this an outline isn't a jigsaw piece
   PH.SAME_SHAPE = 0.05;
+  /** A close read: the piece at least this many camera pixels across (corner
+   *  to corner) and sharp enough. Measured on the owner's 50-piece video:
+   *  close reads (~260 px) agree on edge types 41/42 times and two reads of
+   *  one edge differ 3.5x less than overview reads (~80 px: 8/49 misread). */
+  // (tuned on the owner's video: the sweep passed some pieces only at
+  // ~120-155 px; the pale piece's correct reads scored q 0.27-0.29, its
+  // misreads 0.15-0.23; two close reads must still agree to check a piece)
+  PH.CLOSE_SIDE = 120; // (overview reads in the owner's video: 70-80 px)
+  PH.CLOSE_Q = 0.25;
+  /** Fewest edges whose types differ between two reads, over the 4 turns. */
+  PH.codeDistance = function (a, b) {
+    let best = 4;
+    for (let r = 0; r < 4; r++) { let d = 0; for (let k = 0; k < 4; k++) if (a[k] !== b[(k + r) % 4]) d++; if (d < best) best = d; }
+    return best;
+  };
+  /** Two reads that are clearly of different pieces: 2+ edges of another type
+   *  in every turn, or outlines far apart. One misread tab (a close read gets
+   *  ~1 in 40 wrong) is not enough - it never splits one piece in two or
+   *  calls a piece "swapped". */
+  PH.clearlyDifferent = function (a, b) {
+    if (PH.codeDistance(a.code, b.code) >= 2) return true;
+    const al = PH.shapeAlign(a, b);
+    if (al.r >= 0) return al.d > PH.ANCHOR_SHAPE * 2 || (al.d > PH.ANCHOR_SHAPE && !PH.samePiece(a, b, PH.ANCHOR_SHAPE * 2).ok);
+    return false;
+  };
+  /** Two reads of the piece already linked to this spot agree on its shape:
+   *  the same edge types and a close outline (print is not compared - it
+   *  differs between a 155 px and a 129 px view of one piece). */
+  PH.shapeAgree = function (a, b) {
+    const al = PH.shapeAlign(a, b);
+    return al.r >= 0 && al.d < PH.ANCHOR_SHAPE ? al : null;
+  };
+  /** A shape signature (x,y pairs, evenly spaced along the edge) at n points:
+   *  reads saved with another PH.GEOM_PTS.n compare with today's. */
+  // A signature resampled to n points; from/to: the fraction of the arc left
+  // off at each corner by the source / wanted signature (edge.gtrim), so
+  // reads saved with another corner trim still compare point for point
+  // (the points are evenly spaced along the arc).
+  PH.sigAs = function (sig, n, from, to) {
+    const m = sig.length / 2, f0 = from || 0, t0 = to === undefined ? f0 : to || 0;
+    if (m === n && f0 === t0) return sig;
+    const out = new Float32Array(n * 2);
+    for (let k = 0; k < n; k++) {
+      const frac = t0 + (1 - 2 * t0) * (n === 1 ? 0 : k / (n - 1));
+      const t = PH.clamp(((frac - f0) / (1 - 2 * f0)) * (m - 1), 0, m - 1), i = Math.min(m - 2, Math.floor(t)), f = t - i;
+      out[2 * k] = sig[2 * i] * (1 - f) + sig[2 * i + 2] * f; out[2 * k + 1] = sig[2 * i + 1] * (1 - f) + sig[2 * i + 3] * f;
+    }
+    return out;
+  };
+  PH.isCloseRead = (t1) => !!t1 && t1.meanSide >= PH.CLOSE_SIDE && (!t1.quality || t1.quality.q >= PH.CLOSE_Q);
   PH.ANCHOR_SHAPE = 0.13; // candidate threshold when matching photos to the map // sameShape() below this = same physical piece
 
   // Rotation-invariant code, e.g. "BTFT" -> lexicographically smallest rotation.

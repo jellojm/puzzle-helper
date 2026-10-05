@@ -31,6 +31,15 @@ export class BoxSetup {
     $('boxUse').onclick = () => this.submit();
     $('boxPieces').oninput = () => { this.gridTouched = false; this.updateGrid(); };
     $('boxCols').oninput = $('boxRows').oninput = () => { this.gridTouched = true; };
+    // A box photographed sideways (owner's screenshot 6:13): turn which edge is
+    // the picture's top. The corners move round by one, columns and rows swap.
+    $('boxRotate').onclick = () => {
+      if (!this.corners) return;
+      const c = this.corners;
+      this.corners = [c[3], c[0], c[1], c[2]];
+      const cols = $('boxCols').value; $('boxCols').value = $('boxRows').value; $('boxRows').value = cols;
+      this.draw();
+    };
     this.canvas.addEventListener('pointerdown', (e) => this.down(e));
     this.canvas.addEventListener('pointermove', (e) => this.move(e));
     this.canvas.addEventListener('pointerup', () => this.up());
@@ -118,6 +127,13 @@ export class BoxSetup {
       ctx.fillStyle = i === this.drag ? 'rgba(79,157,255,0.5)' : 'rgba(79,157,255,0.25)';
       ctx.fill(); ctx.stroke();
     });
+    // "TOP" just inside the picture's top edge (Rotate 90° moves it)
+    const mx = (P[0][0] + P[1][0]) / 2, my = (P[0][1] + P[1][1]) / 2;
+    const cx = P.reduce((t, p) => t + p[0], 0) / 4, cy = P.reduce((t, p) => t + p[1], 0) / 4;
+    const k = 22 / (Math.hypot(cx - mx, cy - my) || 1), lx = mx + (cx - mx) * k, ly = my + (cy - my) * k + 5;
+    ctx.font = 'bold 13px -apple-system, sans-serif'; ctx.textAlign = 'center';
+    ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.strokeText('TOP', lx, ly);
+    ctx.fillStyle = '#4f9dff'; ctx.fillText('TOP', lx, ly);
     if (this.drag >= 0) this.loupe(ctx, P[this.drag]);
   }
 
@@ -167,11 +183,9 @@ export class BoxSetup {
     const pieces = parseInt($('boxPieces').value, 10) || 1000;
     if (!(cols >= 2 && rows >= 2)) { this.toast('Enter the grid size (columns × rows).'); return; }
     const bmp = await createImageBitmap(this.file, { imageOrientation: 'from-image' });
-    // Finished size (cm), optional: gives the real piece size, used for the
-    // camera-distance hint and to reject impossible piece-size estimates.
-    const wcm = parseFloat($('boxW').value), hcm = parseFloat($('boxH').value);
-    const sizeCm = wcm > 0 && hcm > 0 ? [wcm, hcm] : null;
-    this.worker.post({ type: 'box', bitmap: bmp, corners: this.corners, pieces, cols, rows, sizeCm }, [bmp]);
+    // (No finished-size fields since v0.20 - the owner never enters them; the
+    // typical piece size for the piece count is used, PH.typicalPieceMM.)
+    this.worker.post({ type: 'box', bitmap: bmp, corners: this.corners, pieces, cols, rows }, [bmp]);
     this.close();
     this.onDone && this.onDone();
   }

@@ -14,6 +14,8 @@ const S = require('./synth');
 globalThis.self = globalThis;
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
+// (v0.20: counts().pieces = checked pieces only; this test is about what gets
+// catalogued at all, i.e. entries)
 
 let failures = 0;
 function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); if (!ok) failures++; }
@@ -42,18 +44,18 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
   };
 
   {
-    const eng = new PH.Engine();
+    const eng = new PH.Engine({ budgetMs: 400 }); // (generous: the result must not depend on machine speed)
     const { c, groups } = sweep(eng);
-    check('a steady sweep from scratch catalogues the pieces', c.pieces >= n * 0.85 && c.pieces <= n, `${c.pieces} of ${n}`);
+    check('a steady sweep from scratch catalogues the pieces', c.entries >= n * 0.85 && c.entries <= n, `${c.entries} of ${n}`);
     check('... in one or two scan groups', groups <= 2, `${groups} groups`);
   }
   {
-    const eng = new PH.Engine();
+    const eng = new PH.Engine({ budgetMs: 400 }); // (generous: the result must not depend on machine speed)
     // the phone's state: 3 located pieces, each in its own old group, far away
     const fp = { hist: new Float32Array(PH.HIST_BINS), L: 250, a: 0, b: 0, sdL: 0 };
     for (let k = 0; k < 3; k++) { const p = eng.newPiece({ fp }, [90000 + k * 5000, 90000], eng.nextIsland++, 5000); p.stray = true; }
     const { c, groups } = sweep(eng);
-    check('with stray pieces in old groups, the sweep still catalogues', c.pieces - 3 >= n * 0.85 && c.pieces - 3 <= n, `${c.pieces - 3} of ${n}`);
+    check('with stray pieces in old groups, the sweep still catalogues', c.entries - 3 >= n * 0.85 && c.entries - 3 <= n, `${c.entries - 3} of ${n}`);
     check('... in one or two new scan groups', groups <= 2, `${groups} groups`);
   }
   console.log(failures ? `\n${failures} FAILED` : '\nall passed');

@@ -155,7 +155,8 @@ async function loadState() {
   const pframe = await tx('meta', 'readonly', (s) => s.get('pframe'));
   const asm = await tx('meta', 'readonly', (s) => s.get('asm'));
   const cellVotes = await tx('meta', 'readonly', (s) => s.get('cellVotes'));
-  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null, asm: asm || [], cellVotes: cellVotes || null };
+  const boardRef = await tx('meta', 'readonly', (s) => s.get('boardRef'));
+  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null, asm: asm || [], cellVotes: cellVotes || null, boardRef: boardRef || null };
 }
 function scheduleSave() {
   if (saveTimer || !db) return;
@@ -169,6 +170,10 @@ function scheduleSave() {
       const pf = engine.pframeDirty && engine.pframe ? engine.pframe.toJSON() : null;
       engine.cellVotesDirty = false; engine.pframeDirty = false;
       try { await tx('meta', 'readwrite', (s) => { s.put(engine.exportCellVotes(), 'cellVotes'); if (pf) s.put(pf, 'pframe'); }); } catch (e) { post({ type: 'error', message: 'Saving failed: ' + e.message }); }
+    }
+    if (engine.boardRefDirty) { // the scan's board colour (colours are corrected against it)
+      engine.boardRefDirty = false;
+      try { await tx('meta', 'readwrite', (s) => s.put(engine.boardRef, 'boardRef')); } catch (e) { post({ type: 'error', message: 'Saving failed: ' + e.message }); }
     }
     const { put, del } = engine.takeDirty();
     if (!put.length && !del.length) return;
@@ -186,9 +191,25 @@ async function currentName() {
   const c = await tx('meta', 'readonly', (s) => s.get('current'));
   return c ? c.name : null;
 }
+// Names the app made itself before v0.20 used the grid's count (a
+// 1000-piece box's 27 x 37 grid = "999 pieces"); corrected in place. Names
+// the owner typed are never touched.
+function fixedName(e) {
+  const m = e.box && /^(Puzzle .+ \()(\d+)( pieces\))$/.exec(e.name || '');
+  if (!m || +m[2] !== e.box.cols * e.box.rows) return null;
+  const n = PH.boxPieces(e.box);
+  return n !== +m[2] ? m[1] + n + m[3] : null;
+}
 async function libEntries() {
   if (!db) return [];
   const all = await tx('library', 'readonly', (s) => s.getAll());
+  const fix = (all || []).filter((e) => fixedName(e));
+  if (fix.length) {
+    const cur = await tx('meta', 'readonly', (s) => s.get('current'));
+    for (const e of fix) { const nm = fixedName(e); if (cur && cur.key === e.key) cur.name = nm; e.name = nm; }
+    await tx('library', 'readwrite', (s) => { for (const e of fix) s.put(e); });
+    if (cur) await tx('meta', 'readwrite', (s) => s.put(cur, 'current'));
+  }
   return (all || []).map((e) => ({ key: e.key, name: e.name, savedAt: e.savedAt, pieces: e.counts ? e.counts.pieces : (e.pieces || []).length,
     shaped: e.counts ? e.counts.shaped : null, grid: e.box ? `${e.box.cols} x ${e.box.rows}` : null })).sort((a, b) => b.savedAt - a.savedAt);
 }
@@ -197,10 +218,10 @@ async function saveCurrentToLibrary(name) {
   if (!db) return null;
   const cur = (await tx('meta', 'readonly', (s) => s.get('current'))) || null;
   const key = !name && cur ? cur.key : 'p' + Date.now();
-  const nm = name || (cur && cur.name) || `Puzzle ${new Date().toLocaleDateString()}${engine.box ? ` (${engine.box.cols * engine.box.rows} pieces)` : ''}`;
+  const nm = name || (cur && cur.name) || `Puzzle ${new Date().toLocaleDateString()}${engine.box ? ` (${PH.boxPieces(engine.box)} pieces)` : ''}`;
   const entry = { key, name: nm, savedAt: Date.now(), counts: engine.counts(),
     pieces: [...engine.pieces.values()].map((p) => engine.exportPiece(p)), box: engine.box || null,
-    feedback: engine.fbLog || [], pframe: engine.pframe ? engine.pframe.toJSON() : null, asm: engine.exportAsms(), cellVotes: engine.exportCellVotes() };
+    feedback: engine.fbLog || [], pframe: engine.pframe ? engine.pframe.toJSON() : null, asm: engine.exportAsms(), cellVotes: engine.exportCellVotes(), boardRef: engine.boardRef || null };
   await tx('library', 'readwrite', (s) => s.put(entry));
   await tx('meta', 'readwrite', (s) => s.put({ key, name: nm }, 'current'));
   return { key, name: nm, pieces: entry.pieces.length };
@@ -240,6 +261,9 @@ function boxInfo() {
 async function init(msg) {
   post({ type: 'status', text: 'Loading vision library (first time ~10 MB)…' });
   for (const f of VISION) importScripts('vision/' + f + '.js');
+  // Tests only (?closeSide=N on the page URL): synthetic pieces are smaller
+  // than a phone's close reads. The app never sets it.
+  if (msg && msg.closeSide > 0) PH.CLOSE_SIDE = msg.closeSide;
   // The Emscripten module of the CDN build is a thenable: never `await` it,
   // and never RETURN it from an async function either (resolving a promise
   // with a thenable adopts it, and this one never settles - the app hung on
@@ -412,13 +436,6 @@ const handlers = {
     }
     post({ type: 'mapData', data: d });
   },
-  // Fold duplicate scan groups together and drop entries that never read as pieces.
-  async tidy() {
-    const r = engine.tidy();
-    const { put, del } = engine.takeDirty();
-    if (db) await tx('pieces', 'readwrite', (s) => { for (const p of put) s.put(p); for (const id of del) s.delete(id); });
-    post({ type: 'tidied', removed: r.removed, falseEdges: r.falseEdges || 0, counts: engine.counts() });
-  },
   // Diagnostic snapshot for "Send report".
   async report() {
     // The (straightened) image the vision code analyzed last, as a JPEG.
@@ -455,9 +472,12 @@ const handlers = {
       wrong: p.wrong, joined: p.joined,
       rot: p.t2 && p.t2.cands.length ? p.t2.cands[0].rot : undefined,
       seenSecAgo: p.lastSeen ? Math.round((Date.now() - p.lastSeen) / 1000) : null,
-      color: p.fp ? [p.fp.L, p.fp.a, p.fp.b].map((v) => Math.round(v)) : null,
+      color: p.fp ? (p.fp.raw || [p.fp.L, p.fp.a, p.fp.b]).map((v) => Math.round(v)) : null, colorRel: p.fp ? [p.fp.L, p.fp.a, p.fp.b].map((v) => Math.round(v)) : null,
       views: p.t1 ? p.t1.nObs || 1 : 0, q: p.t1 && p.t1.quality ? p.t1.quality.q : null, sharp: p.t1 && p.t1.quality ? p.t1.quality.sharp : null,
       unc: p.t1 ? p.t1.edges.map((e) => (e.unc ? 1 : 0)).join('') : null, conflicts: p.conflicts || 0, missing: !!p.missing,
+      // v0.20: why it is (not) checked, and where it is (on the table / moved / in the puzzle)
+      state: p.state || 'checking', closeRead: !!(p.t1 && PH.isCloseRead(p.t1)), closeAgree: p.closeAgree || 0, sightings: p.sightings || 0, moments: p.moments || 0,
+      closeViews: p.closeViews || 0, photoRead: !!p.photoRead, seenWith: p.seenWith ? p.seenWith.size : 0, gone: !!p.gone, refound: p.refound || 0, notHere: p.notHere || 0,
     }));
     // Engine state that explains behaviour but isn't in any frame result.
     const bm = engine.bgModel;
@@ -494,6 +514,9 @@ const handlers = {
       feedback: { stats: engine.feedbackStats(), log: (engine.fbLog || []).slice(-300) },
       // Why detections did not become pieces (shot-quality gate), and provisional pieces waiting.
       gate: { rejects: engine.rejects || {}, candidates: engine.cands ? engine.cands.size : 0, pieceMM: engine.pieceMM ? engine.pieceMM() : null },
+      // v0.20: housekeeping (replaces Tidy up), why entries wait as rings, the colour rule's tolerance
+      housekeeping: Object.assign({}, engine.hk || {}, { mergedInto: engine.mergedInto ? engine.mergedInto.size : 0 }),
+      unchecked: engine.whyUnchecked ? engine.whyUnchecked() : null, colTol: PH.colTol, colourHealth: engine.colourHealth ? engine.colourHealth() : null, events: (engine.events || []).slice(-120), overCount: engine.box ? Math.max(0, engine.counts().pieces - PH.boxPieces(engine.box)) : 0,
       cvBuild: PH.cvBuild, cvError: PH.cvError || null, simd: simdOk,
       camWorker: { frames: camFrames, reading: !!camReader, error: camError },
       cvInfo: PH.cv && PH.cv.getBuildInformation ? String(PH.cv.getBuildInformation()).slice(0, 3000) : null,
@@ -541,12 +564,19 @@ const handlers = {
     post({ type: 'frameMarked', ok: false, cleared: true });
   },
   // ---------- puzzle library: several puzzles on the go ----------
-  async libList() { post({ type: 'library', list: await libEntries(), current: await currentName() }); },
+  async libList() {
+    // The menu is open (camera paused): a full housekeeping pass now, so what
+    // is shown - and what Save keeps - is already cleaned up (plan T1).
+    engine.housekeep(Infinity);
+    scheduleSave();
+    post({ type: 'library', list: await libEntries(), current: await currentName(), counts: engine.counts() });
+  },
   // Save the current catalog into the library (under its own name; a new
   // name makes a new entry).
   async libSave(msg) {
+    engine.housekeep(Infinity); // (what is saved is cleaned up, as a reopened scan would be)
     const r = await saveCurrentToLibrary(msg.name);
-    post({ type: 'library', list: await libEntries(), current: await currentName(), saved: r });
+    post({ type: 'library', list: await libEntries(), current: await currentName(), saved: r, counts: engine.counts() });
   },
   // Open a saved puzzle: the current one is saved first (nothing is lost).
   async libOpen(msg) {
@@ -554,7 +584,7 @@ const handlers = {
     const e = await tx('library', 'readonly', (s) => s.get(msg.key));
     if (!e) return;
     if (engine.pieces.size) await saveCurrentToLibrary();
-    engine.importState({ pieces: e.pieces || [], box: e.box || null });
+    engine.importState({ pieces: e.pieces || [], box: e.box || null, boardRef: e.boardRef || null });
     engine.importAsms(e.asm);
     engine.importCellVotes(e.cellVotes);
     engine.fbLog = Array.isArray(e.feedback) ? e.feedback : [];
@@ -570,6 +600,7 @@ const handlers = {
       if (e.pframe) s.put(e.pframe, 'pframe'); else s.delete('pframe');
       s.put(e.asm || [], 'asm');
       s.put(e.cellVotes || null, 'cellVotes');
+      s.put(e.boardRef || null, 'boardRef');
       s.put({ key: e.key, name: e.name }, 'current');
     });
     post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo(), border: !!engine.pframe, opened: e.name });
@@ -595,6 +626,7 @@ const handlers = {
       await tx('meta', 'readwrite', (s) => s.delete('feedback')); // the answer key belongs to the old catalog
       if (!keepBox) await tx('meta', 'readwrite', (s) => s.delete('box'));
       await tx('meta', 'readwrite', (s) => s.delete('pframe')); // a new puzzle has its own border
+      await tx('meta', 'readwrite', (s) => s.delete('boardRef')); // (and its own board colour reference)
       await tx('meta', 'readwrite', (s) => { s.delete('asm'); s.delete('cellVotes'); }); // and its own assembled part
     }
     post({ type: 'ready', counts: engine.counts(), box: boxInfo(), settings: settingsInfo() });

@@ -105,6 +105,32 @@
     return out;
   };
 
+  /** n points evenly spaced by arc length between fractions t0 and t1 of an
+   *  open polyline P ([[x,y],...]), plus the unit tangent at each (taken
+   *  over +-`dt` of the length, so it doesn't depend on n). */
+  PH.arcPoints = function (P, n, t0, t1, dt) {
+    const m = P.length, cum = new Float64Array(m);
+    for (let i = 1; i < m; i++) cum[i] = cum[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]);
+    const total = cum[m - 1] || 1;
+    let seg = 0;
+    const at = (d) => {
+      d = Math.max(0, Math.min(total, d));
+      if (cum[seg] > d) seg = 0;
+      while (seg < m - 2 && cum[seg + 1] < d) seg++;
+      const span = cum[seg + 1] - cum[seg], t = span > 0 ? Math.min(1, (d - cum[seg]) / span) : 0;
+      return [P[seg][0] + t * (P[seg + 1][0] - P[seg][0]), P[seg][1] + t * (P[seg + 1][1] - P[seg][1])];
+    };
+    const out = [], h = (dt || 0.01) * total;
+    for (let k = 0; k < n; k++) {
+      const d = total * (n === 1 ? (t0 + t1) / 2 : t0 + ((t1 - t0) * k) / (n - 1));
+      const p = at(d), a = at(d - h), b = at(d + h);
+      let tx = b[0] - a[0], ty = b[1] - a[1];
+      const tl = Math.hypot(tx, ty) || 1;
+      out.push({ x: p[0], y: p[1], tx: tx / tl, ty: ty / tl });
+    }
+    return out;
+  };
+
   // ---------- similarity transform (x,y) -> (a x - b y + tx, b x + a y + ty) ----------
   PH.simApply = function (T, x, y) {
     return [T.a * x - T.b * y + T.tx, T.b * x + T.a * y + T.ty];

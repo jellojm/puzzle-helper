@@ -3,15 +3,31 @@
 export const EDGE_COLORS = ['#ff6b6b', '#4dd0e1', '#ffd54f', '#b388ff'];
 // Sorting zones A-F (PH.zoneOf): the same colours on the camera view, the Map and the box picture.
 export const ZONE_COLORS = ['#ff6b6b', '#4dd0e1', '#ffd54f', '#b388ff', '#3ddc84', '#ff8c3a'];
-const STATUS = {
+export const STATUS = {
   unknown: { stroke: 'rgba(255,255,255,0.45)', dash: [4, 4] },
   seen: { stroke: '#aab2bb', dash: [] },
   shaped: { stroke: '#4f9dff', dash: [] },
   placed: { stroke: '#3ddc84', dash: [] },
   done: { stroke: 'rgba(160,170,180,0.35)', dash: [2, 4] }, // marked as in the puzzle
   merged: { stroke: '#ff9f43', dash: [6, 4] },
+  // Not a checked piece yet: needs a closer, steadier look (v0.20).
+  checking: { stroke: '#ffb300', dash: [5, 4] },
 };
-const ROLE = {
+export const CHECKING_COLOR = '#ffb300';
+/** The "scan closer here" mark: an amber ring with a + inside. It pulses
+ *  while the phone is close enough to check the piece now. */
+export function drawCheckingMark(ctx, x, y, r, pulse) {
+  ctx.globalAlpha = pulse;
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.beginPath(); ctx.arc(x, y, r + 1.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = CHECKING_COLOR;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  const k = r * 0.5;
+  ctx.beginPath(); ctx.moveTo(x - k, y); ctx.lineTo(x + k, y); ctx.moveTo(x, y - k); ctx.lineTo(x, y + k); ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+export const ROLE = {
   sel: { color: '#ffffff', width: 5 },
   gold: { color: '#ffcc00', width: 5 },
   silver: { color: '#c9ced6', width: 3 },
@@ -108,6 +124,7 @@ export function drawOverlay(ctx, res, M, opts) {
       const [x, y] = M.toScreen(d.cx, d.cy);
       if (!(x >= -40 && y >= -40 && x <= M.cw + 40 && y <= M.ch + 40)) continue;
       const r = markRadius(d, M);
+      if (d.status === 'checking') { drawCheckingMark(ctx, x, y, Math.max(7, r * 0.5), d.close ? 0.55 + 0.45 * Math.sin(t * 6) ** 2 : 0.9); continue; }
       ctx.beginPath();
       ctx.arc(x, y, d.status === 'unknown' ? 3 : r * 0.42, 0, Math.PI * 2);
       ctx.fillStyle = st.stroke;
@@ -412,11 +429,11 @@ export function drawThumb(canvas, piece, edge, color) {
     const sig = piece.sigs && piece.sigs[edge];
     if (sig) {
       // Rebuild the real edge curve from its signature (x along the chord, y outward).
+      // (from corner to corner: the signature may leave the corners off)
       const dx = b[0] - a[0], dy = b[1] - a[1];
-      for (let i = 0; i < sig.length; i += 2) {
-        const x = a[0] + sig[i] * dx + sig[i + 1] * dy, y = a[1] + sig[i] * dy - sig[i + 1] * dx;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
+      ctx.moveTo(a[0], a[1]);
+      for (let i = 0; i < sig.length; i += 2) ctx.lineTo(a[0] + sig[i] * dx + sig[i + 1] * dy, a[1] + sig[i] * dy - sig[i + 1] * dx);
+      ctx.lineTo(b[0], b[1]);
     } else { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
     ctx.stroke();
   }

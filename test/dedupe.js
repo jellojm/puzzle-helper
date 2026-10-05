@@ -10,6 +10,7 @@ const S = require('./synth');
 globalThis.self = globalThis;
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
 const PH = globalThis.PH;
+PH.CLOSE_SIDE = 80; // synthetic pieces are ~105 px across (the phone's close reads: 150+)
 (async () => {
   let cv = require('@techstark/opencv-js');
   if (cv instanceof Promise) cv = await cv; else if (!cv.Mat) await new Promise((r) => (cv.onRuntimeInitialized = r));
@@ -20,7 +21,7 @@ const PH = globalThis.PH;
   const sc = S.scatter(cv, P, { scale: 2.2, seed: 5 });
   const ph = S.boxPhoto(cv, P);
   const box = PH.createBox({ w: ph.mat.cols, h: ph.mat.rows, data: ph.mat.data }, ph.corners, { pieces: 48 });
-  const eng = new PH.Engine();
+  const eng = new PH.Engine({ checkedOnly: false }); // (duplicate folding; checking is tested in moves.js / real-50.js)
   eng.setBox(box);
   eng.processSnap(S.matSource(cv, sc.table));
   // second view: rotated 17 degrees, 10% closer, and pretend tracking was lost
@@ -35,10 +36,10 @@ const PH = globalThis.PH;
   const corners0 = [...eng.pieces.values()].filter((p) => PH.edgeFlags(p).corner).length;
   console.log(`after a lost-tracking second scan: ${before.pieces} pieces in ${before.islands} islands, ${corners0} corner-shaped -> counted corners ${before.corner} (+${before.cornerDoubt} doubtful)`);
   check('at most 4 corners are counted', before.corner <= 4, `${before.corner} counted of ${corners0} corner-shaped`);
-  const t0 = Date.now();
-  const res = eng.tidy();
+  // No Tidy up button since v0.20: the photo's own housekeeping (and the
+  // next few live frames) fold the copies back together by themselves.
   const after = eng.counts();
-  console.log(`Tidy up: removed ${res.removed}, joined ${res.joinedIslands} island(s) in ${Date.now() - t0} ms -> ${after.pieces} pieces in ${after.islands} islands, corners ${after.corner} (+${after.cornerDoubt})`);
+  console.log(`by itself: ${after.pieces} pieces (${after.entries} entries) in ${after.islands} islands, corners ${after.corner} (+${after.cornerDoubt}), housekeeping ${JSON.stringify(eng.hk)}`);
   check('duplicates merged back to about one per piece', after.pieces <= 48 * 1.15, `${after.pieces} for 48 pieces`);
   check('the two scan islands are joined', after.islands === 1, `${after.islands} islands`);
   check('exactly 4 corners', after.corner === 4, `${after.corner}`);
