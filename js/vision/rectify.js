@@ -196,7 +196,9 @@
         const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
         cv.erode(valid, valid, k);
         const invalid = ow * oh - cv.countNonZero(valid) > 0;
+        const tw = Date.now();
         const out = warp(srcImg, M, ow, oh, invalid ? valid : null);
+        if (PH.procT) PH.procT.Warp = (PH.procT.Warp || 0) + Date.now() - tw; // (report: seg_procWarp)
         out.scale = scale;
         out.invalid = invalid;
         [ones, m, valid, k].forEach((x) => x.delete());

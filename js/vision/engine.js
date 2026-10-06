@@ -13,6 +13,13 @@
   const PH = G.PH;
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
+  // "Gone" needs proof: the spot placed by at least GONE_NB neighbours in
+  // view and seen bare at GONE_VOTES separate moments. (2 and 2 marked 2-8
+  // pieces gone in the owner's 2-minute video IMG_3605, where nothing moved:
+  // the map bends between parts of the table by about a piece.)
+  PH.GONE_NB = 3;
+  PH.GONE_VOTES = 3;
+
   class Engine {
     constructor(opts) {
       // procW is the long side the live camera frames are analyzed at. Every
@@ -675,12 +682,15 @@
       const t0 = now();
       const st = this.straighten(source, info);
       source = st.source;
+      const tp = now();
+      PH.procT = {};
       const proc = source.getProc(this.opts.procW);
       // Per-stage segmentation timings ride along in out.timings (as flat
       // seg_* numbers) so a phone report shows where the time actually goes.
       // seg_proc = straightening + the processing-size image; seg_bgChoice =
       // background re-checks (both used to be in "seg" but in no sub-stage).
-      const segT = { proc: now() - t0 };
+      const segT = { proc: now() - t0, procTilt: tp - t0 };
+      for (const k in PH.procT) segT['proc' + k] = PH.procT[k]; // where getProc's time went (draw / read / warp)
       this.lastProc = proc; // kept for debug reports (what the app actually analyzed)
       const pfFound = this.findPuzzleFrame(proc);
       if (this.unitLiveW !== proc.w) { this.unitLive = null; this.unitLiveW = proc.w; } // Scan detail changed
@@ -713,6 +723,7 @@
       this.updateUnitLive(seg, proc, source);
       this.lastSegUnit = seg.unitArea; // the unit actually used this frame (for tests/reports)
       const t1 = now();
+      const wT = {}; // where the time after segmentation goes (reports: work_*)
       let dets = this.classify(seg.dets, seg.unitArea);
       if (this.opts.dropDets) dets = dets.filter((d) => !this.opts.dropDets(d)); // tests: detections missed at random
       // Capture coach: pieces whose colour barely differs from the board
@@ -736,7 +747,9 @@
       this.coachNow.texture = !!this.useTexture;
       this.poorStreak = dets.filter((d) => !d.border).length < 3 ? (this.poorStreak || 0) + 1 : 0;
       const unitF = this.unitFrame(dets);
+      let tw = now();
       this.link(dets, unitF);
+      wT.link = now() - tw;
       // Set before the pose work so the shape-based fallback below can read
       // outlines; nothing in it depends on the pose.
       this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs, live: true, fg: seg.fg, procW: proc.w, procH: proc.h,
@@ -751,6 +764,7 @@
       this.frameCtx.boardL = boardNow ? Math.round(boardNow.L) : null;
       if (this.frameCtx.offLight) this.rejects.offLight = (this.rejects.offLight || 0) + 1;
       for (const [k, c] of this.cands) if (this.fNo - c.last > 6) this.cands.delete(k); // lost from view
+      tw = now();
       let ok = this.fitPose(dets, unitF);
       if (!ok) ok = this.poseBySpots(dets, unitF);
       if (!ok) {
@@ -829,10 +843,13 @@
           this.pose = null;
         }
       }
+      wT.pose = now() - tw; tw = now();
       if (ok) { this.lost = 0; this.assign(dets, unitF, proc); }
+      wT.assign = now() - tw;
       const t2 = now();
       const work = this.runQueue(dets, t0 + this.opts.budgetMs);
       const ts = now();
+      wT.queue = ts - t2;
       if (this.pframe) {
         // The border is marked: open spots come from reading the puzzle cell
         // by cell against the box (js/vision/border.js) in every view where
@@ -840,13 +857,17 @@
         this.spotView = null;
         if (pfFound && info.still !== false) this.voteCells(proc, seg);
       } else {
+        const ran = this.spotsAt;
         this.findSpots(dets, seg, proc, info.still !== false);
         if (this.box && info.still !== false) this.autoBorder(proc, seg);
+        if (this.spotsAt !== ran) this.spotsCost = now() - ts; // (a search ran this frame)
       }
       segT.spots = now() - ts;
       // Housekeeping (duplicates, "checked", leftovers), a few ms per frame.
       this.frameNo = (this.frameNo || 0) + 1;
+      tw = now();
       this.housekeep(this.opts.housekeepMs === undefined ? 4 : this.opts.housekeepMs);
+      wT.house = now() - tw; tw = now();
       this.tracks = dets.map((d) => ({ id: d.id, cid: d.cid, x: d.cx, y: d.cy, fp: d.fp }));
       const pfOut = this.puzzleFrameOut(proc, pfFound); // (also sets this.pfViewH for the spots)
       const out = this.output(dets, proc);
@@ -865,6 +886,8 @@
       out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2, border: this.pfMs || 0 };
       this.pfMs = 0;
       for (const k in segT) out.timings['seg_' + k] = segT[k];
+      wT.out = now() - tw;
+      for (const k in wT) out.timings['work_' + k] = +wT[k].toFixed(1);
       return out;
     }
 
@@ -1305,21 +1328,32 @@
      * the running value jumps to them. Seeded by the first good frame.
      */
     updateUnitLive(seg, proc, source) {
-      const own = seg.unitOwn;
-      if (!own || seg.unitN < 3) return;
+      // Up close only 1-2 whole pieces are in view (the rest cut by the frame
+      // edge): they count too, but only through the "4 views in a row agree"
+      // path below. Requiring 3 froze the size at the far view's (owner's
+      // video IMG_3605: 4067 px from 7 s on while the pieces grew to ~5x, so
+      // every close-up piece was called a clump and never read; 14 -> 16
+      // checked over the 40 s sweep).
+      const few = seg.unitN < 3;
+      const own = few ? (seg.unitN >= 1 ? seg.unitOwn || seg.likeMed : null) : seg.unitOwn;
+      if (!own) return;
       // With the puzzle's real piece size, an estimate implying the camera is
       // closer than 6 cm or further than 2 m is wrong (a wall or a pile, not a piece).
       if (proc && source && this.pieceMM()) {
         const g = this.viewGeometry(own, proc.scale, source.w, source.h);
         if (g && g.distMM && (g.distMM < 60 || g.distMM > 2000)) { this.rejects.unitImplausible = (this.rejects.unitImplausible || 0) + 1; return; }
       }
-      if (!this.unitLive) { this.unitLive = own; this.unitOff = []; return; }
+      if (!this.unitLive) { if (!few) { this.unitLive = own; this.unitOff = []; } return; }
       const r = own / this.unitLive;
       if (r < 1.5 && r > 1 / 1.5) {
-        this.unitLive = this.unitLive * 0.8 + own * 0.2;
+        if (!few) this.unitLive = this.unitLive * 0.8 + own * 0.2; // (1-2 pieces: agrees, too few to refine it)
         this.unitOff = [];
         return;
       }
+      // 1-2 pieces only ever make it bigger (coming closer); moving away
+      // brings many pieces into view. (A lone print fragment, 4 frames in a
+      // row, once set it to 496 px and made every piece a "clump".)
+      if (few && r < 1) return;
       this.unitOff = (this.unitOff || []).concat(own).slice(-4);
       const o = this.unitOff;
       if (o.length === 4 && Math.max(...o) / Math.min(...o) < 1.5) { this.unitLive = PH.median(o); this.unitOff = []; }
@@ -1506,9 +1540,9 @@
         // (the map can be off by part of a piece during a close sweep: a
         // detection near the spot may well be this piece - no proof then)
         const nearDet = dets.some((d) => !d.border && Math.hypot(d.cx - f[0], d.cy - f[1]) < sideF * 1.0);
-        if (readable && !nearDet && nb.length >= 2 && !this.frameCtx.offLight && this.bareBoard(f, sideF * 0.4) >= 0.85) { // (no neighbours seen: the spot can't be placed well enough to prove anything)
+        if (readable && !nearDet && nb.length >= PH.GONE_NB && !this.frameCtx.offLight && this.bareBoard(f, sideF * 0.4) >= 0.85) { // (no neighbours seen: the spot can't be placed well enough to prove anything)
           if (this.fNo - (p.goneF === undefined ? -1e9 : p.goneF) >= 6) { p.goneVotes = (p.goneVotes || 0) + 1; p.goneF = this.fNo; }
-          if (p.goneVotes >= 2) {
+          if (p.goneVotes >= PH.GONE_VOTES) {
             p.goneVotes = 0;
             if (this.isChecked(p)) { p.gone = true; p.goneAt = Date.now(); p.missing = true; this.touch(p); this.version++; this.matchCache.clear(); this.logEvt('gone', p.id); }
             else this.removePiece(p.id); // an unchecked ring on bare board was nothing
@@ -2723,7 +2757,12 @@
       // Paced on live frames: on the owner's phone this work ran ~140 ms per
       // frame (up to 1.4 s) and the app fell to 2 frames a second (report
       // 22:58). At most every 0.4 s; the previous result stays meanwhile.
-      if (!photo && now() - (this.spotsAt || 0) < (this.opts.spotEveryMs === undefined ? 400 : this.opts.spotEveryMs)) {
+      // (and by its own cost: on a phone frames take ~0.5 s, so "every 0.4 s"
+      // was every frame - report 2026-10-06: 66 ms a frame on average, spikes
+      // to 2 s. After a search that took C ms the next waits >= 4C: at most
+      // ~1/5 of the time.)
+      const every = this.opts.spotEveryMs === undefined ? Math.max(400, 4 * (this.spotsCost || 0)) : this.opts.spotEveryMs;
+      if (!photo && now() - (this.spotsAt || 0) < every) {
         if (!still) this.spotView = null; // a steady view keeps the last spots; a moving one drops them
         return;
       }
@@ -2738,7 +2777,10 @@
       // looked several pieces big (owner's video: false assembled parts).
       const own = seg.unitN >= 3 && seg.unitOwn ? seg.unitOwn : null;
       const unit = own && this.unitLive && Math.abs(Math.log(own / this.unitLive)) > Math.log(1.5) ? own : this.unitLive || seg.unitArea;
-      const side = unit && unit < proc.w * proc.h * 0.05 ? Math.sqrt(unit) : null;
+      // (up close one piece is ~5-12% of the view: trusted up to 15%, else a
+      // single close-up piece passed the "6% of the view" fallback below and
+      // was read as an 82-cell assembled part - owner's video IMG_3605)
+      const side = unit && unit < proc.w * proc.h * 0.15 ? Math.sqrt(unit) : null;
       const pick = (ds, P, sd) => ds.filter((d) => (d.big || d.area > (sd ? sd * sd * 3.5 : P.w * P.h * 0.06)) && (!sd || Math.min(d.bbox[2], d.bbox[3]) >= sd * 1.2)) // (not a thin strip along the frame edge)
         .sort((x, y) => y.area - x.area).slice(0, photo ? 6 : 2);
       const blobs = pick(dets, proc, side).filter((d) => {

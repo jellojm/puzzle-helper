@@ -667,7 +667,7 @@
     if (validMat) validMat.delete();
     P.delete(); if (flatL) flatL.delete();
     mark('dets');
-    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, glare, unitArea: unitA, unitOwn, unitN: like.length, flat: flat && { ref: flat.ref, spread: flat.spread }, fg };
+    return { lab, w, h, bg, thresh: thresh / 2, dets, lut, glare, unitArea: unitA, unitOwn, unitN: like.length, likeMed: like.length ? PH.median(like) : null, flat: flat && { ref: flat.ref, spread: flat.spread }, fg };
   };
   // Holes of one blob: pm = its filled outline (bbox r), colorFg = the
   // frame's colour-only foreground (w wide). Board-coloured patches inside

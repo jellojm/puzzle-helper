@@ -176,6 +176,48 @@ piece size (close-ups of a few pieces). Edge-length weight in the join score
 4 -> 2: the two sides of a true seam read up to 8-11% apart in relative
 length on real photos (pieces aren't square).
 
+### Second video and the frame rate (2026-10-06; v0.20.3)
+
+**IMG_3605** (2 min, loose reef pieces on the white counter): **38 pieces**,
+counted by eye in its two whole-table views (72 s: 37 blobs - 3 counter
+edges/handles + 4 touching pairs; 120 s: 37 blobs + 1 touching pair). Now
+`node test/real-50.js 3605`.
+
+| | v0.20.2 | v0.20.3 |
+|---|---|---|
+| Checked at the end (of 38) | 22-25 | 25-30 (timing varies) |
+| Count during the close sweep (8-50 s) | stuck at 13-17 | rises |
+| Marked "gone" though nothing moved | 1-8 | **0** |
+| False assembled part | none (hidden by the bug below) | none |
+
+- Up close only 1-2 whole pieces are in view; the piece size needed 3, so
+  it froze at the far view's (4067 px) while pieces grew ~5x: every close-up
+  piece was called a clump and never read. 1-2 clean pieces now grow the size
+  (4 views in a row agreeing; never shrink it - a print fragment once did).
+- The assembled-part search ignored a size over 5% of the view and then took
+  any blob over 6% of the view: one close-up piece became an 82-cell part.
+  The size is now trusted up to 15%.
+- "Gone" needs 3 moments and 3 neighbours placing the spot (was 2 and 2):
+  the map bends by about a piece between parts of the table.
+- Still short of 38: reads up close (pieces 400 px wide) often disagree with
+  the stored shape, so second agreeing reads are rare in this sweep.
+
+**Frame rate** (owner's report 2026-10-06, 13.6 min, 1000-piece box): ~2 frames
+a second, 373 ms per frame on average.
+
+| Stage | ms per frame | |
+|---|---|---|
+| Image preparation (camera bitmap -> 640 px, tilt straightening) | 65 (p50 110) | 9 ms on a desktop: phone-specific; now timed in parts (seg_procDraw / Read / Warp) |
+| Open spots of assembled parts | 66 (spikes to 2 s) | "every 0.4 s" was every frame at 0.5 s a frame: now waits >= 4x its own cost |
+| Per-blob fingerprints | 48 | |
+| Everything after segmentation | 179 (p50 190) | its 45 ms budget is gone before it starts; a minimum of reads and box placements still runs - now timed in parts (work_link / pose / assign / queue / house) |
+| Background re-check | 8 | ran on 79 frames only |
+
+The faster in-worker camera path switched itself off ("frame 1920x1440 vs
+video 1440x1920": frames arrive in the sensor's landscape orientation while
+the phone is upright). Not changed yet: the turn direction can't be checked
+without the phone. The next report's timers decide what to cut next.
+
 **Not met:** the owner's "exactly 50 checked" on this video. The pieces left
 as rings got fewer than two agreeing close reads in this sweep: piece 31
 (white sky print on the white counter; its straight top is misread) and one

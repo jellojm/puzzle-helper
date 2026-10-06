@@ -565,13 +565,14 @@
   PH.sameShape = function (a, b) { return PH.shapeAlign(a, b).d; };
 
   /** Best rotation aligning a to b: a.edges[k] corresponds to b.edges[(k+r)%4]. */
+  PH.LEN_GATE = +(typeof process !== 'undefined' && process.env && process.env.LEN_GATE) || 0.08; // two reads of one piece: each edge's relative length within this
   PH.shapeAlign = function (a, b) {
     let best = Infinity, bestR = -1;
     for (let r = 0; r < 4; r++) {
       let ok = true, d = 0;
       for (let k = 0; k < 4 && ok; k++) {
         const ea = a.edges[k], eb = b.edges[(k + r) % 4];
-        if ((ea.type !== eb.type && !ea.unc && !eb.unc) || Math.abs(ea.lenRel - eb.lenRel) > 0.08) { ok = false; break; }
+        if ((ea.type !== eb.type && !ea.unc && !eb.unc) || Math.abs(ea.lenRel - eb.lenRel) > PH.LEN_GATE) { ok = false; break; }
         const n = ea.sig.length / 2, sb = PH.sigAs(eb.sig, n, eb.gtrim, ea.gtrim || 0);
         let s = 0;
         for (let i = 0; i < n; i++) s += Math.hypot(ea.sig[2 * i] - sb[2 * i], ea.sig[2 * i + 1] - sb[2 * i + 1]);

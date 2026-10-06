@@ -40,8 +40,12 @@ function bitmapSource(bmp) {
       const scale = Math.min(1, maxW / Math.max(w, h)); // long side, so portrait works too
       const pw = Math.round(w * scale), ph = Math.round(h * scale);
       const c = canvas2d(pw, ph, 'proc');
+      const t0 = performance.now();
       c.ctx.drawImage(bmp, 0, 0, pw, ph);
-      return { w: pw, h: ph, data: c.ctx.getImageData(0, 0, pw, ph).data, scale };
+      const t1 = performance.now();
+      const data = c.ctx.getImageData(0, 0, pw, ph).data;
+      if (PH.procT) { PH.procT.Draw = (PH.procT.Draw || 0) + t1 - t0; PH.procT.Read = (PH.procT.Read || 0) + performance.now() - t1; } // (report: seg_procDraw / seg_procRead)
+      return { w: pw, h: ph, data, scale };
     },
     getCrop(x, y, cw, ch) {
       const c = canvas2d(cw, ch, 'crop');

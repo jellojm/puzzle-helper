@@ -14,6 +14,9 @@
  * detections dropped), light (bursts of +-40% brightness), overview (first
  * 3 s only: 0 checked, rings for all).
  * Run: node test/real-50.js   (~2-4 min; needs the video, which is not in git)
+ * CASE=3605: the owner's 2-minute video IMG_3605.MOV (2026-10-06) - 38 loose
+ * reef pieces on the white counter (counted by eye in its overviews at 72 s
+ * and 120 s; no answer key): sweeps up close, overviews at 72-80 s and the end.
  */
 'use strict';
 const path = require('path');
@@ -26,9 +29,15 @@ const VISION = process.env.VISION || path.join(__dirname, '..', 'js', 'vision');
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'border', 'flow', 'engine']) require(path.join(VISION, f + '.js'));
 const PH = globalThis.PH;
 const ROOT = path.join(__dirname, '..');
-const VIDEO = process.env.VIDEO || path.join(ROOT, 'reports', 'IMG_3593.MOV');
+const CASES = {
+  3593: { video: 'IMG_3593.MOV', n: 50, key: path.join(__dirname, 'fixtures', 'v3593', 'answer.json') },
+  3605: { video: 'IMG_3605.MOV', n: 38, key: null },
+};
+const CASE = CASES[process.env.CASE || process.argv[2] || 3593]; // (node test/real-50.js 3605)
+const N = CASE.n;
+const VIDEO = process.env.VIDEO || path.join(ROOT, 'reports', CASE.video);
 const BOX = path.join(ROOT, 'reports', 'puzzle-report-2026-10-05T11-14-50-box.jpg');
-const KEY = path.join(__dirname, 'fixtures', 'v3593', 'answer.json');
+const KEY = CASE.key || path.join(__dirname, 'fixtures', 'none');
 const VARIANT = process.env.VARIANT || 'full';
 
 let failures = 0;
@@ -72,7 +81,7 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
     // The phone straightens tilted views with its motion sensor; the video
     // has none, so the tilt is estimated from the pieces (as for photos),
     // every 3rd frame, smoothed like a sensor.
-    if (n % 3 === 0) {
+    if (process.env.TILT !== '0' && n % 3 === 0) {
       const e = eng.estimatePhotoTilt(src);
       if (e && e.gain > 0.05) { tilt.pitch = tilt.pitch * 0.5 + e.pitch * 0.5; tilt.roll = tilt.roll * 0.5 + e.roll * 0.5; }
     }
@@ -98,19 +107,28 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
   console.log('counts', JSON.stringify(c));
   console.log('rejects', JSON.stringify(eng.rejects));
   console.log('unchecked because', JSON.stringify(eng.whyUnchecked()), 'housekeeping', JSON.stringify(eng.hk));
+  if (process.env.READS && !CASE.key) { // no answer key: the reads of every entry left unchecked
+    for (const p of eng.pieces.values()) {
+      if (p.state === 'checked') continue;
+      console.log(`  unchecked ${p.id}: closeAgree ${p.closeAgree || 0} sightings ${p.sightings || 0} moments ${p.moments || 0} closeViews ${p.closeViews || 0} photo ${!!p.photoRead}`);
+      const ids = [...readLog.keys()].filter((id) => eng.finalId(id) === p.id);
+      for (const id of ids) for (const r of readLog.get(id).slice(0, 10)) console.log('      read', id, r);
+    }
+  }
   if (process.env.EVENTS) for (const e of (eng.events || []).filter((e) => e.kind !== 'drop' || process.env.EVENTS === 'all')) console.log('  evt', JSON.stringify(e));
   const checked = c.checked !== undefined ? c.checked : c.pieces;
   if (process.env.DUMP) fs.writeFileSync(process.env.DUMP, JSON.stringify([...eng.pieces.values()].map((p) => ({ id: p.id, pos: p.pos, state: p.state || null, code: p.t1 ? p.t1.edges.map((e) => e.type).join('') : null, nObs: p.t1 ? p.t1.nObs || 1 : 0 }))));
   if (VARIANT === 'overview') {
     check('overview only: nothing is checked from far-away reads', checked === 0, `${checked} checked`);
   } else {
-    check('exactly 50 checked pieces at the end', checked === 50, `${checked}`);
-    check('never more than 50 checked pieces', maxChecked <= 50, `max ${maxChecked} at ${maxAt.toFixed(0)} s`);
+    check(`exactly ${N} checked pieces at the end`, checked === N, `${checked}`);
+    check(`never more than ${N} checked pieces`, maxChecked <= N, `max ${maxChecked} at ${maxAt.toFixed(0)} s`);
     if (c.unchecked !== undefined) check('nothing left unchecked', c.unchecked === 0, `${c.unchecked}`);
     const a = eng.assemblyInfo ? eng.assemblyInfo() : null;
     const shown = a && (a.shown !== undefined ? a.shown : a.cells > 0 || a.spots > 0);
     check('no assembled part / open spots on loose pieces', !shown, a ? JSON.stringify({ n: a.n, cells: a.cells, spots: a.spots }) : '');
     check('no border found on loose pieces', !eng.pframe, eng.pframe ? 'border marked' : '');
+    if (c.gone !== undefined) check('nothing marked gone (no piece was moved)', c.gone === 0, `${c.gone} gone`);
   }
   if (fs.existsSync(KEY) && VARIANT !== 'overview') {
     const key = JSON.parse(fs.readFileSync(KEY, 'utf8'));
