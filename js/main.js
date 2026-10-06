@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.20.0';
+const APP_VERSION = '0.20.1';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -245,6 +245,17 @@ function setStatus(t) {
 // (tuneFrameRate) - more only heats the phone. Reports record what iOS gave.
 const CAMERA = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 }, aspectRatio: { ideal: 4 / 3 } };
 const camFps = (fps) => ({ frameRate: { ideal: fps, max: fps >= 24 ? 30 : fps } });
+// The flashlight is part of the camera's settings: every applyConstraints
+// replaces them all (the frame-rate changes turned it off after a few
+// seconds) and a reopened camera starts dark - so the wish is kept in S.torch
+// and goes along with every request.
+const torchC = () => (S.torch ? { advanced: [{ torch: true }] } : {});
+async function applyTorch() {
+  const t = S.track;
+  if (!t || t.readyState !== 'live' || !t.applyConstraints) return false;
+  await t.applyConstraints(Object.assign({}, CAMERA, camFps(S.fpsWanted || 24), { advanced: [{ torch: !!S.torch }] }));
+  return true;
+}
 async function openCamera() {
   bump('cameraOpens');
   const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({}, CAMERA, camFps(24)) });
@@ -254,6 +265,11 @@ async function openCamera() {
   startWorkerCam();
   S.track.addEventListener('ended', () => ensureCamera());
   await video.play();
+  if (S.torch) applyTorch().catch((e) => {
+    logError('torch: ' + e.message);
+    S.torch = false; $('torchToggle').checked = false;
+    toast('This phone/browser does not allow the flashlight from a web page.');
+  });
 }
 // iOS hands the camera to the photo picker (Box/Snap) or another app and
 // doesn't give it back; reopen it whenever we come back to a dead stream.
@@ -300,7 +316,7 @@ function tuneFrameRate() {
   if (now - (S.fpsChangedAt || 0) < 2500) return;
   S.fpsWanted = want; S.fpsChangedAt = now;
   bump('fps' + want);
-  t.applyConstraints(Object.assign({}, CAMERA, camFps(want))).catch((e) => logError('frameRate: ' + e.message));
+  t.applyConstraints(Object.assign({}, CAMERA, camFps(want), torchC())).catch((e) => logError('frameRate: ' + e.message));
 }
 
 // ---------- power ----------
@@ -1400,10 +1416,15 @@ $('sens').oninput = (e) => {
 };
 // Flashlight: iOS Safari 17.5+ accepts the torch constraint even when
 // getCapabilities() doesn't advertise it, so just try it.
+// The switch sits in the More menu, and the camera is off while the menu is
+// open (battery): the wish is kept and the light comes on with the camera.
 $('torchToggle').onchange = async (e) => {
+  S.torch = e.target.checked;
   try {
-    await S.track.applyConstraints({ advanced: [{ torch: e.target.checked }] });
+    if (await applyTorch()) return;
+    if (S.torch) toast('The flashlight comes on when you close this menu.');
   } catch (err) {
+    S.torch = false;
     e.target.checked = false;
     toast('This phone/browser does not allow the flashlight from a web page.');
   }

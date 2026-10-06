@@ -1522,6 +1522,7 @@
       for (const d of dets) {
         if (!d.id) continue;
         const p = this.pieces.get(d.id);
+        if (!p) continue; // (merged away meanwhile)
         p.miss = 0; p.missing = false; p.lastSeen = Date.now(); p.goneVotes = 0;
         if (p.gone) { p.gone = false; p.refound = (p.refound || 0) + 1; this.touch(p); this.version++; }
         if (d.merged || d.border) continue;
@@ -1938,12 +1939,13 @@
       if (this.box) {
         // Visible pieces first, then the backlog.
         const order = [];
-        for (const d of dets) if (d.id) order.push(this.pieces.get(d.id));
+        // (a detection's entry may have been merged away meanwhile: follow it)
+        for (const d of dets) if (d.id) { const p = this.pieces.get(this.finalId(d.id)); if (p) order.push(p); }
         for (const p of this.pieces.values()) order.push(p);
         const done = new Set();
         const cal = this.calibStats();
         for (const p of order) {
-          if (done.has(p.id) || !p.t1 || p.t2) continue;
+          if (!p || done.has(p.id) || !p.t1 || p.t2) continue;
           done.add(p.id);
           if (n2 >= 2 && now() > deadline) break;
           p.t2 = PH.placePiece(this.box, p.t1, cal) || { cands: [], conf: 0, failed: true };

@@ -179,6 +179,29 @@ function writePng(file, mat) {
     await page.click('#teachClear');
     await page.click('#teachDone');
     check('teach background learns a tapped color', /1 spot/.test(taught), taught);
+    // Flashlight (owner, 2026-10-06: "tapping it does nothing"): the switch is
+    // in the menu, where the camera is off - the light must be asked for when
+    // the camera comes back, and survive the frame-rate changes.
+    {
+      await page.evaluate(() => {
+        window.__cons = [];
+        const orig = MediaStreamTrack.prototype.applyConstraints;
+        MediaStreamTrack.prototype.applyConstraints = function (c) { window.__cons.push(JSON.stringify(c || {})); return orig.call(this, c); };
+      });
+      await page.click('#menuBtn');
+      const shown = await page.evaluate(() => !document.getElementById('torchRow').hidden);
+      if (shown) {
+        await page.click('#torchToggle');
+        const t = await page.textContent('#toast');
+        await page.click('#closeMenu').catch(() => {});
+        await page.waitForFunction(() => window.__cons.some((c) => /"torch":true/.test(c)), null, { timeout: 8000 }).catch(() => {});
+        const cons = await page.evaluate(() => window.__cons);
+        check('Flashlight: switched on in the menu, asked for when the camera is back', cons.some((c) => /"torch":true/.test(c)) && /close this menu|not allow/.test(t), `${t} | ${cons.length} camera requests, torch in ${cons.filter((c) => /"torch":true/.test(c)).length}`);
+        await page.click('#menuBtn');
+        await page.click('#torchToggle');
+        await page.click('#closeMenu').catch(() => {});
+      } else { check('Flashlight: switch shown with the camera on', false, 'hidden'); await page.click('#closeMenu').catch(() => {}); }
+    }
     // Border (toolbar): corners + edge pieces in one tap, off on the second.
     await page.click('#closeFind').catch(() => {});
     await page.click('#edgesBtn');
