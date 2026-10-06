@@ -9,7 +9,7 @@
     "serve": "node tools/serve.js",
     "serve:https": "node tools/serve.js --https",
     "cert": "openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj /CN=puzzle-helper -keyout tools/key.pem -out tools/cert.pem",
-    "test:real": "node test/real-50.js"
+    "test:real": "node test/real-50.js && node test/real-joins.js"
   },
   "devDependencies": {
     "@techstark/opencv-js": "4.10.0-release.1",

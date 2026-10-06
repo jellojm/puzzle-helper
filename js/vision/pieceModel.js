@@ -108,7 +108,57 @@
     [lab3, planes, L, gx, gy, ax, ay, mag, kb, inv, ff, shape, labels].forEach((m) => m.delete());
   }
 
-  function segmentCrop(lab, w, h, bg, threshDE, lightW, lut, hint, boundary) {
+  // Cast shadows (owner, 2026-10-06: light from a shallow angle; "the shadow
+  // on one side of the pieces may deteriorate the quality of that edge"):
+  // a shadow is the board, darker, with the board's colour (its a/b shrink
+  // with its lightness); the colour-distance threshold takes it for piece,
+  // so on the shadow side the outline runs out into it and keyholes fill
+  // (IMG_3599 on a cream counter: 14% of shadow-side outline points >2% of a
+  // side outside the real cut; IMG_3598: two pieces joined by the shadow
+  // between them). Peel: grow the bare board into the mask through
+  // shadow-like pixels, by small steps only - the cut itself is a sharp
+  // change, so the growth stops there and print inside the piece is never
+  // reached. Skipped when the piece itself looks like darkened board (a
+  // grey piece on a white board), where shadow and print can't be told apart.
+  // (measured on IMG_3598: the lamp's shadow keeps the counter's colour -
+  // b +12..+15 against +15 lit - and only loses lightness, L 88-120 vs 176)
+  // Only on a board with a colour of its own (cream, wood, felt): on a
+  // neutral white or grey board a shadow is grey, like dark print, and the
+  // peel ate the ship's hull off two pieces (IMG_3602) - there shadows are
+  // mild anyway (IMG_3603/3604: 1-3% of outline points off).
+  PH.SHADOW_PEEL = { kMin: 0.3, kMax: 0.95, chroma: 5, chromaK: 0.1, stepL: 14, stepC: 6, maxLike: 0.25, minBoardChroma: 10 };
+  function peelShadow(lab, w, h, mask, bg) {
+    const S = PH.SHADOW_PEEL, md = mask.data, n = w * h;
+    if (Math.hypot(bg.a - 128, bg.b - 128) < S.minBoardChroma) return 0;
+    const tol = S.chroma + S.chromaK * Math.hypot(bg.a - 128, bg.b - 128);
+    const like = (p) => {
+      const i = 3 * p, k = lab[i] / bg.L;
+      return k >= S.kMin && k <= S.kMax && Math.abs(lab[i + 1] - bg.a) < tol && Math.abs(lab[i + 2] - bg.b) < tol;
+    };
+    // the piece mostly looks like darkened board: no telling shadow from print
+    let inside = 0, likeIn = 0;
+    for (let p = 0; p < n; p += 3) if (md[p]) { inside++; if (like(p)) likeIn++; }
+    if (!inside || likeIn > inside * S.maxLike) return 0;
+    const seen = new Uint8Array(n), queue = new Int32Array(n);
+    let qh = 0, qt = 0, peeled = 0;
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const p = y * w + x;
+      if (!md[p] && (md[p - 1] || md[p + 1] || md[p - w] || md[p + w])) { seen[p] = 1; queue[qt++] = p; }
+    }
+    while (qh < qt) {
+      const q = queue[qh++], x = q % w, iq = 3 * q;
+      for (const p of [x > 0 ? q - 1 : -1, x < w - 1 ? q + 1 : -1, q - w, q + w]) {
+        if (p < 0 || p >= n || seen[p] || !md[p]) continue;
+        const ip = 3 * p;
+        if (Math.abs(lab[ip] - lab[iq]) > S.stepL || Math.abs(lab[ip + 1] - lab[iq + 1]) > S.stepC || Math.abs(lab[ip + 2] - lab[iq + 2]) > S.stepC || !like(p)) continue;
+        seen[p] = 1; md[p] = 0; peeled++; queue[qt++] = p;
+      }
+    }
+    if (PH.DEBUG_PEEL) { const ks = []; for (let p = 0; p < n; p++) if (seen[p] && !md[p] && lab[3 * p] < bg.L) ks.push(lab[3 * p] / bg.L); ks.sort((x, y) => x - y); PH.DEBUG_PEEL({ inside, likeIn: +(likeIn / inside).toFixed(3), peeled: +(peeled / (inside * 3)).toFixed(3), kP10: ks.length ? +ks[Math.floor(ks.length * 0.1)].toFixed(2) : null, kP50: ks.length ? +ks[ks.length >> 1].toFixed(2) : null, bg: [Math.round(bg.L), Math.round(bg.a - 128), Math.round(bg.b - 128)] }); }
+    return peeled;
+  }
+
+  function segmentCrop(lab, w, h, bg, threshDE, lightW, lut, hint, boundary, peel) {
     const cv = PH.cv;
     const dist = new cv.Mat(h, w, cv.CV_8UC1);
     const dd = dist.data;
@@ -137,6 +187,7 @@
     const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
     cv.morphologyEx(mask, mask, cv.MORPH_OPEN, k);
     cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, k);
+    if (peel && !lut && peelShadow(lab, w, h, mask, bg)) cv.morphologyEx(mask, mask, cv.MORPH_OPEN, k);
     if (boundary) addOutline(lab, w, h, mask);
     if (hint) {
       // Limit to this piece's (slightly grown) outline from the split.
@@ -320,7 +371,12 @@
     // (the outline channel also picks up the lamp shadow beside a piece, which
     // fills the blanks on that side). Only when colour gives a partial piece
     // (pale part lost) is the outline added to rescue it.
-    let seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, false);
+    let seg = null;
+    if (PH.SHADOW_PEEL && ctx.peel !== false) { // shadows peeled off first; kept only if a whole piece remains
+      seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, false, true);
+      if (!fits(seg)) { seg.filled.delete(); seg = null; }
+    }
+    if (!seg) seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, false);
     if (useOutline && !fits(seg)) {
       const withOutline = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, true);
       seg.filled.delete(); seg = withOutline;

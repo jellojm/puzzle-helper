@@ -567,7 +567,11 @@
     // "piece-shaped" (score 0.034) and, being 100x a piece's area, it won the
     // mass mode — the photo then catalogued nothing.
     const like = blobs.filter((b) => !b.edge && b.solidity > 0.6 && b.area < Math.min(maxArea, w * h * 0.12) && PH.pieceScore(b.cnt.data32S, b.area) > PH.MIN_CORNER_SCORE).map((b) => b.area);
-    const unitOwn = like.length >= 3 ? PH.massMode(like) : null;
+    // Two clean pieces of about the same size also set it: a close-up of a
+    // few pieces (owner's IMG_3598: 4 pieces, two of them joined by a shadow)
+    // otherwise fell to the pile estimate, which put the size at a quarter
+    // and called every piece a clump.
+    const unitOwn = like.length >= 3 ? PH.massMode(like) : like.length === 2 && Math.max(...like) < 1.3 * Math.min(...like) ? (like[0] + like[1]) / 2 : null;
     if (PH.DEBUG_SEG) console.log('piece-like', like.map(Math.round).sort((a, b) => a - b).join(','), 'own', unitOwn);
     // A caller-supplied unit (live scanning keeps one across frames) wins.
     // null = unknown: nothing gets split (and the engine calls nothing merged).

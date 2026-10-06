@@ -17,6 +17,8 @@
   // close reads of one edge (owner's video: 90% within 0.29) can't be told
   // apart by shape: shown as "2 possible fits", never a sure one.
   PH.TIE_MARGIN = 0.29;
+  PH.STRIP_W = 1 / 15; // score per unit of colour difference along the old 5%-inside strip
+  PH.LEN_W = 2;         // score per unit of log edge-length ratio
   PH.edgeScore = function (eA, eB) {
     const ta = mType(eA), tb = mType(eB);
     if (!((ta === 'T' && tb === 'B') || (ta === 'B' && tb === 'T'))) return null;
@@ -56,7 +58,7 @@
     }
     color /= m;
     const unsure = (eA.type === 'F' ? 1 : 0) + (eB.type === 'F' ? 1 : 0); // matched through an uncertain flat
-    const out = { shape, color, score: shape * 12 + color / 15 + Math.abs(lr) * 4 + unsure * PH.UNCERTAIN_PENALTY };
+    const out = { shape, color, score: shape * 12 + color * PH.STRIP_W + Math.abs(lr) * PH.LEN_W + unsure * PH.UNCERTAIN_PENALTY };
     // Colour at every outline point (v0.20): the points facing each other
     // across the seam (A's point s meets B's point n-1-s) must mostly agree.
     // ...unless either edge's colour was read in bad conditions: then colour

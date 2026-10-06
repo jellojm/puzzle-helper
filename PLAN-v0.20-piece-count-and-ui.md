@@ -140,6 +140,42 @@ Reports carry `colourHealth`: edges with untrusted colour by reason, and the
 fits the box picture backs (both pieces placed side by side) that colour
 agrees with, **would reject** (colour hurting), or can't judge.
 
+### Real connections and shadows (owner's photos, 2026-10-06; v0.20.2)
+
+Owner: photos of pieces assembled and then slid apart (same layout and turn:
+IMG_3597 -> 3598, 2x2 on a cream counter under a low lamp; IMG_3601 -> 3602,
+2x4 on the white board), plus loose pieces (3599/3600/3603/3604). Also:
+"which direction shadows are thrown... the shadow on one side of the pieces
+may deteriorate the quality of that edge... maybe a different method needed
+on shadowed side to get true keyhole geometry".
+
+`test/real-joins.js` ranks every true join among the edges of all ~75 pieces
+read from these photos (the app's matcher, no box picture).
+
+| | before | v0.20.2 |
+|---|---|---|
+| IMG_3598 (shadows) read | **0 pieces** (two pieces joined by their shadow; size guessed at a quarter) | 4 of 4 |
+| Join sides with the true partner first | 13 / 28 | **20 / 28** |
+| ... in the top 3 | 15 / 28 | **23 / 28** |
+| Colour agrees along true seams | 24 / 28 (shadow side vetoed) | **28 / 28** |
+| Shadow-side joins on the cream counter | ranked 7th-17th or vetoed | 1st-3rd |
+
+What the shadow does: the lamp's shadow keeps the counter's colour and only
+loses lightness (b +12..+15 against +15 lit; L 88-120 against 176), so the
+colour-distance test took it for piece: on the shadow side the outline ran
+into it and keyholes filled (shape score 0.09-0.12 vs ~0.02 for a clean
+join), and the colour points 3% "inside" sat in the shadow. On the white
+board with normal light it hardly matters (1-3% of outline points off).
+
+Fixes: the shape read peels the shadow off - the bare board grows into the
+piece's mask through "same colour, darker" pixels by small steps and stops
+at the sharp cut. Only on a board with a colour of its own: on a neutral
+board a shadow is grey like dark print (it ate a ship's hull off two pieces
+on the white board). Two clean pieces of about the same size now set the
+piece size (close-ups of a few pieces). Edge-length weight in the join score
+4 -> 2: the two sides of a true seam read up to 8-11% apart in relative
+length on real photos (pieces aren't square).
+
 **Not met:** the owner's "exactly 50 checked" on this video. The pieces left
 as rings got fewer than two agreeing close reads in this sweep: piece 31
 (white sky print on the white counter; its straight top is misread) and one
