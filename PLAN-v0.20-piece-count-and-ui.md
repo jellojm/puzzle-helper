@@ -903,3 +903,35 @@ counters.
   only;
 - detailed pieces are never forgotten;
 - a piece known to be gone is hidden until it is found again.
+
+---
+
+## v0.21.0 — glass table (2026-10-07)
+
+Reports 01-06-12 / 01-09-35 and video IMG_3609 (glass top over wood, dark
+carpet and light tile; `node test/real-50.js 3609`, no key): 0 pieces shown.
+No colour model separated the pieces from the floor seen through the glass
+(the same with v0.19.0: not a regression); ~8-10 of ~80 pieces per frame
+found, none ever checked (close reads were rare: 10 of 15 entries far-only).
+
+- **Outline background model** (`kind: 'edges'`, `PH.edgeForeground`): the
+  floor is ~2x further than the pieces and out of focus at full resolution,
+  so Canny outlines at 2x the processing size close a ring around every
+  piece; outline-free regions reaching the frame edge (plus enclosed
+  regions coloured like the floor around them) = floor; 1 px trim. Two
+  Canny levels are candidates in the background re-check (picked per
+  scene, no setting). Offered only without a dominant table colour (top
+  colour mode < 30% of the view) and chosen only when it beats the best
+  colour model by 25%: the white-counter fixtures, `open-spots.js` and
+  `real-50.js` (48 checked, same as before) are unchanged.
+  Glass frames: 01-09-35 colour best 11 good -> outlines 15 (chosen);
+  01-06-12 10 vs 11 (colour kept). On the video's motion-blurred,
+  compressed frames outlines don't win; still 0 checked.
+- **"Move closer to read the assembled part"** only when pieces are under
+  ~22 px a side (it appeared with no assembled part on the glass table).
+
+Next (research report 2026-10-07): per-edge sharpness ratio (Zhuo & Sim
+2011) instead of a global Canny threshold; temporal voting of masks over
+3-5 frames registered by the table-plane homography (also gives a parallax
+cue: floor features don't fit it); watershed on the sharp-edge map for
+piles; a "put a cloth under the pieces" prompt when confidence is low.

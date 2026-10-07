@@ -682,6 +682,7 @@
       const t0 = now();
       const st = this.straighten(source, info);
       source = st.source;
+      this.curSource = source; // (the 'edges' background model reads it larger)
       const tp = now();
       PH.procT = {};
       const proc = source.getProc(this.opts.procW);
@@ -909,6 +910,7 @@
         }
       }
       source = this.straighten(source, info).source;
+      this.curSource = source;
       const saved = { pose: this.pose, island: this.island, tracks: this.tracks, lost: this.lost };
       const proc = source.getProc(this.opts.snapProcW);
       // A photo may show a different table: pick its background model from scratch.
@@ -973,11 +975,13 @@
     // (which is tuned down for speed and costs a degree or two of accuracy).
     stillProcW() { return Math.max(this.opts.procW, 960); }
     countPieceLike(source) {
+      this.curSource = source;
       const proc = source.getProc(this.stillProcW());
       const seg = PH.segment(proc, this.segOpts({ splitBudgetMs: 60 }));
       return seg.dets.filter((d) => !d.border && PH.pieceScore(d.pts, d.area) > PH.MIN_CORNER_SCORE).length;
     }
     estimatePhotoTilt(source) {
+      this.curSource = source;
       const proc = source.getProc(this.stillProcW());
       const seg = PH.segment(proc, this.segOpts({ splitBudgetMs: 60 }));
       const unit = seg.unitArea || PH.median(seg.dets.map((d) => d.area));
@@ -1038,6 +1042,13 @@
         cands.push({ kind: 'color', bg: { L: t.reduce((s, x) => s + x.L, 0) / k, a: t.reduce((s, x) => s + x.a, 0) / k, b: t.reduce((s, x) => s + x.b, 0) / k } });
       }
       if (this.box && this.box.palette) cands.push({ kind: 'palette' });
+      // See-through table (glass over a floor): pieces by their sharp
+      // outlines (PH.edgeForeground), at each outline threshold.
+      // Only without a dominant table colour (glass frames: the commonest
+      // colour covers ~10-13% of the view; a board 30%+): on a plain board
+      // the tuned colour path stays, even where outlines score a little more.
+      const plainish = modes.length && modes[0].frac >= 0.3;
+      if (this.curSource && this.opts.edgeBg !== false && !plainish) for (const edgeT of PH.EDGE_T) cands.push({ kind: 'edges', edgeT });
       return cands;
     }
     // How many piece-shaped blobs does this background model produce here?
@@ -1106,9 +1117,16 @@
     }
     pickBg(tried) {
       const r3 = (c) => c && [c.L, c.a, c.b].map(Math.round);
-      this.bgTried = tried.map((t) => ({ kind: t.c.kind, bg: r3(t.c.bg) || (t.c.list && t.c.list.map(r3)), good: t.good, fg: t.fg }));
-      let best = null;
-      for (const t of tried) if (!best || t.score > best.score) best = t;
+      this.bgTried = tried.map((t) => ({ kind: t.c.kind, bg: r3(t.c.bg) || (t.c.list && t.c.list.map(r3)) || t.c.edgeT, good: t.good, fg: t.fg }));
+      let best = null, bestColour = null;
+      for (const t of tried) {
+        if (!best || t.score > best.score) best = t;
+        if (t.c.kind !== 'edges' && (!bestColour || t.score > bestColour.score)) bestColour = t;
+      }
+      // The outline model (see-through tables) costs a second, larger image
+      // per frame on the phone, and the colour models are the tuned path on a
+      // plain board (where outlines win by only ~10%): it must clearly win.
+      if (best && best.c.kind === 'edges' && bestColour && best.score < bestColour.score * 1.25) best = bestColour;
       return best && best.good >= 2 ? best : null;
     }
     // Live: one candidate per still frame; when all are scored, switch only if
@@ -1365,6 +1383,7 @@
         minDE: this.opts.minDE, lightW: this.opts.lightW,
         taught: this.taught, palette: this.opts.useBoxPalette !== false && this.box ? this.box.palette : null,
         paletteWhite: this.box ? this.box.white : null,
+        edgeSource: () => this.curSource, // the 'edges' model reads this view at a larger size
       }, extra);
     }
     teachBackground(lab) { this.taught.push(lab); }
@@ -2822,7 +2841,12 @@
         if (hb.length && this.addBlobs(hb, hs, hp, f, side ? side * f : null, false)) { this.hiResFails = 0; return; }
         this.hiResFails = Math.min(3, (this.hiResFails || 0) + 1);
       }
-      this.asmFar = true; // the page says "move closer"
+      // The page says "move closer" - only when the pieces really are small
+      // (far views: ~10-15 px a side). With pieces big enough to read, the
+      // blob wasn't a readable assembled part at all (glass table 2026-10-07:
+      // loose pieces merged with the floor seen through the glass), and
+      // "move closer" sent the owner after a part that wasn't there.
+      if (!side || side < 22) this.asmFar = true;
     }
     /** Grid each blob (in image P, f x the processing size), line it up with
      *  the assemblies and add it. True when at least one was added. */

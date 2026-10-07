@@ -60,6 +60,7 @@ const CASES = [
     const ms = Date.now() - t0;
     const unit = robustUnit(seg.dets);
     const k = classify(seg.dets, unit);
+    if (process.env.BG) console.log("  model", JSON.stringify(eng.bgModel && { kind: eng.bgModel.kind, edgeT: eng.bgModel.edgeT }), JSON.stringify((eng.bgTried || []).map((t) => t.kind[0] + ":" + t.good)));
     const ok = k.good >= c.minGood && k.frag <= c.maxFrag && k.merged <= c.maxMerged;
     if (!ok) failures++;
     console.log(`${ok ? 'PASS' : 'FAIL'} ${c.file.padEnd(15)}${String(k.good).padStart(6)}${String(k.frag).padStart(6)}${String(k.merged).padStart(8)}${String(ms).padStart(6)}   (need good>=${c.minGood} frag<=${c.maxFrag} merged<=${c.maxMerged})`);

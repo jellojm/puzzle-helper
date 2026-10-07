@@ -39,7 +39,7 @@ function bitmapSource(bmp) {
     getProc(maxW) {
       const scale = Math.min(1, maxW / Math.max(w, h)); // long side, so portrait works too
       const pw = Math.round(w * scale), ph = Math.round(h * scale);
-      const c = canvas2d(pw, ph, 'proc');
+      const c = canvas2d(pw, ph, 'proc' + pw);
       const t0 = performance.now();
       c.ctx.drawImage(bmp, 0, 0, pw, ph);
       const t1 = performance.now();
@@ -92,7 +92,7 @@ function videoFrameSource(vf) {
     getProc(maxW) {
       const scale = Math.min(1, maxW / Math.max(w, h));
       const pw = Math.round(w * scale), ph = Math.round(h * scale);
-      const c = canvas2d(pw, ph, 'proc');
+      const c = canvas2d(pw, ph, 'proc' + pw);
       c.ctx.drawImage(vf, 0, 0, pw, ph);
       return { w: pw, h: ph, data: c.ctx.getImageData(0, 0, pw, ph).data, scale };
     },

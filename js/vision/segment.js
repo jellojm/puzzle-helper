@@ -102,6 +102,114 @@
   };
 
   /**
+   * Foreground from sharp outlines (the 'edges' background model): for a
+   * see-through table. On the owner's glass table (2026-10-07) the floor under
+   * the glass (wood, dark carpet, light tile, lamp-lit gradients) showed
+   * through in so many colours that no colour model found more than ~10 of
+   * ~80 pieces. But the floor is ~70 cm further away than the pieces, so it
+   * is out of focus: in the full camera image every piece has a crisp, closed
+   * outline and the floor only sensor noise. Shrunk to the processing size
+   * that difference is gone, so the outlines are found at `hp` (the same view
+   * at ~2x the size).
+   * The floor = the outline-free regions reaching the frame edge, plus big
+   * enclosed regions (inside a ring of pieces, or an assembled border) whose
+   * colour matches the floor around them. Everything else (pieces, their
+   * outlines, small gaps between pieces) is foreground; touching pieces are
+   * split later like any clump.
+   * `edgeT` = Canny thresholds [lo, hi]. Returns a 0/255 Uint8Array, w x h.
+   */
+  PH.edgeForeground = function (hp, w, h, lab, edgeT) {
+    const cv = PH.cv;
+    const src = new cv.Mat(hp.h, hp.w, cv.CV_8UC4);
+    src.data.set(hp.data);
+    const g = new cv.Mat(), e = new cv.Mat();
+    cv.cvtColor(src, g, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(g, g, new cv.Size(3, 3), 0);
+    cv.Canny(g, e, edgeT[0], edgeT[1]);
+    if (hp.invalid) {
+      // no outline along the edge of the real camera image (tilt correction)
+      const v = new cv.Mat(), ch = new cv.MatVector();
+      cv.split(src, ch); ch.get(3).copyTo(v);
+      cv.erode(v, v, cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7)));
+      cv.bitwise_and(e, v, e);
+      for (let i = 0; i < ch.size(); i++) ch.get(i).delete();
+      ch.delete(); v.delete();
+    }
+    const k3 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+    cv.dilate(e, e, k3);
+    const es = new cv.Mat();
+    cv.resize(e, es, new cv.Size(w, h), 0, 0, cv.INTER_AREA);
+    cv.threshold(es, es, 40, 255, cv.THRESH_BINARY_INV); // outline-free = 255
+    const lbl = new cv.Mat(), st = new cv.Mat(), ce = new cv.Mat();
+    const n = cv.connectedComponentsWithStats(es, lbl, st, ce, 4, cv.CV_32S);
+    const L = lbl.data32S.slice(), S = st.data32S.slice();
+    [src, g, e, k3, es, lbl, st, ce].forEach((m) => m.delete());
+    const A = w * h, bgR = new Uint8Array(n);
+    for (let i = 1; i < n; i++) {
+      const x = S[i * 5], y = S[i * 5 + 1], rw = S[i * 5 + 2], rh = S[i * 5 + 3], a = S[i * 5 + 4];
+      if (a > A * 0.003 && (x <= 0 || y <= 0 || x + rw >= w || y + rh >= h)) bgR[i] = 1;
+    }
+    // The floor's colour around each spot (tiles of ~1/12 of the view, from
+    // the floor regions found so far; tiles without floor take their
+    // neighbours'), for judging the big enclosed regions.
+    const TS = Math.max(24, Math.round(Math.max(w, h) / 12)), gx = Math.ceil(w / TS), gy = Math.ceil(h / TS);
+    const acc = new Float64Array(gx * gy * 4);
+    for (let p = 0; p < A; p += 2) {
+      if (!bgR[L[p]]) continue;
+      const t = (((p / w) | 0) / TS | 0) * gx + (((p % w) / TS) | 0);
+      acc[4 * t] += lab[3 * p]; acc[4 * t + 1] += lab[3 * p + 1]; acc[4 * t + 2] += lab[3 * p + 2]; acc[4 * t + 3]++;
+    }
+    const G = new Float32Array(gx * gy * 3), ok = new Uint8Array(gx * gy);
+    for (let t = 0; t < gx * gy; t++) if (acc[4 * t + 3] > 20) { for (let c = 0; c < 3; c++) G[3 * t + c] = acc[4 * t + c] / acc[4 * t + 3]; ok[t] = 1; }
+    for (let it = 0; it < gx + gy; it++) {
+      let any = false;
+      for (let i = 0; i < gx * gy; i++) {
+        if (ok[i]) continue;
+        const x = i % gx, y = (i / gx) | 0, s = [0, 0, 0];
+        let m = 0;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const X = x + dx, Y = y + dy;
+          if (X < 0 || Y < 0 || X >= gx || Y >= gy || ok[Y * gx + X] !== 1) continue;
+          const j = Y * gx + X; for (let c = 0; c < 3; c++) s[c] += G[3 * j + c]; m++;
+        }
+        if (m) { for (let c = 0; c < 3; c++) G[3 * i + c] = s[c] / m; ok[i] = 2; any = true; }
+      }
+      for (let i = 0; i < gx * gy; i++) if (ok[i] === 2) ok[i] = 1;
+      if (!any) break;
+    }
+    // big enclosed regions (>= 1.5% of the view): floor if their colour is
+    // the floor's there (lightness counts half, as in the colour models)
+    const big = new Float64Array(n * 2);
+    for (let p = 0; p < A; p += 2) {
+      const r = L[p];
+      if (!r || bgR[r] || S[r * 5 + 4] < A * PH.EDGE_POCKET) continue;
+      const t = (((p / w) | 0) / TS | 0) * gx + (((p % w) / TS) | 0);
+      const dL = (lab[3 * p] - G[3 * t]) * 0.5, da = lab[3 * p + 1] - G[3 * t + 1], db = lab[3 * p + 2] - G[3 * t + 2];
+      big[2 * r] += Math.sqrt(dL * dL + da * da + db * db); big[2 * r + 1]++;
+    }
+    for (let i = 1; i < n; i++) if (big[2 * i + 1] && big[2 * i] / big[2 * i + 1] < PH.EDGE_POCKET_DE) bgR[i] = 1;
+    const om = new cv.Mat(h, w, cv.CV_8UC1), out = om.data;
+    for (let p = 0; p < A; p++) out[p] = bgR[L[p]] ? 0 : 255;
+    // thin outline strokes on the floor (the glass's own edge, grout lines,
+    // reflections) are not pieces
+    const k5 = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+    cv.morphologyEx(om, om, cv.MORPH_OPEN, k5);
+    k5.delete();
+    if (PH.EDGE_TRIM) { const kt = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * PH.EDGE_TRIM + 1, 2 * PH.EDGE_TRIM + 1)); cv.erode(om, om, kt); kt.delete(); }
+    if (hp.invalid) {
+      // (outside the real camera image: never foreground)
+      const s = hp.w / w;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const q = (Math.min(hp.h - 1, Math.round(y * s)) * hp.w + Math.min(hp.w - 1, Math.round(x * s))) * 4 + 3;
+        if (!hp.data[q]) out[y * w + x] = 0;
+      }
+    }
+    const res = new Uint8Array(out);
+    om.delete();
+    return res;
+  };
+
+  /**
    * Even out lamp shadows / uneven light. Estimates how bright the bare board
    * is at every spot (a smooth surface with the pieces removed), then scales
    * lightness so the whole board reads like its lit part. Shadows scale
@@ -179,6 +287,28 @@
     return out;
   }
   // Mixed-table classification: 0 where the pixel's colour bin is background, else 255.
+  // PH.edgeForeground for this view at about twice the processing size,
+  // kept for the last view (the background re-check scores it repeatedly).
+  let edgeCache = null;
+  function edgeMask(source, w, h, lab, edgeT) {
+    const T = edgeT || PH.EDGE_T[0], key = w + 'x' + h + ':' + T.join(',');
+    if (edgeCache && edgeCache.source === source && edgeCache.key === key) return edgeCache.mask;
+    const long = Math.max(source.w, source.h), want = Math.max(w, h) * PH.EDGE_SCALE;
+    const hp = source.getProc(Math.min(long, want));
+    // (another view's source: wrong shape -> no outline model this time)
+    if (Math.abs(hp.w / hp.h - w / h) > 0.02) return null;
+    const mask = PH.edgeForeground(hp, w, h, lab, T);
+    edgeCache = { source, key, mask };
+    return mask;
+  }
+  PH.EDGE_SCALE = 2;
+  PH.EDGE_POCKET_DE = 12;
+  PH.EDGE_TRIM = 1; // px: the widened outline and the piece's shadow side fatten it (rounded corners failed the piece-shape test)
+  PH.EDGE_POCKET = 0.0005; // enclosed regions from this share of the view up are judged by colour (smaller: print inside a piece)
+  // Canny thresholds the background re-check tries (each a candidate: the
+  // one finding the most piece-shaped blobs wins - no setting for the owner)
+  PH.EDGE_T = [[30, 80], [50, 120]];
+
   function lutClassify(lab, n, lut, out) {
     const corr = lut.corr;
     for (let p = 0, i = 0; p < n; p++, i += 3) out[p] = lut[PH.correctedBin(lab[i], lab[i + 1], lab[i + 2], corr)] ? 0 : 255;
@@ -437,6 +567,10 @@
       thresh = PH.clamp(Math.max(minT, med * 3.5), minT, Math.max(minT, otsu));
     }
     cv.threshold(dist, mask, thresh, 255, cv.THRESH_BINARY);
+    // See-through table: the floor is told apart by focus, not colour
+    // (PH.edgeForeground). `opts.edgeSource()` = this view's image source.
+    const edgeFg = model && model.kind === 'edges' && opts.edgeSource ? edgeMask(opts.edgeSource(), w, h, lab, model.edgeT) : null;
+    if (edgeFg) mask.data.set(edgeFg);
     // Colour alone, before outlines are closed and filled: holes inside an
     // assembled section (missing pieces) survive only here.
     const colorFg = new Uint8Array(mask.data);
@@ -446,7 +580,7 @@
     // where its print matches the table's colour. Lightness gradient above
     // `boundaryT` is added to the mask, so a pale piece becomes a closed ring
     // and RETR_EXTERNAL returns its outline.
-    if (opts.boundary) {
+    if (opts.boundary && !edgeFg) {
       const Lm = P.L; // the frame's own lightness (not shadow-evened)
       const gx = new cv.Mat(), gy = new cv.Mat(), ax = new cv.Mat(), ay = new cv.Mat(), mag = new cv.Mat();
       cv.Scharr(Lm, gx, cv.CV_16S, 1, 0); cv.Scharr(Lm, gy, cv.CV_16S, 0, 1);
@@ -500,7 +634,7 @@
     // the mask. The engine turns it on only while pale pieces blend into the
     // board (capture coach): on the owner's frames it costs good pieces
     // elsewhere (98 -> 93-95), on pale-on-white tables it finds more.
-    if (opts.texture) {
+    if (opts.texture && !edgeFg) {
       const tT = opts.texture.T || 5, er = opts.texture.erode || 0;
       const Lf = new cv.Mat(), m = new cv.Mat(), m2 = new cv.Mat(), sq = new cv.Mat(), tm = new cv.Mat(), t8 = new cv.Mat();
       P.L.convertTo(Lf, cv.CV_32F);

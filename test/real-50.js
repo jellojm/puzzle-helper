@@ -32,11 +32,14 @@ const ROOT = path.join(__dirname, '..');
 const CASES = {
   3593: { video: 'IMG_3593.MOV', n: 50, key: path.join(__dirname, 'fixtures', 'v3593', 'answer.json') },
   3605: { video: 'IMG_3605.MOV', n: 38, key: null },
+  // glass table over a mixed floor (wood, carpet, tile), ~300 loose pieces of
+  // a 300-piece puzzle; for the see-through 'edges' background model. No key.
+  3609: { video: 'IMG_3609.MOV', n: 300, key: null, box: 'puzzle-report-2026-10-07T01-09-35-box.jpg', grid: { pieces: 300, cols: 20, rows: 15 } },
 };
 const CASE = CASES[process.env.CASE || process.argv[2] || 3593]; // (node test/real-50.js 3605)
 const N = CASE.n;
 const VIDEO = process.env.VIDEO || path.join(ROOT, 'reports', CASE.video);
-const BOX = path.join(ROOT, 'reports', 'puzzle-report-2026-10-05T11-14-50-box.jpg');
+const BOX = path.join(ROOT, 'reports', CASE.box || 'puzzle-report-2026-10-05T11-14-50-box.jpg');
 const KEY = CASE.key || path.join(__dirname, 'fixtures', 'none');
 const VARIANT = process.env.VARIANT || 'full';
 
@@ -49,10 +52,10 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
   if (cv instanceof Promise) cv = await cv; else if (!cv.Mat) await new Promise((r) => (cv.onRuntimeInitialized = r));
   PH.cv = cv;
   const { readImage } = require('./imageio');
-  const eng = new PH.Engine();
+  const eng = new PH.Engine(process.env.EDGEBG === '0' ? { edgeBg: false } : {});
   if (fs.existsSync(BOX)) {
     const bi = readImage(BOX);
-    eng.setBox(PH.createBox(bi, [[0, 0], [bi.w, 0], [bi.w, bi.h], [0, bi.h]], { pieces: 300, cols: 15, rows: 20 }));
+    eng.setBox(PH.createBox(bi, [[0, 0], [bi.w, 0], [bi.w, bi.h], [0, bi.h]], CASE.grid || { pieces: 300, cols: 15, rows: 20 }));
   }
   const rnd = PH.mulberry32(7);
   const step = VARIANT === 'phone6' ? 6 : 5;
@@ -68,7 +71,11 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
   const readLog = new Map(); // READS=1: every shape read per entry, to see why one stays unchecked
   if (process.env.READS) PH.DEBUG_Q = (...a) => { if (String(a[0]).includes('read')) { const id = a[1]; if (!readLog.has(id)) readLog.set(id, []); readLog.get(id).push(a.slice(2).join(' ')); } };
   const tilt = { pitch: 0, roll: 0 };
+  let curT = 0;
+  if (process.env.FORCEBG) { eng.opts.autoBg = false; eng.bgModel = { kind: 'edges', edgeT: JSON.parse(process.env.FORCEBG) }; }
+  if (process.env.BGLOG) { const pk = eng.pickBg.bind(eng); eng.pickBg = (tried) => { const r = pk(tried); console.log('t=' + curT.toFixed(1), tried.map((t) => t.c.kind[0] + (t.c.edgeT ? t.c.edgeT[0] : '') + ':' + t.good + '/' + t.fg).join(' '), '->', r ? r.c.kind : null); return r; }; }
   for await (const f of videoFrames(VIDEO, { step, to })) {
+    curT = f.t;
     let data = f.data;
     if (VARIANT === 'light' && Math.floor(f.t / 4) % 3 !== 0) { // 4 s bursts, darker then brighter
       const k = Math.floor(f.t / 4) % 3 === 1 ? 0.6 : 1.4;
@@ -100,12 +107,13 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
     const c = eng.counts();
     const checked = c.checked !== undefined ? c.checked : c.pieces;
     if (checked > maxChecked) { maxChecked = checked; maxAt = f.t; }
-    if (n % 25 === 0) { timeline.push(`${f.t.toFixed(0)}s:${checked}`); }
+    if (n % 25 === 0) { timeline.push(`${f.t.toFixed(0)}s:${checked}` + (process.env.BG ? `(${eng.bgModel ? eng.bgModel.kind : '-'},${out.dets.length}d,${c.entries})` : '')); }
   }
   const c = eng.counts();
   console.log(`${VARIANT}: ${n} frames in ${((Date.now() - t0) / 1000).toFixed(0)} s; timeline ${timeline.join(' ')}`);
   console.log('counts', JSON.stringify(c));
   console.log('rejects', JSON.stringify(eng.rejects));
+  if (process.env.BG) console.log('bgTried', JSON.stringify(eng.bgTried), 'model', JSON.stringify(eng.bgModel));
   console.log('unchecked because', JSON.stringify(eng.whyUnchecked()), 'housekeeping', JSON.stringify(eng.hk));
   if (process.env.READS && !CASE.key) { // no answer key: the reads of every entry left unchecked
     for (const p of eng.pieces.values()) {
