@@ -72,6 +72,7 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
   if (process.env.READS) PH.DEBUG_Q = (...a) => { if (String(a[0]).includes('read')) { const id = a[1]; if (!readLog.has(id)) readLog.set(id, []); readLog.get(id).push(a.slice(2).join(' ')); } };
   const tilt = { pitch: 0, roll: 0 };
   let curT = 0;
+  if (process.env.VOTE) eng.opts.edgeVote = true;
   if (process.env.FORCEBG) { eng.opts.autoBg = false; eng.bgModel = { kind: 'edges', edgeT: JSON.parse(process.env.FORCEBG) }; }
   if (process.env.BGLOG) { const pk = eng.pickBg.bind(eng); eng.pickBg = (tried) => { const r = pk(tried); console.log('t=' + curT.toFixed(1), tried.map((t) => t.c.kind[0] + (t.c.edgeT ? t.c.edgeT[0] : '') + ':' + t.good + '/' + t.fg).join(' '), '->', r ? r.c.kind : null); return r; }; }
   for await (const f of videoFrames(VIDEO, { step, to })) {
@@ -93,6 +94,7 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
       if (e && e.gain > 0.05) { tilt.pitch = tilt.pitch * 0.5 + e.pitch * 0.5; tilt.roll = tilt.roll * 0.5 + e.roll * 0.5; }
     }
     const out = eng.processFrame(src, { still: f.still, tilt: { down: PH.downFromAngles(tilt.pitch, tilt.roll), fov: 66 } });
+    if (process.env.DETSTATS) { const g = out.dets.filter((d) => !d.border && d.status !== "merged").length; (globalThis.__ds = globalThis.__ds || []).push([g, f.still ? 1 : 0, eng.edgeVoter ? +(eng.edgeVoter.voted || 0) : 0]); }
     if (KEYF && f.t >= 1.4 && f.t <= 2.7 && eng.lastProc) {
       const sc = eng.lastProc.scale, unit = Math.sqrt(eng.unitLive || 1000);
       for (const k of KEYF.pieces) {
@@ -113,6 +115,7 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
   console.log(`${VARIANT}: ${n} frames in ${((Date.now() - t0) / 1000).toFixed(0)} s; timeline ${timeline.join(' ')}`);
   console.log('counts', JSON.stringify(c));
   console.log('rejects', JSON.stringify(eng.rejects));
+  if (globalThis.__ds) { const D = globalThis.__ds, m = (a) => (a.reduce((s, x) => s + x[0], 0) / Math.max(1, a.length)).toFixed(2); console.log('good dets/frame all', m(D), 'still', m(D.filter((x) => x[1])), 'moving', m(D.filter((x) => !x[1])), 'voted frames', D.filter((x) => x[2]).length + '/' + D.length); }
   if (process.env.BG) console.log('bgTried', JSON.stringify(eng.bgTried), 'model', JSON.stringify(eng.bgModel));
   console.log('unchecked because', JSON.stringify(eng.whyUnchecked()), 'housekeeping', JSON.stringify(eng.hk));
   if (process.env.READS && !CASE.key) { // no answer key: the reads of every entry left unchecked

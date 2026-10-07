@@ -935,3 +935,18 @@ Next (research report 2026-10-07): per-edge sharpness ratio (Zhuo & Sim
 3-5 frames registered by the table-plane homography (also gives a parallax
 cue: floor features don't fit it); watershed on the sharp-edge map for
 piles; a "put a cloth under the pieces" prompt when confidence is low.
+
+### Research items 2 and 3, measured (2026-10-07)
+
+- **Per-edge sharpness ratio** (Zhuo & Sim: gradient / gradient after an
+  extra Gaussian blur, at Canny edge pixels; `test/out`-style probe on
+  report 01-06-12 at 960/1280/1920 px, sigma 1-2): one hump (1.1-1.5) for
+  piece outlines and floor edges alike; only fine print scores high. The
+  floor adds few edges anyway. Not used.
+- **Frame voting** (`PH.EdgeVoter`, `opts.edgeVote: true`): LK corners +
+  RANSAC homography on the table plane (98% inliers on IMG_3609), last 4
+  outline masks warped in, majority vote. Clean detections a frame on
+  IMG_3609 (outline model forced): 5.62 without, 4.95 with (moving frames
+  2.79 -> 3.00). Off by default. The losses on that video are dense piles
+  of touching pieces and lit floor between them at ~40 px a piece, not smear.
+  `node test/real-50.js 3609` with FORCEBG='[30,80]', VOTE=1, DETSTATS=1.

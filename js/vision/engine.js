@@ -1001,6 +1001,14 @@
       // still frames may spend more on splitting piles of touching pieces
       const o = { bg: this.bg, bgSmooth: 0.3, splitBudgetMs: info && info.still !== false ? 40 : 25, unitArea };
       if (this.bgModel) { o.bgModel = this.bgModel; if (this.bgModel.kind === 'color') delete o.bg; }
+      // outline model: the last few views vote (smeared frames lose outlines).
+      // Off by default: on the glass video (IMG_3609, dense piles) it gave
+      // 4.95 clean detections a frame vs 5.62 without - the losses there are
+      // touching pieces and lit floor between them, not smear, and voting
+      // carries those along. Its plane registration (98% inliers) is the
+      // base for a parallax cue (floor moves less than the pieces).
+      if (this.bgModel && this.bgModel.kind === 'edges' && this.opts.edgeVote === true) o.edgeVote = this.edgeVoter || (this.edgeVoter = new PH.EdgeVoter());
+      else if (this.edgeVoter && this.edgeVoter.hist.length) this.edgeVoter.reset();
       // WP2: on still frames also use the pieces' outlines (lightness edges),
       // closed into rings and filled. That recovers pale pieces whose print
       // matches the table. Moving frames stay colour-only (blur makes edges

@@ -302,6 +302,84 @@
     return mask;
   }
   PH.EDGE_SCALE = 2;
+
+  /**
+   * Outline masks voted over the last few live views. A handheld sweep
+   * smears many frames; a smeared outline doesn't close, and that piece
+   * becomes "floor" for the frame (owner's glass video IMG_3609). Each new
+   * view is lined up with the last on the table plane (corners tracked with
+   * Lucas-Kanade, a RANSAC homography: the pieces are sharp, so most tracked
+   * corners lie on them), the stored masks are carried along, and a pixel is
+   * foreground when at least half of the views that saw it say so.
+   * vote(mask, img, peek): peek = don't store this view (background scoring).
+   */
+  PH.EdgeVoter = class {
+    constructor(k) { this.k = k || 4; this.hist = []; this.grey = null; this.size = null; }
+    reset() { for (const m of this.hist) m.delete(); this.hist = []; if (this.grey) this.grey.delete(); this.grey = null; }
+    greyOf(img) {
+      const cv = PH.cv, m = new cv.Mat(img.h, img.w, cv.CV_8UC4), g = new cv.Mat();
+      m.data.set(img.data); cv.cvtColor(m, g, cv.COLOR_RGBA2GRAY); m.delete();
+      return g;
+    }
+    // homography from the last view to this one (null: lost)
+    register(g) {
+      const cv = PH.cv, p0 = new cv.Mat(), p1 = new cv.Mat(), st = new cv.Mat(), er = new cv.Mat(), none = new cv.Mat();
+      let H = null;
+      cv.goodFeaturesToTrack(this.grey, p0, 200, 0.01, 8, none, 5);
+      if (p0.rows >= 12) {
+        cv.calcOpticalFlowPyrLK(this.grey, g, p0, p1, st, er, new cv.Size(21, 21), 3);
+        const a = [], b = [];
+        for (let i = 0; i < p0.rows; i++) if (st.data[i]) { a.push(p0.data32F[2 * i], p0.data32F[2 * i + 1]); b.push(p1.data32F[2 * i], p1.data32F[2 * i + 1]); }
+        if (a.length >= 24) {
+          const A = cv.matFromArray(a.length / 2, 1, cv.CV_32FC2, a), B = cv.matFromArray(b.length / 2, 1, cv.CV_32FC2, b), inl = new cv.Mat();
+          const h = cv.findHomography(A, B, cv.RANSAC, 2, inl);
+          let ni = 0; for (let i = 0; i < inl.rows; i++) ni += inl.data[i] ? 1 : 0;
+          this.lastInliers = ni / (a.length / 2);
+          if (!h.empty() && ni >= 12 && ni >= a.length / 2 * 0.4) H = h; else h.delete();
+          [A, B, inl].forEach((m) => m.delete());
+        }
+      }
+      [p0, p1, st, er, none].forEach((m) => m.delete());
+      return H;
+    }
+    vote(mask, img, peek) {
+      const cv = PH.cv, w = img.w, h = img.h;
+      if (this.size !== w + 'x' + h) { this.reset(); this.size = w + 'x' + h; }
+      const g = this.greyOf(img);
+      const H = this.grey ? this.register(g) : null;
+      const prev = [];
+      if (H) {
+        // stored views, carried into this view (127 = not seen then)
+        for (const m of this.hist) {
+          const o = new cv.Mat();
+          cv.warpPerspective(m, o, H, new cv.Size(w, h), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(127));
+          prev.push(o);
+        }
+      }
+      let out = mask;
+      if (prev.length) {
+        out = new Uint8Array(w * h);
+        const P = prev.map((m) => m.data);
+        for (let p = 0; p < w * h; p++) {
+          let fg = mask[p] ? 1 : 0, seen = 1;
+          for (const d of P) { const v = d[p]; if (v !== 127) { seen++; if (v) fg++; } }
+          out[p] = fg * 2 >= seen ? 255 : 0;
+        }
+      }
+      if (peek) { for (const m of prev) m.delete(); g.delete(); if (H) H.delete(); return out; }
+      // store this view's own mask (not the voted one: errors must not echo)
+      for (const m of this.hist) m.delete();
+      this.hist = H ? prev : (prev.forEach((m) => m.delete()), []);
+      const cur = new cv.Mat(h, w, cv.CV_8UC1); cur.data.set(mask);
+      this.hist.push(cur);
+      while (this.hist.length > this.k - 1) this.hist.shift().delete();
+      if (this.grey) this.grey.delete();
+      this.grey = g;
+      if (H) H.delete();
+      this.voted = !!prev.length;
+      return out;
+    }
+  };
   PH.EDGE_POCKET_DE = 12;
   PH.EDGE_TRIM = 1; // px: the widened outline and the piece's shadow side fatten it (rounded corners failed the piece-shape test)
   PH.EDGE_POCKET = 0.0005; // enclosed regions from this share of the view up are judged by colour (smaller: print inside a piece)
@@ -569,7 +647,9 @@
     cv.threshold(dist, mask, thresh, 255, cv.THRESH_BINARY);
     // See-through table: the floor is told apart by focus, not colour
     // (PH.edgeForeground). `opts.edgeSource()` = this view's image source.
-    const edgeFg = model && model.kind === 'edges' && opts.edgeSource ? edgeMask(opts.edgeSource(), w, h, lab, model.edgeT) : null;
+    let edgeFg = model && model.kind === 'edges' && opts.edgeSource ? edgeMask(opts.edgeSource(), w, h, lab, model.edgeT) : null;
+    // live frames: the last few views vote (PH.EdgeVoter)
+    if (edgeFg && opts.edgeVote) edgeFg = opts.edgeVote.vote(edgeFg, img, opts.edgeVotePeek);
     if (edgeFg) mask.data.set(edgeFg);
     // Colour alone, before outlines are closed and filled: holes inside an
     // assembled section (missing pieces) survive only here.
