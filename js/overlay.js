@@ -165,14 +165,22 @@ export function drawOverlay(ctx, res, M, opts) {
   // across the view is easy to follow while panning from one piece to the
   // other, and it still leads off screen toward a partner that isn't in view.
   const selH = res.highlights.find((h) => h.role === 'sel');
+  const edgeGlows = [];
   if (selH) {
     const sd = byId.get(selH.id);
-    const from = sd ? M.toScreen(sd.cx, sd.cy) : M.toScreen(selH.x, selH.y);
+    const centre = sd ? M.toScreen(sd.cx, sd.cy) : M.toScreen(selH.x, selH.y);
+    const mid = (g) => M.toScreen((g[0][0] + g[1][0]) / 2, (g[0][1] + g[1][1]) / 2);
     for (const h of res.highlights) {
       if ((h.role !== 'gold' && h.role !== 'silver') || h.rank > 0) continue; // each edge's top candidate (all of a pair)
       const d = byId.get(h.id);
-      const to = d ? M.toScreen(d.cx, d.cy) : M.toScreen(h.x, h.y);
+      // from the edge of the selected piece to the partner's edge that would
+      // connect to it (owner, 2026-10-07), else centre to centre
+      const from = h.segFrom ? mid(h.segFrom) : centre;
+      const to = h.seg ? mid(h.seg) : d ? M.toScreen(d.cx, d.cy) : M.toScreen(h.x, h.y);
       arcLine(ctx, from, to, ROLE[h.role].color, h.role === 'gold' ? 5 : 3.5);
+      const col = EDGE_COLORS[h.edge] || ROLE[h.role].color;
+      if (h.segFrom && sd) edgeGlows.push([sd, h.segFrom, col]);
+      if (h.seg && d) edgeGlows.push([d, h.seg, col]);
     }
   }
   for (const h of res.highlights) {
@@ -202,6 +210,7 @@ export function drawOverlay(ctx, res, M, opts) {
       arrow(ctx, M, h, style.color);
     }
   }
+  for (const [d, seg, col] of edgeGlows) edgeGlow(ctx, d, seg, col, M, pulse);
   ctx.globalAlpha = 1;
 }
 
@@ -343,6 +352,32 @@ function arrow(ctx, M, h, color) {
 
 // A curved line from one piece to another (bulging to one side), with a dark
 // under-stroke so it reads on any table, and a dot at the far end.
+// The edges that would connect: traced along the piece's outline between
+// the edge's two corners (the stretch that lies on the edge's side), in the
+// edge's colour, thick, over the shaded piece.
+function edgeGlow(ctx, d, seg, color, M, pulse) {
+  const P = d.pts, n = P.length / 2;
+  if (n < 4) return;
+  const near = (q) => { let bi = 0, bd = Infinity; for (let i = 0; i < n; i++) { const e = (P[2 * i] - q[0]) ** 2 + (P[2 * i + 1] - q[1]) ** 2; if (e < bd) { bd = e; bi = i; } } return bi; };
+  const i0 = near(seg[0]), i1 = near(seg[1]);
+  if (i0 === i1) return;
+  const mx = (seg[0][0] + seg[1][0]) / 2, my = (seg[0][1] + seg[1][1]) / 2;
+  // the two ways round the outline; the edge is the one whose points sit nearer the edge's middle
+  const run = (a, b) => { const out = []; for (let i = a; ; i = (i + 1) % n) { out.push(i); if (i === b) break; } return out; };
+  const score = (r) => r.reduce((t, i) => t + Math.hypot(P[2 * i] - mx, P[2 * i + 1] - my), 0) / r.length;
+  const A = run(i0, i1), B = run(i1, i0);
+  const path = score(A) <= score(B) ? A : B;
+  ctx.save();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const [w, c, al] of [[11, 'rgba(0,0,0,0.6)', 1], [7, color, 0.75 + 0.25 * pulse]]) {
+    ctx.globalAlpha = al; ctx.lineWidth = w; ctx.strokeStyle = c;
+    ctx.beginPath();
+    path.forEach((i, j) => { const [x, y] = M.toScreen(P[2 * i], P[2 * i + 1]); if (j) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function arcLine(ctx, from, to, color, width) {
   const [x0, y0] = from, [x1, y1] = to;
   if (!isFinite(x0 + y0 + x1 + y1)) return;

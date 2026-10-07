@@ -3254,6 +3254,38 @@
       });
     }
 
+    /** Where edge k of piece p lies in this view: its two corners, in
+     *  processing-frame pixels (null when unknown). The read placement (rd:
+     *  read pixels -> table) and the inverse pose (table -> this view), as the
+     *  Map draws it; only while the piece hasn't moved since. A placement
+     *  from another read (p.pic) numbers its corners its own way: lined up
+     *  with the stored shape's edges by their shapes (owner, 2026-10-07: the
+     *  match arrow should point at the edges that connect). */
+    edgeInView(p, k, inv) {
+      const r = p && p.rd;
+      if (!r || r.stale || !inv || !p.t1) return null;
+      let C = p.t1.corners, off = 0;
+      if (p.pic) {
+        C = p.pic.corners;
+        if (!C) return null;
+        if (p.pic.sigs) { // another read: which of its edges is stored edge 0?
+          let best = Infinity;
+          for (let o = 0; o < 4; o++) {
+            let d = 0;
+            for (let i = 0; i < 4; i++) {
+              const a = p.t1.edges[(i + o) % 4].sig, b = p.pic.sigs[i];
+              if (!a || !b || a.length !== b.length) { d = Infinity; break; }
+              for (let j = 0; j < a.length; j++) d += (a[j] - b[j]) ** 2;
+            }
+            if (d < best) { best = d; off = o; }
+          }
+          if (best === Infinity) return null;
+        }
+      }
+      const at = (i) => { const c = C[((i - off) % 4 + 4) % 4], t = PH.simApply(r, c[0], c[1]); return PH.simApply(inv, t[0], t[1]); };
+      return [at(k), at(k + 1)];
+    }
+
     // ---------- output for the overlay ----------
     output(dets, proc) {
       const inv = this.pose ? PH.simInvert(this.pose) : null;
@@ -3303,7 +3335,9 @@
         // "maybe" (silver), however good its score looks.
         if (res) for (const r of res) r.matches.slice(0, 3).forEach((m, i) => {
           const gold = PH.sureFit(m, i);
-          locate(m.id, gold ? 'gold' : 'silver', { edge: r.edge, edgeB: m.edge, rank: i });
+          // the two edges that would connect (the top candidate's only)
+          const seg = i === 0 ? { segFrom: this.edgeInView(P, r.edge, inv), seg: this.edgeInView(this.pieces.get(m.id), m.edge, inv) } : null;
+          locate(m.id, gold ? 'gold' : 'silver', Object.assign({ edge: r.edge, edgeB: m.edge, rank: i }, seg));
         });
       }
       if (this.region) for (const id of this.region.ids) locate(id, id === this.region.best ? 'gold' : 'region');
