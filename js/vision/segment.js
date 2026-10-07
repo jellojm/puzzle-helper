@@ -136,10 +136,10 @@
       ch.delete(); v.delete();
     }
     const k3 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-    cv.dilate(e, e, k3);
+    if (PH.EDGE_DIL) cv.dilate(e, e, k3);
     const es = new cv.Mat();
     cv.resize(e, es, new cv.Size(w, h), 0, 0, cv.INTER_AREA);
-    cv.threshold(es, es, 40, 255, cv.THRESH_BINARY_INV); // outline-free = 255
+    cv.threshold(es, es, PH.EDGE_DOWN_T, 255, cv.THRESH_BINARY_INV); // outline-free = 255
     const lbl = new cv.Mat(), st = new cv.Mat(), ce = new cv.Mat();
     const n = cv.connectedComponentsWithStats(es, lbl, st, ce, 4, cv.CV_32S);
     const L = lbl.data32S.slice(), S = st.data32S.slice();
@@ -291,7 +291,7 @@
   // kept for the last view (the background re-check scores it repeatedly).
   let edgeCache = null;
   function edgeMask(source, w, h, lab, edgeT) {
-    const T = edgeT || PH.EDGE_T[0], key = w + 'x' + h + ':' + T.join(',');
+    const T = edgeT || PH.EDGE_T[0], key = [w, h, T, PH.EDGE_DIL, PH.EDGE_DOWN_T, PH.EDGE_TRIM, PH.EDGE_POCKET, PH.EDGE_POCKET_DE].join(':');
     if (edgeCache && edgeCache.source === source && edgeCache.key === key) return edgeCache.mask;
     const long = Math.max(source.w, source.h), want = Math.max(w, h) * PH.EDGE_SCALE;
     const hp = source.getProc(Math.min(long, want));
@@ -381,6 +381,8 @@
     }
   };
   PH.EDGE_POCKET_DE = 12;
+  PH.EDGE_DIL = 1; // widen the outlines at the large size (closes rings; fills narrow gaps)
+  PH.EDGE_DOWN_T = 40; // a processing pixel is outline when this much of it (of 255) is
   PH.EDGE_TRIM = 1; // px: the widened outline and the piece's shadow side fatten it (rounded corners failed the piece-shape test)
   PH.EDGE_POCKET = 0.0005; // enclosed regions from this share of the view up are judged by colour (smaller: print inside a piece)
   // Canny thresholds the background re-check tries (each a candidate: the
