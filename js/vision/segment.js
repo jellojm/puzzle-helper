@@ -222,6 +222,7 @@
    * the corrected lightness plane as a Mat {Lmat, ref, spread} (caller
    * deletes Lmat; a and b are unchanged) instead of a merged Lab array.
    */
+  PH.FLAT_DIV = 6;
   PH.flattenLight = function (lab, w, h, valid, unitArea, boardL, validMat, planes) {
     const cv = PH.cv;
     const n = w * h;
@@ -242,7 +243,11 @@
     const sw = Math.max(8, Math.round(w / s)), sh = Math.max(8, Math.round(h / s));
     const sm = new cv.Mat();
     cv.resize(L, sm, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
-    const side = unitArea ? Math.sqrt(unitArea) : Math.max(w, h) / 10;
+    // (piece size unknown - a photo: assume big pieces. A tenth of the view
+    // was smaller than close-up pieces (owner's IMG_3625: ~300 px of 1600),
+    // so the closing kept them as "board", the dark board brightened the
+    // lit gap between two pieces into one blob)
+    const side = unitArea ? Math.sqrt(unitArea) : Math.max(w, h) / PH.FLAT_DIV;
     const kmax = 2 * Math.floor((Math.min(sw, sh) - 1) / 2) + 1;
     const k = Math.min(kmax, Math.max(5, Math.round((1.6 * side) / s) | 1));
     if (brighter < cnt * 0.1) {

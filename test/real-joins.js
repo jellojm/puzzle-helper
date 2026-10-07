@@ -41,7 +41,15 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
 const LAYOUTS = [
   { file: 'IMG_3598.JPG', cols: 2, rows: 2, what: '2x2 on the cream counter, low lamp (shadows)' },
   { file: 'IMG_3602.JPG', cols: 2, rows: 4, what: '2x4 on the white board' },
+  // 2026-10-07 (joined in IMG_3614/3615/3617/3618, apart in the same layout)
+  // (measured, not yet held to the pass bars: weaker reads under the lamp)
+  { file: 'IMG_3620.JPG', cols: 2, rows: 2, what: '2x2 red urchin, cream counter', weak: true },
+  // pieces turned when taken apart: the joins labelled by hand - piece index
+  // in reading order (top to bottom), side facing 0 up 1 right 2 down 3 left
+  { file: 'IMG_3625.JPG', n: 2, joins: [[0, 1, 1, 0]], what: 'yellow fish pair (joined in IMG_3618), both turned', weak: true },
 ];
+// (IMG_3622: a joined pair and two loose pieces; IMG_3624: all three turned,
+// seams not certain by eye - not used)
 const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
 
 (async () => {
@@ -83,18 +91,22 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
     pool.push(...ps);
     // the layout: the rows by height, each row left to right (pieces cut by
     // the photo's edge are never read)
-    const n = L.cols * L.rows;
+    const n = L.n || L.cols * L.rows;
     const ok = ps.length >= n;
     check(`${L.file} (${L.what}): every piece of the layout read`, ok, `${ps.length} read, ${n} in the layout; codes ${ps.map((p) => p.t1.code).join(' ')}`);
     if (!ok) continue;
     // keep the n pieces of the main group (closest to their common centre)
     const mx = PH.median(ps.map((p) => p.cx)), my = PH.median(ps.map((p) => p.cy));
     const grid = ps.slice().sort((a, b) => Math.hypot(a.cx - mx, a.cy - my) - Math.hypot(b.cx - mx, b.cy - my)).slice(0, n).sort((a, b) => a.cy - b.cy);
+    if (L.joins) {
+      for (const [i, di, k, dk] of L.joins) joins.push({ weak: !!L.weak, file: L.file, where: `#${i + 1}${'URDL'[di]}-#${k + 1}${'URDL'[dk]}`, a: grid[i], ka: edgeToward(grid[i], di), b: grid[k], kb: edgeToward(grid[k], dk) });
+      continue;
+    }
     const at = [];
     for (let r = 0; r < L.rows; r++) at.push(grid.slice(r * L.cols, (r + 1) * L.cols).sort((a, b) => a.cx - b.cx));
     for (let r = 0; r < L.rows; r++) for (let c = 0; c < L.cols; c++) {
-      if (c + 1 < L.cols) joins.push({ file: L.file, where: `r${r + 1}c${c + 1}-right`, a: at[r][c], ka: edgeToward(at[r][c], 1), b: at[r][c + 1], kb: edgeToward(at[r][c + 1], 3) });
-      if (r + 1 < L.rows) joins.push({ file: L.file, where: `r${r + 1}c${c + 1}-down`, a: at[r][c], ka: edgeToward(at[r][c], 2), b: at[r + 1][c], kb: edgeToward(at[r + 1][c], 0) });
+      if (c + 1 < L.cols) joins.push({ weak: !!L.weak, file: L.file, where: `r${r + 1}c${c + 1}-right`, a: at[r][c], ka: edgeToward(at[r][c], 1), b: at[r][c + 1], kb: edgeToward(at[r][c + 1], 3) });
+      if (r + 1 < L.rows) joins.push({ weak: !!L.weak, file: L.file, where: `r${r + 1}c${c + 1}-down`, a: at[r][c], ka: edgeToward(at[r][c], 2), b: at[r + 1][c], kb: edgeToward(at[r + 1][c], 0) });
     }
   }
   if (process.env.PEELDBG) return;
@@ -105,10 +117,11 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
   PH.colTol = 15; // (what the reef box picture gives: report 2026-10-06 colTol 14.8)
   let typeOk = 0, top1 = 0, top3 = 0, shapeTop1 = 0, colPass = 0, colDoubt = 0, colN = 0, ties = 0;
   const rows = [];
+  const weak = { n: 0, top1: 0, top3: 0, type: 0 };
   for (const j of joins) for (const [P, k, Q, m] of [[j.a, j.ka, j.b, j.kb], [j.b, j.kb, j.a, j.ka]]) {
     const eP = P.t1.edges[k], eQ = Q.t1.edges[m];
     const comp = (eP.type === 'T' && eQ.type === 'B') || (eP.type === 'B' && eQ.type === 'T');
-    if (comp) typeOk++;
+    if (j.weak) weak.type += comp ? 1 : 0; else if (comp) typeOk++;
     const res = PH.findMatches({ id: P.id, t1: P.t1, t2: null }, pool.filter((o) => o !== P).map((o) => ({ id: o.id, t1: o.t1, t2: null })), { topN: 999 });
     const list = (res.find((r) => r.edge === k) || { matches: [] }).matches;
     // the true partner photographed again elsewhere: not a rival
@@ -118,15 +131,18 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
     const sh = PH.edgeScore(eP, eQ);
     let shapeRank = Infinity;
     if (sh) { shapeRank = 0; for (const o of pool) if (o !== P && o !== Q) for (const e of o.t1.edges) { const r2 = PH.edgeScore(eP, e); if (r2 && r2.shape < sh.shape && rival({ id: o.id })) shapeRank++; } }
-    if (rank === 0) top1++;
-    if (rank < 3) top3++;
-    if (shapeRank === 0) shapeTop1++;
-    if (iT >= 0 && list[iT].tie) ties++;
-    if (sh) { if (sh.colDoubt) colDoubt++; else if (sh.colShare !== undefined) { colN++; if (sh.colShare >= PH.COL_SHARE) colPass++; } }
+    if (j.weak) { weak.n++; if (rank === 0) weak.top1++; if (rank < 3) weak.top3++; } else {
+      if (rank === 0) top1++;
+      if (rank < 3) top3++;
+      if (shapeRank === 0) shapeTop1++;
+      if (iT >= 0 && list[iT].tie) ties++;
+      if (sh) { if (sh.colDoubt) colDoubt++; else if (sh.colShare !== undefined) { colN++; if (sh.colShare >= PH.COL_SHARE) colPass++; } }
+    }
     rows.push(`  ${j.file} ${j.where.padEnd(12)} ${P.t1.code}[${k}]=${eP.type} -> ${Q.t1.code}[${m}]=${eQ.type}  rank ${rank === Infinity ? 'none' : rank + 1}${iT >= 0 && list[iT].tie ? ' (tie)' : ''}  shape rank ${shapeRank === Infinity ? '-' : shapeRank + 1}  shape ${sh ? sh.shape.toFixed(3) : '-'}${sh ? ` strip ${sh.color.toFixed(1)} len ${(Math.log(eP.lenRel / eQ.lenRel) * 100).toFixed(1)}%` : ''}${iT >= 0 && process.env.SHOW > 1 ? ` | best: ${list.slice(0, 2).map((x) => `#${x.id} sh ${x.shape.toFixed(3)} strip ${x.color.toFixed(1)} sc ${x.score.toFixed(2)}`).join(', ')} | true sc ${list[iT].score.toFixed(2)}` : ''}  colour ${sh ? (sh.colDoubt ? 'untrusted: ' + sh.colDoubt : sh.colShare !== undefined ? (sh.colShare * 100).toFixed(0) + '% agree' : '-') : '-'}`);
   }
   if (process.env.SHOW) console.log(rows.join('\n'));
-  const N = joins.length * 2;
+  const N = joins.filter((j) => !j.weak).length * 2;
+  if (weak.n) console.log(`known-weak photos (lamp, cream counter): ${weak.n} join sides, tab<->blank ${weak.type}, partner first ${weak.top1}, top 3 ${weak.top3}`);
   console.log(`${N} join sides: partner first ${top1}, in top 3 ${top3}, first by shape alone ${shapeTop1}, near-ties ${ties}; colour agrees ${colPass}/${colN}${colDoubt ? `, untrusted ${colDoubt}` : ''}`);
   check('every true join reads tab <-> blank on both sides', typeOk === N, `${typeOk}/${N}`);
   check('the true partner ranks first for at least 65% of join sides', top1 >= 0.65 * N, `${top1}/${N}`);
