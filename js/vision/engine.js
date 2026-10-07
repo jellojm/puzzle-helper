@@ -944,7 +944,7 @@
       const tried = this.opts.autoBg !== false ? this.bgCandidates(proc).map((c) => this.scoreBg(proc, c, { splitBudgetMs: undefined })) : [];
       const snapBest = tried.length ? this.pickBg(tried) : null;
       const snapModel = snapBest ? snapBest.c : null;
-      let seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel } : { bg: this.bg, bgSmooth: 0.5 }));
+      let seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel, seamSplit: true } : { bg: this.bg, bgSmooth: 0.5, seamSplit: true }));
       if (snapModel) seg = this.photoFit(proc, seg, snapModel, tried) || seg;
       if (!this.bg) this.bg = seg.bg;
       if (!this.boardRef && seg.bg && seg.bg.L > 15) { this.boardRef = { L: seg.bg.L, a: seg.bg.a, b: seg.bg.b }; this.boardRefDirty = true; } // (a first photo sets the scan's board)
@@ -979,6 +979,19 @@
         if (!p) continue;
         p.sightings = (p.sightings || 0) + 1;
         if (d.t1 && PH.isCloseRead(d.t1) && p.t1 && PH.isCloseRead(p.t1)) p.photoRead = true;
+      }
+      // Pieces cut apart along a seam are joined: their 'J' edges, recorded as a
+      // confirmed join (as a Fits answer would; pockets use it).
+      { const groups = new Map();
+        for (const d of dets) if (d.seam && d.id && d.t1 && d.t1.seamEdge !== undefined) { const g = groups.get(d.seam.group) || []; g.push(d); groups.set(d.seam.group, g); }
+        for (const g of groups.values()) {
+          if (g.length !== 2) continue; // (three-piece groups: which edge meets which isn't known)
+          const [a, b] = g, A = this.pieces.get(a.id), B = this.pieces.get(b.id);
+          if (!A || !B || A === B || !A.t1 || !B.t1) continue;
+          const ka = A.t1.edges.findIndex((e) => e.seam === a.seam.group), kb = B.t1.edges.findIndex((e) => e.seam === b.seam.group);
+          if (ka < 0 || kb < 0) continue;
+          this.feedback({ kind: 'joined', a: A.id, ka, b: B.id, kb, source: 'seam' });
+        }
       }
       this.housekeep(Infinity);
       // (housekeeping may have merged entries: follow the photo's detections to the survivors)
@@ -1051,7 +1064,7 @@
       let best = { seg: seg0, ex: e0.ex };
       const trials = [];
       for (const c of cands.slice(0, 2)) {
-        const s = PH.segment(proc, this.segOpts({ bgModel: c.m, unitArea: c.u }));
+        const s = PH.segment(proc, this.segOpts({ bgModel: c.m, unitArea: c.u, seamSplit: true }));
         const e = this.explained(s.dets, s.unitArea);
         trials.push({ kind: c.m.kind, unit: Math.round(c.u), guess: Math.round(c.a), ex: Math.round(e.ex) });
         if (e.ex > best.ex * 1.02) best = { seg: s, ex: e.ex };
@@ -1939,6 +1952,7 @@
           // one piece's area in this crop's pixels, for the partial-outline check
           unitArea: F.unitArea ? F.unitArea / (scale * scale) * k * k : null });
         if (d.t1 && k < 1) PH.unscaleRead(d.t1, k, x0, y0);
+        if (d.t1 && d.seam) this.markSeamEdge(d, scale);
       } catch (e) { d.t1 = null; }
       if (why.seam) this.reject('seam', d);
       // Background scraps and half-detected pieces don't have 4 good corners.
@@ -1951,6 +1965,29 @@
       const fromSection = d.parent && d.parent.area >= 4 && d.parent.solidity >= 0.85;
       if (d.t1 && fromSection && d.t1.flats.some(Boolean) && this.cutSide(d.t1, F)) { this.reject('cutSide', d); d.t1 = null; d.notPiece = true; }
       return d.t1;
+    }
+    /** A part cut from pieces joined on the table (PH.splitSeam): its edge
+     *  along the cut - the one whose corners sit at a cut's two ends - is the
+     *  join itself. Read across a seam its shape is unreliable (the cut can
+     *  take a straight line across a tab), so it is typed 'J': never flat (no
+     *  false border piece), never matched (it is already joined). */
+    markSeamEdge(d, scale) {
+      const t1 = d.t1, c = t1.corners, side = t1.meanSide;
+      let best = null;
+      for (const cut of d.seam.cuts || []) {
+        const A = [cut.a[0] / scale, cut.a[1] / scale], B = [cut.b[0] / scale, cut.b[1] / scale];
+        for (let k = 0; k < 4; k++) {
+          const p = c[k], q = c[(k + 1) % 4];
+          const dd = Math.min(Math.hypot(p[0] - A[0], p[1] - A[1]) + Math.hypot(q[0] - B[0], q[1] - B[1]), Math.hypot(p[0] - B[0], p[1] - B[1]) + Math.hypot(q[0] - A[0], q[1] - A[1]));
+          if (!best || dd < best.dd) best = { k, dd };
+        }
+      }
+      if (!best || best.dd > 0.8 * side) return;
+      const e = t1.edges[best.k];
+      e.type = 'J'; e.unc = false; e.seam = d.seam.group;
+      t1.flats[best.k] = false;
+      t1.code = t1.edges.map((x) => x.type).join('');
+      t1.seamEdge = best.k;
     }
     reject(why, d) {
       this.rejects[why] = (this.rejects[why] || 0) + 1;
@@ -3012,6 +3049,7 @@
       const add = (o, k, fit) => { const b = o[k] || (o[k] = { n: 0, fits: 0 }); b.n++; if (fit) b.fits++; };
       const out = { judged: L.length, fits: 0, no: 0, byProb: {}, byRank: {}, byConfirmed: {}, loopOk: { n: 0, fits: 0 } };
       for (const e of L) {
+        if (e.source === 'seam') { out.judged--; continue; } // (a seam the app found, not the owner's answer)
         const fit = e.kind === 'joined';
         if (fit) out.fits++; else out.no++;
         add(out.byProb, bucket(e.prob), fit);
@@ -3029,6 +3067,12 @@
     feedback(f) {
       const A = this.pieces.get(f.a), B = this.pieces.get(f.b);
       if (!A || !B) return;
+      if (f.source === 'seam') { // a seam the app cut along: joined, logged (kept with the catalog), no answer-key data
+        this.fbLog.push({ t: Date.now(), kind: 'joined', a: f.a, ka: f.ka, b: f.b, kb: f.kb, source: 'seam' });
+        A.joined[f.ka] = true; B.joined[f.kb] = true;
+        this.touch(A); this.touch(B); this.version++;
+        return;
+      }
       // The answer key: what the app claimed about this pair when the owner
       // judged it. Fits/No taps are ground truth, so the log measures match
       // accuracy on the real puzzle, by confidence (see feedbackStats).

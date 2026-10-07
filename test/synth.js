@@ -219,20 +219,26 @@ function scatter(cv, P, opts) {
       const cw = b.cols * P.cs + 2 * ext, chh = b.rows * P.cs + 2 * ext;
       const crop = P.big.roi(new cv.Rect(bx, by, cw, chh)).clone();
       const mask = cv.Mat.zeros(chh, cw, cv.CV_8UC1);
+      // opts.seams: the seams between joined pieces drawn as a thin dark line
+      // (real joined pieces show one; without it a block is one seamless picture)
+      const seam = opts.seams ? cv.Mat.zeros(chh, cw, cv.CV_8UC1) : null;
       for (const p of members) {
         const flat = [];
         for (const [px, py] of p.poly) flat.push(Math.round(px + P.margin - bx), Math.round(py + P.margin - by));
         const pm = cv.matFromArray(flat.length / 2, 1, cv.CV_32SC2, flat), mv = new cv.MatVector(); mv.push_back(pm);
         cv.fillPoly(mask, mv, new cv.Scalar(255), cv.LINE_AA);
+        if (seam) cv.polylines(seam, mv, true, new cv.Scalar(255), Math.max(1, Math.round(1.2 / k)), cv.LINE_AA);
         pm.delete(); mv.delete();
       }
+      if (seam) { const er = new cv.Mat(), ke = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(7, 7)); cv.erode(mask, er, ke); cv.bitwise_and(seam, er, seam); er.delete(); ke.delete(); } // (inside the block only)
       const rot = rnd() * Math.PI * 2;
       const PS = Math.ceil(Math.hypot(cw, chh) * k * 1.05);
       const ccx = cw / 2, ccy = chh / 2, cs2 = Math.cos(rot) * k, sn2 = Math.sin(rot) * k;
       const M = cv.matFromArray(2, 3, cv.CV_64F, [cs2, -sn2, PS / 2 - (cs2 * ccx - sn2 * ccy), sn2, cs2, PS / 2 - (sn2 * ccx + cs2 * ccy)]);
-      const pc = new cv.Mat(), pmk = new cv.Mat();
+      const pc = new cv.Mat(), pmk = new cv.Mat(), psm = new cv.Mat();
       cv.warpAffine(crop, pc, M, new cv.Size(PS, PS), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0));
       cv.warpAffine(mask, pmk, M, new cv.Size(PS, PS), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0));
+      if (seam) cv.warpAffine(seam, psm, M, new cv.Size(PS, PS), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0));
       const ox = Math.round(x - PS / 2), oy = Math.round(TH + bandH / 2 - PS / 2);
       for (let yy = 0; yy < PS; yy++) for (let xx = 0; xx < PS; xx++) {
         const a = pmk.data[yy * PS + xx] / 255; if (!a) continue;
@@ -240,13 +246,15 @@ function scatter(cv, P, opts) {
         const ti = (ty * TW + tx) * 4, si = (yy * PS + xx) * 4;
         const gain = opts.gain || 0.93, off = opts.offset || 8, minSep = opts.minSep === undefined ? 70 : opts.minSep;
         let rr = pc.data[si] * gain + off, gg = pc.data[si + 1] * gain + off, bb = pc.data[si + 2] * gain + off;
+        if (seam) { const sd = 1 - 0.6 * psm.data[yy * PS + xx] / 255; rr *= sd; gg *= sd; bb *= sd; }
         const dr = rr - felt[0], dg = gg - felt[1], db = bb - felt[2], dd = Math.hypot(dr, dg, db);
         if (dd < minSep) { const k2 = dd > 1 ? minSep / dd : 0; if (k2) { rr = felt[0] + dr * k2; gg = felt[1] + dg * k2; bb = felt[2] + db * k2; } else rr = felt[0] + minSep; }
         bd[ti] = bd[ti] * (1 - a) + rr * a; bd[ti + 1] = bd[ti + 1] * (1 - a) + gg * a; bd[ti + 2] = bd[ti + 2] * (1 - a) + bb * a;
       }
       blockGt.push({ block: b, cells: members.map((p) => p.r * P.cols + p.c), x, y: TH + bandH / 2 });
       x += PS * 1.1;
-      [crop, mask, M, pc, pmk].forEach((m) => m.delete());
+      [crop, mask, M, pc, pmk, psm].forEach((m) => m.delete());
+      if (seam) seam.delete();
     }
     table.delete();
     cv.GaussianBlur(big, big, new cv.Size(3, 3), 0);

@@ -860,6 +860,25 @@
       parts[part] = { cnt: pieces[0], split: true, parent: { area: b.area / unitA, solidity: b.solidity } };
       for (const p of pieces.slice(1)) parts.push({ cnt: p, split: true, parent: { area: b.area / unitA, solidity: b.solidity } });
     }
+    // Pieces JOINED on the table (no gap: nothing above could cut them) - cut
+    // along the seam (PH.splitSeam). Photos only for now (opts.seamSplit): a
+    // clump costs ~0.1-1 s, too slow for live frames on the phone.
+    if (opts.seamSplit && unitA) {
+      let group = 0;
+      for (let i = 0, n0 = parts.length; i < n0; i++) {
+        const pt = parts[i];
+        if (pt.split) continue;
+        const a = cv.contourArea(pt.cnt);
+        if (a < PH.SEAM_MIN_UNITS * unitA || a > 3.2 * unitA) continue;
+        if (!labMat) { labMat = new cv.Mat(h, w, cv.CV_8UC3); labMat.data.set(lab); }
+        const pieces = PH.splitSeam(pt.cnt, labMat, unitA, w, h);
+        if (!pieces) continue;
+        pt.cnt.delete();
+        const seam = { group: ++group, cuts: pieces.cuts }, parent = { area: a / unitA, solidity: pt.solidity };
+        parts[i] = { cnt: pieces[0], split: true, seam, parent };
+        for (const p of pieces.slice(1)) parts.push({ cnt: p, split: true, seam, parent });
+      }
+    }
     if (labMat) labMat.delete();
     mark('split');
 
@@ -887,6 +906,7 @@
         bbox: [r.x, r.y, r.width, r.height],
         border,
         split: part.split,
+        seam: part.seam || null, // cut from pieces joined on the table: {group, cuts: [{a, b}] (proc px)}
         parent: part.parent || null, // a split part: its blob's size (in pieces) and solidity
         solidity: part.solidity, // area / convex hull (an assembled block is compact; a clump of loose pieces isn't)
         perim: cv.arcLength(cnt, true),
@@ -1184,6 +1204,167 @@
       if (more) { c.delete(); out.push(...more); } else out.push(c);
     }
     return out;
+  };
+  /**
+   * Cut pieces that are JOINED (pushed together, interlocked: no gap, so the
+   * notch and corner cuts find nothing straight to cut) along their seam -
+   * the thin dark line where they meet (owner's IMG_3621/3622: two pairs
+   * placed joined on purpose; owner: "read each piece"). The seam is found
+   * as the cheapest path between two of the outline's inward notches (where
+   * a seam meets the outline) through dark-line pixels (black-hat), not by
+   * a threshold: busy print (the urchin's dots) lights up a threshold
+   * everywhere and breaks the seam. Searched at a scale where a piece side
+   * is ~PH.SEAM_SIDE px. A cut is taken only when every part is piece-sized
+   * (0.55-1.6 units) and piece-shaped; parts still ~2 pieces are cut again.
+   * Returns contour Mats (frame px) or null.
+   */
+  PH.SEAM_SIDE = 110;     // px per piece side for the path search
+  PH.SEAM_MIN_UNITS = 1.35; // clumps from this many pieces' area are tried (a pair of small pieces: ~1.6)
+  PH.SEAM_COST = 6;       // a seam path's mean cost per pixel at most (1 = all dark line, 13 = none)
+  PH.SEAM_STEP = 0.3;     // seam ends tried every this many piece sides around the outline (and at notches)
+  PH.SEAM_SIGMA = 1.2;    // px (search scale): smoothing for the ridge (Hessian) part of the seam's lineness
+  PH.SEAM_PCT = 0.98;     // lineness at this percentile inside the clump counts as fully dark line
+  PH.splitSeam = function (cnt, labMat, unitA, w, h, depth) {
+    const cv = PH.cv;
+    depth = depth || 0;
+    const side = Math.sqrt(unitA / 1.1);
+    const br = cv.boundingRect(cnt);
+    const x0 = Math.max(0, br.x - 2), y0 = Math.max(0, br.y - 2);
+    const R = new cv.Rect(x0, y0, Math.min(w, br.x + br.width + 2) - x0, Math.min(h, br.y + br.height + 2) - y0);
+    const s = Math.min(1, PH.SEAM_SIDE / side); // search scale
+    const W = Math.max(8, Math.round(R.width * s)), H = Math.max(8, Math.round(R.height * s));
+    const blob = cv.Mat.zeros(R.height, R.width, cv.CV_8UC1), one = new cv.MatVector(), noH = new cv.Mat();
+    one.push_back(cnt);
+    cv.drawContours(blob, one, 0, new cv.Scalar(255), -1, cv.LINE_8, noH, 0, new cv.Point(-R.x, -R.y));
+    // dark thin lines (the seam) at the search scale
+    const roiView = labMat.roi(R), lab = roiView.clone(); roiView.delete();
+    const planes = new cv.MatVector(); cv.split(lab, planes); const L0 = planes.get(0);
+    const L = new cv.Mat(), mS = new cv.Mat();
+    cv.resize(L0, L, new cv.Size(W, H), 0, 0, cv.INTER_AREA);
+    cv.resize(blob, mS, new cv.Size(W, H), 0, 0, cv.INTER_NEAREST);
+    const kb = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(7, 7)), bh = new cv.Mat();
+    cv.morphologyEx(L, bh, cv.MORPH_BLACKHAT, kb);
+    const dist = new cv.Mat(); cv.distanceTransform(mS, dist, cv.DIST_L2, 3);
+    const M = mS.data, Dd = dist.data32F;
+    // lineness: a thin dark line in the black-hat AND as a ridge (largest
+    // Hessian eigenvalue of the lightness): the curved part of a seam round a
+    // tab is faint in the black-hat alone, and a straight shortcut across the
+    // tab's neck won. Each normalised to its own PH.SEAM_PCT percentile in the blob.
+    const Lf = new cv.Mat(), g = new cv.Mat(), dxx = new cv.Mat(), dyy = new cv.Mat(), dxy = new cv.Mat();
+    L.convertTo(Lf, cv.CV_32F); cv.GaussianBlur(Lf, g, new cv.Size(0, 0), PH.SEAM_SIGMA);
+    cv.Sobel(g, dxx, cv.CV_32F, 2, 0, 3); cv.Sobel(g, dyy, cv.CV_32F, 0, 2, 3); cv.Sobel(g, dxy, cv.CV_32F, 1, 1, 3);
+    const XX = dxx.data32F, YY = dyy.data32F, XY = dxy.data32F, Bh = bh.data;
+    const NN = W * H, ridge = new Float32Array(NN), inB = [], inR = [];
+    for (let p = 0; p < NN; p++) {
+      const t = (XX[p] + YY[p]) / 2, d = Math.sqrt(((XX[p] - YY[p]) / 2) ** 2 + XY[p] * XY[p]);
+      ridge[p] = Math.max(0, t + d);
+      if (M[p] && Dd[p] >= 2.5) { inB.push(Bh[p]); inR.push(ridge[p]); }
+    }
+    const pct = (a) => { if (!a.length) return 1; const z = a.slice().sort((x, y) => x - y); return Math.max(1e-3, z[Math.floor(z.length * PH.SEAM_PCT)]); };
+    const nB = pct(inB), nR = pct(inR);
+    const B = new Float32Array(NN);
+    for (let p = 0; p < NN; p++) B[p] = 25 * Math.max(Bh[p] / nB, ridge[p] / nR); // (25 = "fully dark line" in the cost below)
+    [Lf, g, dxx, dyy, dxy].forEach((m) => m.delete());
+    // the outline's inward notches, at the search scale (shallow ones too: a seam ends in a small notch)
+    const P = cnt.data32S;
+    let notches = [];
+    try {
+      const hull = new cv.Mat(), defects = new cv.Mat();
+      cv.convexHull(cnt, hull, false, false); cv.convexityDefects(cnt, hull, defects);
+      const D = defects.data32S;
+      for (let i = 0; i < D.length; i += 4) if (D[i + 3] / 256 >= 0.04 * side) notches.push({ x: (P[2 * D[i + 2]] - x0) * s, y: (P[2 * D[i + 2] + 1] - y0) * s, d: D[i + 3] / 256 });
+      hull.delete(); defects.delete();
+    } catch (e) { notches = []; }
+    notches.sort((a, b) => b.d - a.d); notches = notches.slice(0, 10);
+    // ... and points every ~PH.SEAM_STEP piece sides around the outline: pieces pushed
+    // flush meet the outline without a notch where the seam ends
+    const step = Math.max(4, Math.round(PH.SEAM_STEP * side)), nP = P.length / 2;
+    let along = 0;
+    for (let k = 1; k <= nP; k++) {
+      along += Math.hypot(P[2 * (k % nP)] - P[2 * (k - 1)], P[2 * (k % nP) + 1] - P[2 * (k - 1) + 1]);
+      if (along >= step) { along = 0; const x = (P[2 * (k % nP)] - x0) * s, y = (P[2 * (k % nP) + 1] - y0) * s; if (!notches.some((q) => Math.hypot(q.x - x, q.y - y) < 4)) notches.push({ x, y, d: 0 }); }
+    }
+    const free = () => [blob, one, noH, lab, planes, L0, L, mS, kb, bh, dist].forEach((m) => m.delete());
+    if (notches.length < 2) { free(); return null; }
+    // pixel cost: dark line cheap, else dear; hugging the outline dearer still (except near a notch)
+    const N = W * H, cost = new Float32Array(N);
+    const base = (p) => 1 + 12 * Math.max(0, 1 - B[p] / 25);
+    for (let p = 0; p < N; p++) cost[p] = !M[p] ? Infinity : base(p) + (Dd[p] < 2.5 ? 12 : 0);
+    const near = (q, f) => { const cx = Math.round(q.x), cy = Math.round(q.y); for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) { const x = cx + dx, y = cy + dy; if (x >= 0 && y >= 0 && x < W && y < H && M[y * W + x]) f(y * W + x, dx * dx + dy * dy); } };
+    for (const q of notches) near(q, (p) => { cost[p] = Math.min(cost[p], base(p)); }); // a path may start and end at a notch
+    const ends = notches.map((q) => { let bx = -1, bd = 1e9; near(q, (p, d2) => { if (d2 < bd) { bd = d2; bx = p; } }); return bx; }).filter((v) => v >= 0);
+    // Dijkstra from each notch (8-connected) with a small binary heap
+    const distA = new Float64Array(N), prev = new Int32Array(N), len = new Int32Array(N);
+    const nb = [-1, 1, -W, W, -W - 1, -W + 1, W - 1, W + 1], nbw = [1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2];
+    const cands = [];
+    for (let ai = 0; ai < ends.length; ai++) {
+      distA.fill(Infinity); prev.fill(-1);
+      const hk = [], hv = [];
+      const push = (k, v) => { hk.push(k); hv.push(v); let i = hk.length - 1; while (i > 0) { const pi = (i - 1) >> 1; if (hv[pi] <= hv[i]) break; const tk = hk[pi], tv = hv[pi]; hk[pi] = hk[i]; hv[pi] = hv[i]; hk[i] = tk; hv[i] = tv; i = pi; } };
+      const pop = () => {
+        const k = hk[0], v = hv[0], lk = hk.pop(), lv = hv.pop();
+        if (hk.length) {
+          hk[0] = lk; hv[0] = lv; let i = 0;
+          for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < hk.length && hv[l] < hv[m]) m = l; if (r < hk.length && hv[r] < hv[m]) m = r; if (m === i) break; const tk = hk[m], tv = hv[m]; hk[m] = hk[i]; hv[m] = hv[i]; hk[i] = tk; hv[i] = tv; i = m; }
+        }
+        return [k, v];
+      };
+      const a = ends[ai]; distA[a] = 0; len[a] = 0; push(a, 0);
+      while (hk.length) {
+        const [k, v] = pop();
+        if (v > distA[k]) continue;
+        const x = k % W;
+        for (let t = 0; t < 8; t++) {
+          const m = k + nb[t];
+          if (m < 0 || m >= N) continue;
+          if (Math.abs((m % W) - x) > 1) continue;
+          const c = cost[m]; if (c === Infinity) continue;
+          const nv = v + c * nbw[t];
+          if (nv < distA[m]) { distA[m] = nv; prev[m] = k; len[m] = len[k] + 1; push(m, nv); }
+        }
+      }
+      for (let bi = ai + 1; bi < ends.length; bi++) {
+        const b = ends[bi];
+        if (distA[b] === Infinity || len[b] < 0.6 * side * s) continue; // (a seam crosses the clump)
+        const mean = distA[b] / Math.max(1, len[b]);
+        if (mean > PH.SEAM_COST) continue;
+        const path = []; for (let k = b; k >= 0; k = prev[k]) path.push(k);
+        cands.push({ mean, path });
+      }
+    }
+    cands.sort((p, q) => p.mean - q.mean);
+    if (PH.DEBUG_SEAM) PH.DEBUG_SEAM({ notches: notches.length, ends: ends.length, cands: cands.length, best: cands.slice(0, 4).map((c) => +c.mean.toFixed(2)), scale: +s.toFixed(2) });
+    // the valid cuts among the cheapest few; the one whose parts look most
+    // like pieces wins (a shortcut through a tab leaves a poor part)
+    let best = null;
+    for (const c of cands.slice(0, 12)) {
+      const cutM = blob.clone(), th = Math.max(2, Math.ceil(1.5 / s));
+      for (let i = 1; i < c.path.length; i++) {
+        const a0 = c.path[i - 1], b0 = c.path[i];
+        cv.line(cutM, new cv.Point(Math.round((a0 % W) / s), Math.round(Math.floor(a0 / W) / s)), new cv.Point(Math.round((b0 % W) / s), Math.round(Math.floor(b0 / W) / s)), new cv.Scalar(0), th);
+      }
+      const cs = new cv.MatVector(), hh = new cv.Mat();
+      cv.findContours(cutM, cs, hh, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE, new cv.Point(R.x, R.y));
+      const parts = [];
+      for (let i = 0; i < cs.size(); i++) { const q = cs.get(i), ar = cv.contourArea(q); if (ar >= 0.25 * unitA) parts.push({ q, a: ar, sc: PH.pieceScore(q.data32S, ar) }); else q.delete(); }
+      cutM.delete(); cs.delete(); hh.delete();
+      const ok = parts.length >= 2 && parts.every(({ a: ar, sc }) => ar >= 0.55 * unitA && (ar <= 1.6 * unitA || (depth < 1 && ar <= 3.2 * unitA)) && (ar > 1.6 * unitA || sc > 0.05));
+      if (PH.DEBUG_SEAM) PH.DEBUG_SEAM({ cut: +c.mean.toFixed(2), parts: parts.map(({ a: ar, sc }) => (ar / unitA).toFixed(2) + 'u/' + sc.toFixed(2)), ok });
+      const q = ok ? Math.min(...parts.filter((p) => p.a <= 1.6 * unitA).map((p) => p.sc), 0.4) - 0.01 * c.mean : -Infinity;
+      const end = (k) => [(k % W) / s + x0, Math.floor(k / W) / s + y0];
+      if (ok && (!best || q > best.q)) { if (best) best.parts.forEach((p) => p.q.delete()); best = { q, parts, cut: { a: end(c.path[0]), b: end(c.path[c.path.length - 1]) } }; } else parts.forEach((p) => p.q.delete());
+    }
+    let out = null, cuts = null;
+    if (best) {
+      out = []; cuts = [best.cut];
+      for (const { q, a: ar } of best.parts) {
+        const more = ar > 1.6 * unitA ? PH.splitSeam(q, labMat, unitA, w, h, depth + 1) : null;
+        if (more) { q.delete(); out.push(...more); cuts.push(...more.cuts); } else if (ar <= 1.6 * unitA) out.push(q); else { q.delete(); out.forEach((z) => z.delete()); out = null; break; }
+      }
+    }
+    if (out) out.cuts = cuts; // where each cut met the outline (frame px): the joined edges
+    free();
+    return out && out.length >= 2 ? out : null;
   };
   PH.CORNER_MAX_UNITS = 4.5; // clumps up to ~4 pieces
   PH.CORNER_CUTS = 12; // cuts tried per clump (shortest first)

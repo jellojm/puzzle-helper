@@ -18,8 +18,8 @@ decision early changes the whole run), so a single run never decides.
 
 | Version | Milestone | State |
 |---|---|---|
-| 0.23.0 | The map stays true on long close-up sweeps | see below |
-| 0.23.1 | Joined pairs read piece by piece | next |
+| 0.23.0 | The map stays true on long close-up sweeps | published |
+| 0.23.1 | Joined pairs read piece by piece (photos) | see below |
 | 0.23.2 | Find mode: no clump as a partner; one verdict per pair | |
 | later | quality-failed close reads as agreement; shadow outlines; glass table | |
 
@@ -68,3 +68,36 @@ A/B against v0.22.2, CPU clock, 3 runs each (median [range]):
 
 Most unchecked entries on the counter video stay at "one close read" in
 both versions: the next lever is reads, not the map (see "later").
+
+## 0.23.1 — joined pairs read piece by piece (photos)
+
+Owner: small joined groups are read as separate pieces, the seam counting as
+a confirmed join. The pairs in IMG_3621 (1.58 pieces' area) and IMG_3622
+(~2) were never cut: the notch, corner and distance cuts need a gap or a
+neck, and a joined pair has neither.
+
+**Built:** `PH.splitSeam` - the seam as the cheapest path across the clump
+(Dijkstra) between two outline points (notches, and points every 0.3 piece
+side: pieces pushed flush meet the outline without a notch), through
+"lineness" (black-hat and a Hessian ridge of the lightness, each against
+its own 98th percentile in the clump), never hugging the outline; searched
+at ~110 px a side. Among the 12 cheapest paths the one whose parts look
+most like pieces wins; a cut is taken only when every part is 0.55-1.6
+pieces and piece-shaped (single pieces were never cut on any photo). For
+clumps of 1.35-3.2 pieces left unsplit, **photos only** (0.1-1 s a clump on
+the PC: too slow for live frames on the phone).
+
+The path often takes a straight line across a tab's neck instead of round
+the tab (the seam round a tab is faint against busy print), so the edge
+along the cut is unreliable: `Engine.markSeamEdge` types it 'J' - never
+flat (no false border piece), never matched - and the pair is recorded as
+joined on those edges (`feedback` with `source: 'seam'`, kept out of the
+answer statistics). The other three edges read normally.
+
+Labelled photos: known-weak pieces read 16 -> 20 of 21 (IMG_3621 2 -> 4,
+IMG_3622 2 -> 4); join sides measured 22 -> 30, top 3 11 -> 14 (first 9 ->
+8). Main photo checks unchanged.
+
+Next for joined pairs: live frames (budget: one clump per still frame), and
+following the seam round the tab (a better line detector at the seam's own
+scale) so the seam edge can be read too.

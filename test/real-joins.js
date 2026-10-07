@@ -182,9 +182,10 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
   if (process.env.SHOW) console.log(rows.join('\n'));
   const N = joins.filter((j) => !j.weak).length * 2;
   if (weak.n) console.log(`known-weak photos (lamp, cream counter): ${weak.n} join sides, tab<->blank ${weak.type}, partner first ${weak.top1}, top 3 ${weak.top3}`);
-  // v0.22.1: 16 of the 21 pieces in them (4 of the 5 left are inside the
-  // joined pairs of IMG_3621/3622, not cut apart yet); v0.22.0 read 11
-  check('known-weak photos: no fewer pieces read than v0.22.1', weakRead >= 16, `${weakRead} of 21 pieces read`);
+  // v0.23.1: 20 of the 21 pieces in them (the joined pairs of IMG_3621/3622
+  // cut along their seams; left: IMG_3627's piece joined to its shadow);
+  // v0.22.1 read 16, v0.22.0 11
+  check('known-weak photos: no fewer pieces read than v0.23.1', weakRead >= 20, `${weakRead} of 21 pieces read`);
   console.log(`${N} join sides: partner first ${top1}, in top 3 ${top3}, first by shape alone ${shapeTop1}, near-ties ${ties}; colour agrees ${colPass}/${colN}${colDoubt ? `, untrusted ${colDoubt}` : ''}`);
   check('every true join reads tab <-> blank on both sides', typeOk === N, `${typeOk}/${N}`);
   check('the true partner ranks first for at least 65% of join sides', top1 >= 0.65 * N, `${top1}/${N}`);

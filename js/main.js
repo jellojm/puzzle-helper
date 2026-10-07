@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.23.0';
+const APP_VERSION = '0.23.1';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -953,7 +953,7 @@ function pointInPoly(x, y, pts) {
 }
 
 // ---------- find panel ----------
-const SIDE = { T: 'tab', B: 'blank', F: 'flat edge' };
+const SIDE = { T: 'tab', B: 'blank', F: 'flat edge', J: 'joined to its neighbour (seam)' };
 // Plain-words match verdicts (PH.matchVerdict): what the percentage means.
 // Why colour couldn't be trusted for a fit (PH.colourDoubt)
 const COLOUR_DOUBT = {
