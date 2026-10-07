@@ -2347,10 +2347,91 @@
       const res = PH.findMatches(P, all, { topN: 5, skip: this.skipFn(), nullOdds: (k) => this.nullOdds(P, k).odds });
       for (const r of res) r.spot = this.nullOdds(P, r.edge).spot;
       if (opts && opts.loops) PH.confirmWithLoops(res, PH.findLoops(P, all, { K: 6, skip: this.skipFn() }));
+      this.applyPockets(P, res, all);
       for (const r of res) if (P.joined[r.edge]) r.matches = [];
       this.calibrateMatches(P, res, all);
       this.matchCache.set(id, { version: this.version, res, loops: !!(opts && opts.loops) });
       return res;
+    }
+    /** The owner's confirmed joins (Fits): id -> [4] of {id, edge} or null. */
+    confirmedJoins() {
+      if (this.cjCache && this.cjCache.v === this.version) return this.cjCache.map;
+      const map = new Map();
+      const set = (a, ka, b, kb) => { if (!map.has(a)) map.set(a, [null, null, null, null]); map.get(a)[ka] = { id: b, edge: kb }; };
+      for (const e of this.fbLog || []) {
+        if (e.kind !== 'joined') continue;
+        const a = this.finalId(e.a), b = this.finalId(e.b);
+        if (a === b || !this.pieces.has(a) || !this.pieces.has(b)) continue;
+        set(a, e.ka, b, e.kb); set(b, e.kb, a, e.ka);
+      }
+      this.cjCache = { v: this.version, map };
+      return map;
+    }
+    /** Pockets (owner, 2026-10-07: "the last piece in a 4 set would not show a
+     *  match - it only looks at one edge, not both"): piece A joined on two
+     *  neighbouring edges, to B and C, leaves an inside corner the next piece
+     *  must fit on TWO edges at once - B's edge eB and C's edge eC. Same
+     *  geometry as PH.findLoops (edges clockwise from the top): B at A's side
+     *  k, C at side k+1; the filler's edge facing B is eD, facing C eD-1. */
+    pockets() {
+      if (this.pkCache && this.pkCache.v === this.version) return this.pkCache.list;
+      const J = this.confirmedJoins(), out = [], mod = (x) => ((x % 4) + 4) % 4;
+      for (const [a, E] of J) for (let k = 0; k < 4; k++) {
+        const jb = E[k], jc = E[mod(k + 1)];
+        if (!jb || !jc || jb.id === jc.id) continue;
+        const eB = mod(k + 1 - mod(k + 2 - jb.edge)), eC = mod(k - mod(k + 3 - jc.edge));
+        const B = this.pieces.get(jb.id), C = this.pieces.get(jc.id);
+        if (!B || !C || !B.t1 || !C.t1 || B.t1.edges[eB].type === 'F' || C.t1.edges[eC].type === 'F') continue;
+        const JB = J.get(jb.id), JC = J.get(jc.id);
+        if ((JB && JB[eB]) || (JC && JC[eC])) continue; // already filled
+        out.push({ a, b: jb.id, eB, c: jc.id, eC, filler: undefined });
+      }
+      this.pkCache = { v: this.version, list: out };
+      return out;
+    }
+    /** How well X fills pocket pk: both edges at once, over X's 4 turns. */
+    pocketFit(X, pk) {
+      const B = this.pieces.get(pk.b), C = this.pieces.get(pk.c);
+      let best = null;
+      for (let eD = 0; eD < 4; eD++) {
+        const eD2 = (eD + 3) % 4;
+        const sB = PH.edgeScore(X.t1.edges[eD], B.t1.edges[pk.eB]);
+        const sC = sB && PH.edgeScore(X.t1.edges[eD2], C.t1.edges[pk.eC]);
+        if (!sC || sB.score > PH.POCKET_EDGE || sC.score > PH.POCKET_EDGE) continue;
+        const score = sB.score + sC.score;
+        if (score > PH.POCKET_SUM) continue;
+        if (!best || score < best.score) best = { eD, eD2, sB, sC, score };
+      }
+      return best;
+    }
+    /** Mark the pocket fits among P's candidates as closed loops (both
+     *  edges fit pieces known to be joined) - for the best filler of each
+     *  pocket, seen from the filler and from both walls. */
+    applyPockets(P, res, all) {
+      const pks = this.pockets();
+      if (!pks.length) return;
+      const mark = (r, id, edge, sc) => {
+        if (!r) return;
+        let m = r.matches.find((x) => x.id === id && x.edge === edge);
+        if (!m) { m = Object.assign({ id, edge, pSoft: 0.2 }, sc, { id, edge }); r.matches.push(m); }
+        m.loopOk = true; m.loops = 2; m.pocket = true;
+      };
+      for (const pk of pks) {
+        if (P.id === pk.a) continue;
+        if (pk.filler === undefined) {
+          pk.filler = null;
+          for (const X of all) {
+            if (X.id === pk.a || X.id === pk.b || X.id === pk.c || !X.t1) continue;
+            const f = this.pocketFit(X, pk);
+            if (f && (!pk.filler || f.score < pk.filler.f.score)) pk.filler = { id: X.id, f };
+          }
+        }
+        const F = pk.filler;
+        if (!F) continue;
+        if (P.id === F.id) { mark(res[F.f.eD], pk.b, pk.eB, F.f.sB); mark(res[F.f.eD2], pk.c, pk.eC, F.f.sC); }
+        else if (P.id === pk.b) mark(res[pk.eB], F.id, F.f.eD, F.f.sB);
+        else if (P.id === pk.c) mark(res[pk.eC], F.id, F.f.eD2, F.f.sC);
+      }
     }
     // Q's best partner on edge e (cached per catalog version).
     bestOf(Q, e, all) {

@@ -350,6 +350,12 @@
     return res;
   };
   PH.LOOP_CONF = 0.9;
+  // Pockets (Engine.pockets): two edges fitting at once are stronger evidence
+  // than either alone, so one may be weak (colour off) as long as the pair
+  // together stays below twice the "partner not catalogued" level
+  // (test/pockets.js: true fillers had one edge at 3.4-5.8 with shapes 0.04-0.07).
+  PH.POCKET_EDGE = 6.0;
+  PH.POCKET_SUM = 6.0;
   // "Fill this spot" (Engine.fillSpot): weight of the fit with the pieces
   // around the spot vs the picture. test/solve-aids.js: right piece first
   // 74/80 at 0.6-1 (65/80 at 0, 64/80 by the picture alone).
