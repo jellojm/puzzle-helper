@@ -2,7 +2,7 @@
  * older commit vs the working tree, run in turns (A B A B ...), side by side.
  *   node tools/ab.js <ref> <test.js> [test args] [--runs 3] [--clock model]
  *   node tools/ab.js v0.22.2 test/real-50.js 3605 --runs 3
- * The old engine comes from `git archive <ref> js/vision` into the system's
+ * The old engine comes from `git show <ref>:js/vision/*` into the system's
  * temp folder (no worktree, nothing in .git to clean up). Each run writes its
  * RESULT line (test/lib/results.js); the summary shows each metric's median
  * [min-max] for A (ref) and B (working tree) and the paired median change.
@@ -23,10 +23,12 @@ const [ref, testFile, ...testArgs] = argv;
 if (!ref || !testFile) { console.log('usage: node tools/ab.js <ref> <test.js> [args] [--runs N] [--clock model|cpu]'); process.exit(1); }
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ph-ab-'));
-const tar = path.join(dir, 'vision.tar');
-execFileSync('git', ['archive', '-o', tar, ref, 'js/vision'], { cwd: ROOT });
-execFileSync('tar', ['-xf', tar, '-C', dir]);
 const visionA = path.join(dir, 'js', 'vision');
+fs.mkdirSync(visionA, { recursive: true });
+// (each file by `git show`: no archive tool needed - GNU tar on Windows reads C:\ as a host)
+for (const f of execFileSync('git', ['ls-tree', '--name-only', ref, 'js/vision/'], { cwd: ROOT, encoding: 'utf8' }).split(/\r?\n/).filter(Boolean)) {
+  fs.writeFileSync(path.join(visionA, path.basename(f)), execFileSync('git', ['show', `${ref}:${f}`], { cwd: ROOT, maxBuffer: 64 << 20 }));
+}
 
 function run(side) {
   return new Promise((resolve) => {

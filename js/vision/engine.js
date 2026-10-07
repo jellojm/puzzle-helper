@@ -67,6 +67,7 @@
       this.rejects = {}; // why detections were not catalogued (reports)
       this.boardRef = null; this.boardSeen = null; // the scan's board colour (noteBoard)
       this.boardRecent = []; // the board's lightness in recent frames (odd-light check)
+      this.views = null; this.mapSolves = 0; this.lastSolve = null; // kept views of the map (solveMap)
     }
 
     // ---------- catalog helpers ----------
@@ -487,6 +488,7 @@
       if (!sOk || !enough) return false;
       this.pose = T;
       this.island = main.isl;
+      if (PH.MAP_SOLVE && main.g.length >= 3) this.noteView(main.isl, main.g); // (kept for solveMap)
       // Outliers: a confidently tracked piece that disagrees with the consensus moved.
       const inl = new Set(res.inliers);
       const frozen = this.frameCtx && this.frameCtx.offLight; // (odd light: pieces anchor the pose, nothing is moved)
@@ -494,12 +496,26 @@
         if (frozen) { if (!inl.has(k)) pr.d.id = null; return; }
         if (inl.has(k)) {
           // gentle refinement keeps the map consistent
-          const q = PH.simApply(T, pr.src[0], pr.src[1]);
-          pr.p.pos = [pr.p.pos[0] * 0.9 + q[0] * 0.1, pr.p.pos[1] * 0.9 + q[1] * 0.1];
-        } else if (pr.d.tracked && pr.d.linkSim > 0.7) {
-          pr.p.pos = PH.simApply(T, pr.src[0], pr.src[1]);
-          this.markMoved(pr.p);
-          this.touch(pr.p);
+          const q = PH.simApply(T, pr.src[0], pr.src[1]), b = PH.POS_BLEND;
+          pr.p.pos = [pr.p.pos[0] * (1 - b) + q[0] * b, pr.p.pos[1] * (1 - b) + q[1] * b];
+        } else if (PH.POSE_MOVES && pr.d.tracked && pr.d.linkSim > 0.7) {
+          // A tracked piece the pose disagrees with: moved only when it is far
+          // from its spot. Nearer, it is the map's own error - owner's videos
+          // (no piece moved): 98 and 30 such "moves", 0.42-1.64 piece sides,
+          // each one shifting a piece off its true place.
+          const q = PH.simApply(T, pr.src[0], pr.src[1]), dist = Math.hypot(pr.p.pos[0] - q[0], pr.p.pos[1] - q[1]) / unitT;
+          if (PH.DEBUG_MOVE) PH.DEBUG_MOVE(pr.p.id, dist, res.inliers.length, main.g.length, this.fNo);
+          if (dist >= PH.MOVE_MIN) {
+            pr.p.pos = q;
+            this.markMoved(pr.p);
+            this.touch(pr.p);
+            this.rejects.poseMoved = (this.rejects.poseMoved || 0) + 1;
+          } else if (!PH.MOVE_KEEP) pr.d.id = null;
+          else { // still linked; its spot moves part of the way to where this frame sees it
+            const w = PH.MOVE_W;
+            pr.p.pos = [pr.p.pos[0] * (1 - w) + q[0] * w, pr.p.pos[1] * (1 - w) + q[1] * w];
+            this.rejects.poseKept = (this.rejects.poseKept || 0) + 1;
+          }
         } else {
           pr.d.id = null;
         }
@@ -874,6 +890,7 @@
       this.frameNo = (this.frameNo || 0) + 1;
       tw = now();
       this.housekeep(this.opts.housekeepMs === undefined ? 4 : this.opts.housekeepMs);
+      if (PH.MAP_SOLVE && this.fNo % PH.MAP_SOLVE_EVERY === 0) this.solveMap();
       wT.house = now() - tw; tw = now();
       this.tracks = dets.map((d) => ({ id: d.id, cid: d.cid, x: d.cx, y: d.cy, fp: d.fp }));
       const pfOut = this.puzzleFrameOut(proc, pfFound); // (also sets this.pfViewH for the spots)
@@ -1260,7 +1277,80 @@
     /** A piece that physically moved: the map keeps drawing its picture
      *  (following its new position) but its angle is out of date until the
      *  next live read places it again. */
-    markMoved(p) { if (p.rd) p.rd.stale = true; }
+    markMoved(p) { if (p.rd) p.rd.stale = true; p.movedF = this.fNo; } // (solveMap: its views from before don't count)
+    /** One frame's view of the map: which pieces it saw where (processing
+     *  px), for solveMap. The last PH.MAP_VIEWS are kept. */
+    noteView(island, g) {
+      const V = this.views || (this.views = []);
+      V.push({ f: this.fNo, island, pts: g.map((pr) => [pr.p.id, pr.src[0], pr.src[1]]) });
+      if (V.length > PH.MAP_VIEWS) V.shift();
+    }
+    /** The map from many views at once. Each frame only fits the few pieces
+     *  in view, and its small errors pile up over a long close-up sweep
+     *  (owner's counter video: pieces 1-5 piece sides off their true place;
+     *  a returning piece then misses its spot and becomes a new entry).
+     *  Here the kept views are solved together: each view's similarity and
+     *  each piece's position, alternately (positions = weighted mean of where
+     *  the views put the piece; views = weighted fit to the positions;
+     *  weights fall off past 0.3 piece sides, nothing past 2: a wrong link
+     *  or a moved piece). The result is fitted back onto the old map as a
+     *  whole, so the map doesn't jump - only its inner errors change. */
+    solveMap() {
+      const V = this.views, u = this.unitTable();
+      if (!V || V.length < 10 || !u) return null;
+      const stats = { islands: 0, pieces: 0, moved: 0, maxMove: 0 };
+      const islands = new Set(V.map((v) => v.island));
+      for (const isl of islands) {
+        // the observations still valid: piece on this island, not gone, not moved since
+        const views = [];
+        for (const v of V) {
+          if (v.island !== isl) continue;
+          const pts = v.pts.filter(([id]) => { const p = this.pieces.get(id); return p && p.pos && !p.gone && p.island === isl && (p.movedF === undefined || v.f >= p.movedF); });
+          if (pts.length >= 3) views.push({ pts, T: null });
+        }
+        if (views.length < 10) continue;
+        const P = new Map(); // id -> [x, y] being solved
+        const cnt = new Map();
+        for (const v of views) for (const [id] of v.pts) cnt.set(id, (cnt.get(id) || 0) + 1);
+        for (const [id, n] of cnt) if (n >= 2) P.set(id, this.pieces.get(id).pos.slice());
+        if (P.size < 4) continue;
+        const wOf = (r) => (r > 2 ? 0 : r < 0.3 ? 1 : 0.3 / r);
+        const fitView = (v) => { // weighted similarity, the view's px -> P
+          const src = [], dst = [], w = [];
+          for (const [id, x, y] of v.pts) { const q = P.get(id); if (!q) continue; let ww = 1; if (v.T) { const a = PH.simApply(v.T, x, y); ww = wOf(Math.hypot(a[0] - q[0], a[1] - q[1]) / u); } if (ww > 0) { src.push([x, y]); dst.push(q); w.push(ww); } }
+          v.T = src.length >= 3 ? PH.simFitW(src, dst, w) || v.T : v.T;
+        };
+        for (const v of views) fitView(v);
+        for (let it = 0; it < PH.MAP_ITERS; it++) {
+          const acc = new Map();
+          for (const v of views) {
+            if (!v.T) continue;
+            for (const [id, x, y] of v.pts) {
+              const q = P.get(id); if (!q) continue;
+              const a = PH.simApply(v.T, x, y), ww = wOf(Math.hypot(a[0] - q[0], a[1] - q[1]) / u);
+              if (!ww) continue;
+              const s0 = acc.get(id) || [0, 0, 0]; s0[0] += a[0] * ww; s0[1] += a[1] * ww; s0[2] += ww; acc.set(id, s0);
+            }
+          }
+          for (const [id, s0] of acc) if (s0[2] >= 1.5) P.set(id, [s0[0] / s0[2], s0[1] / s0[2]]);
+          for (const v of views) fitView(v);
+        }
+        // back onto the old map as a whole (no jump), then applied
+        const ids = [...P.keys()];
+        const G = PH.simFit(ids.map((id) => P.get(id)), ids.map((id) => this.pieces.get(id).pos));
+        if (!G) continue;
+        stats.islands++;
+        for (const id of ids) {
+          const p = this.pieces.get(id), q = PH.simApply(G, P.get(id)[0], P.get(id)[1]);
+          const d = Math.hypot(q[0] - p.pos[0], q[1] - p.pos[1]) / u;
+          stats.pieces++; if (d > 0.1) stats.moved++; if (d > stats.maxMove) stats.maxMove = d;
+          p.pos = q;
+        }
+      }
+      stats.maxMove = +stats.maxMove.toFixed(2);
+      this.mapSolves = (this.mapSolves || 0) + 1; this.lastSolve = stats;
+      return stats;
+    }
     /** Everything the Table view needs, for every catalogued entry. */
     mapData() {
       const doubt = this.cornerDoubts();
@@ -3592,6 +3682,15 @@
   // sharpness is smeared (owner's counter video IMG_3605: the blurrier of two
   // reads under ~30 agreed 34% of the time, over 60: 85%)
   PH.SHARP_REL = 0.6;
+  PH.MAP_SOLVE = true;   // re-solve the map from the kept views (Engine.solveMap) ...
+  PH.MAP_VIEWS = 300;    // ... the last this many views ...
+  PH.MAP_SOLVE_EVERY = 30; // ... every this many frames ...
+  PH.MAP_ITERS = 20;     // ... alternating this many times (corrections travel ~one view per round)
+  PH.POS_BLEND = 0.1;    // each steady frame moves a pose inlier this share toward where the frame sees it
+  PH.POSE_MOVES = true;  // a tracked piece the pose disagrees with is taken as moved (relocated on the map) ...
+  PH.MOVE_MIN = 2;       // ... when it is at least this many piece sides from its spot
+  PH.MOVE_KEEP = true;   // nearer: kept linked (true) or unlinked (false) ...
+  PH.MOVE_W = 0.25;      // ... and moved this share of the way to where the frame sees it
   PH.PHOTO_FIT = 0.75; // a photo explaining less of its pieces' area than this as single pieces searches (Engine.photoFit)
   PH.PAL_MIN = 1.2e-4; // a box-palette bin at least as common as an even spread counts as "a puzzle colour"
   PH.PAL_SHARE = 0.5;  // share of a blob's pixels in puzzle colours

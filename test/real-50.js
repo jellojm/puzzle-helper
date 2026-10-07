@@ -195,7 +195,8 @@ const FLOOR = CASE.floor || {};
   if (study) for (const r of study.reads) { const e = eng.pieces.get(eng.finalId(r.id)); r.fid = e ? e.id : null; r.state = e ? (e.state || 'checking') : 'gone'; r.fAgree = e ? e.closeAgree || 0 : null; }
   // the run's numbers, kept in test/results/history.jsonl (tools/trend.js)
   const M = { checked, entries: c.entries, unchecked: c.unchecked, maxChecked, firstAt: firstAt === null ? null : +firstAt.toFixed(1), at30, border: c.border, corner: c.corner, islands: c.islands, frames: n,
-    whyUnchecked: eng.whyUnchecked ? eng.whyUnchecked() : null, stretchAgree: eng.rejects.stretchAgree || 0 };
+    whyUnchecked: eng.whyUnchecked ? eng.whyUnchecked() : null, stretchAgree: eng.rejects.stretchAgree || 0,
+    poseMoved: eng.rejects.poseMoved || 0, mapSolves: eng.mapSolves || 0, lastSolve: eng.lastSolve || null };
   if (study) study.entries = [...eng.pieces.values()].map((e) => ({ id: e.id, state: e.state || 'checking', pos: e.pos, island: e.island, gone: !!e.gone, closeAgree: e.closeAgree || 0, close: !!(e.t1 && PH.isCloseRead(e.t1)), code: e.t1 ? e.t1.code : null, sightings: e.sightings || 0 })), study.unit = eng.unitTable ? eng.unitTable() : null;
   if (study && !fs.existsSync(KEY)) { fs.writeFileSync(process.env.READSTUDY, JSON.stringify(study)); console.log(`read study: ${study.reads.length} close reads -> ${process.env.READSTUDY}`); }
   if (fs.existsSync(KEY) && VARIANT !== 'overview') {

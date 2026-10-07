@@ -161,6 +161,23 @@
     return { a, b, tx: dx - (a * sx - b * sy), ty: dy - (b * sx + a * sy) };
   };
 
+  // Weighted similarity fit (least squares, weights w[i] >= 0).
+  PH.simFitW = function (src, dst, w) {
+    const n = src.length;
+    let W = 0, sx = 0, sy = 0, dx = 0, dy = 0;
+    for (let i = 0; i < n; i++) { W += w[i]; sx += src[i][0] * w[i]; sy += src[i][1] * w[i]; dx += dst[i][0] * w[i]; dy += dst[i][1] * w[i]; }
+    if (W <= 0) return null;
+    sx /= W; sy /= W; dx /= W; dy /= W;
+    let num1 = 0, num2 = 0, den = 0;
+    for (let i = 0; i < n; i++) {
+      const px = src[i][0] - sx, py = src[i][1] - sy, qx = dst[i][0] - dx, qy = dst[i][1] - dy;
+      num1 += (px * qx + py * qy) * w[i]; num2 += (px * qy - py * qx) * w[i]; den += (px * px + py * py) * w[i];
+    }
+    if (den < 1e-9) return null;
+    const a = num1 / den, b = num2 / den;
+    return { a, b, tx: dx - (a * sx - b * sy), ty: dy - (b * sx + a * sy) };
+  };
+
   // RANSAC similarity. pairs: [{src:[x,y], dst:[x,y]}]. Returns {T, inliers:[idx]} or null.
   PH.simRansac = function (pairs, tol, iters, rnd) {
     const n = pairs.length;
