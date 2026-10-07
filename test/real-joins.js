@@ -52,8 +52,8 @@ const LAYOUTS = [
   { file: 'IMG_3625.JPG', n: 2, joins: [[0, 1, 1, 0]], what: 'yellow fish pair (joined in IMG_3618), both turned', weak: true },
   // a look-alike: the middle piece has the same print but fits neither (owner,
   // 2026-10-07, edges marked in blue: top's bottom blank <-> bottom's right
-  // tab). Strong lamp shadows: v0.22.0 reads none of the three (the photo's
-  // background check picks a model that joins each piece to its shadow).
+  // tab). Strong lamp shadows: v0.22.0 read none of the three (a background
+  // model that joins each piece to its shadow); v0.22.1 2 (Engine.photoFit).
   // two loose pieces beside a joined pair (owner, 2026-10-07, joins marked in
   // colour): top-left's bottom tab <-> the pair's upper piece's left blank;
   // bottom-left's top blank <-> the pair's lower piece's left tab; top-left's
@@ -103,10 +103,12 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
   };
 
   const pool = [], joins = [];
+  let weakRead = 0; // pieces read in the known-weak photos (a floor: no slipping back)
   for (const L of LAYOUTS) {
     if (process.env.PEELDBG) console.log(L.file);
     const ps = read(L.file);
     pool.push(...ps);
+    if (L.weak) weakRead += Math.min(ps.length, L.n || L.cols * L.rows);
     // the layout: the rows by height, each row left to right (pieces cut by
     // the photo's edge are never read)
     const n = L.n || L.cols * L.rows;
@@ -180,6 +182,9 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
   if (process.env.SHOW) console.log(rows.join('\n'));
   const N = joins.filter((j) => !j.weak).length * 2;
   if (weak.n) console.log(`known-weak photos (lamp, cream counter): ${weak.n} join sides, tab<->blank ${weak.type}, partner first ${weak.top1}, top 3 ${weak.top3}`);
+  // v0.22.1: 16 of the 21 pieces in them (4 of the 5 left are inside the
+  // joined pairs of IMG_3621/3622, not cut apart yet); v0.22.0 read 11
+  check('known-weak photos: no fewer pieces read than v0.22.1', weakRead >= 16, `${weakRead} of 21 pieces read`);
   console.log(`${N} join sides: partner first ${top1}, in top 3 ${top3}, first by shape alone ${shapeTop1}, near-ties ${ties}; colour agrees ${colPass}/${colN}${colDoubt ? `, untrusted ${colDoubt}` : ''}`);
   check('every true join reads tab <-> blank on both sides', typeOk === N, `${typeOk}/${N}`);
   check('the true partner ranks first for at least 65% of join sides', top1 >= 0.65 * N, `${top1}/${N}`);

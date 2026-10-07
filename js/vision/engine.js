@@ -923,9 +923,11 @@
       // (scored without the live split budget: a photo is analysed once, and
       // with 40 ms the choice depended on the machine's speed - test
       // glass-table pieces-1 flipped to a wrong model and 1 piece)
-      const snapBest = this.opts.autoBg !== false ? this.chooseBackground(proc, { splitBudgetMs: undefined }) : null;
+      const tried = this.opts.autoBg !== false ? this.bgCandidates(proc).map((c) => this.scoreBg(proc, c, { splitBudgetMs: undefined })) : [];
+      const snapBest = tried.length ? this.pickBg(tried) : null;
       const snapModel = snapBest ? snapBest.c : null;
-      const seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel } : { bg: this.bg, bgSmooth: 0.5 }));
+      let seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel } : { bg: this.bg, bgSmooth: 0.5 }));
+      if (snapModel) seg = this.photoFit(proc, seg, snapModel, tried) || seg;
       if (!this.bg) this.bg = seg.bg;
       if (!this.boardRef && seg.bg && seg.bg.L > 15) { this.boardRef = { L: seg.bg.L, a: seg.bg.a, b: seg.bg.b }; this.boardRefDirty = true; } // (a first photo sets the scan's board)
       this.frameCtx = { source, scale: proc.scale, bg: seg.bg, thresh: seg.thresh, lut: seg.lut, unitArea: seg.unitArea, still: true, deadline: Infinity, fg: seg.fg, procW: proc.w, procH: proc.h };
@@ -977,6 +979,67 @@
         ms: now() - t0,
         counts: this.counts(),
       };
+    }
+
+    /** How much of a segmentation is explained as whole, well-shaped single
+     *  pieces: the area of detections within 0.7-1.4x the piece size u, each
+     *  weighted by its corner score (full from PH.UNIT_SURE); with pairs > 0,
+     *  blobs of 1.6-2.5x count that share of their area too (two touching
+     *  pieces a split can separate). Also the area of all detections (not
+     *  cut by the photo's edge). */
+    explained(dets, u, pairs) {
+      let ex = 0, all = 0;
+      for (const d of dets) {
+        if (d.border) continue;
+        all += d.area;
+        if (!u) continue;
+        const r = d.area / u;
+        if (r >= 0.7 && r <= 1.4) ex += d.area * Math.min(1, (d.score !== undefined ? d.score : PH.pieceScore(d.pts, d.area)) / PH.UNIT_SURE);
+        else if (pairs && r >= 1.6 && r <= 2.5) ex += d.area * pairs;
+      }
+      return { ex, all };
+    }
+    /** A photo whose first segmentation explains little of what is on the
+     *  table as single pieces gets a search: the best background models, each
+     *  at the piece sizes its own blobs suggest (each clean blob's area, half
+     *  of each blob - two touching pieces), keeping whichever explains the
+     *  most. Close-ups of a few big pieces at the owner's usual camera height
+     *  (one piece ~4-5% of the view) had nothing reliable to set the size by:
+     *  two touching pieces passed for one, or the pile estimate gave a third
+     *  of a piece (IMG_3621/3622/3627: 4 of 10 pieces read). A photo that
+     *  already reads well never searches. Returns the better segmentation, or
+     *  null to keep the first. */
+    photoFit(proc, seg0, model, tried) {
+      const e0 = this.explained(seg0.dets, seg0.unitArea);
+      if (!e0.all || e0.ex >= PH.PHOTO_FIT * e0.all) return null;
+      const models = [model].concat(tried.filter((t) => t.c !== model && t.good >= 1).sort((a, b) => b.score - a.score).slice(0, 2).map((t) => t.c));
+      // 1. per model, the blobs before any split (one pass each); each piece
+      //    size they suggest is scored on them directly
+      const cands = [];
+      for (const m of models) {
+        const raw = PH.segment(proc, this.segOpts({ bgModel: m, split: false }));
+        const blobs = raw.dets.filter((d) => !d.border).map((d) => ({ area: d.area, score: PH.pieceScore(d.pts, d.area) }));
+        if (!blobs.length) continue;
+        const big = Math.max(...blobs.map((b) => b.area));
+        const units = [];
+        const add = (u) => { if (u > 0 && u < proc.w * proc.h * 0.12 && !units.some((v) => Math.abs(Math.log(u / v)) < 0.1)) units.push(u); };
+        if (raw.unitArea) add(raw.unitArea);
+        for (const b of blobs) if (b.score >= 0.1 && b.area >= 0.3 * big) add(b.area);
+        for (const b of blobs) if (b.area >= 0.6 * big) add(b.area / 2);
+        for (const u of units) cands.push({ m, u, a: this.explained(blobs, u, 0.5).ex });
+      }
+      // 2. the two best, segmented for real (with splits)
+      cands.sort((a, b) => b.a - a.a);
+      let best = { seg: seg0, ex: e0.ex };
+      const trials = [];
+      for (const c of cands.slice(0, 2)) {
+        const s = PH.segment(proc, this.segOpts({ bgModel: c.m, unitArea: c.u }));
+        const e = this.explained(s.dets, s.unitArea);
+        trials.push({ kind: c.m.kind, unit: Math.round(c.u), guess: Math.round(c.a), ex: Math.round(e.ex) });
+        if (e.ex > best.ex * 1.02) best = { seg: s, ex: e.ex };
+      }
+      this.photoFitLog = { first: Math.round(e0.ex), all: Math.round(e0.all), cands: cands.length, trials, chose: best.seg === seg0 ? 'first' : Math.round(best.seg.unitArea) };
+      return best.seg === seg0 ? null : best.seg;
     }
 
     // Tilt estimation and its safety check run once per photo, not per frame,
@@ -3495,6 +3558,7 @@
   PH.sureFit = (m, rank) => rank === 0 && (m.prob || 0) >= 0.5 && !m.tie && m.colOk !== false && !!(m.mutual || m.loopOk || (m.adj || 0) >= 0.3);
   // Assembled-part blob checks (Engine.puzzleLike); set from the owner's video
   // and the real assembled-puzzle photo, see test/real-50.js.
+  PH.PHOTO_FIT = 0.75; // a photo explaining less of its pieces' area than this as single pieces searches (Engine.photoFit)
   PH.PAL_MIN = 1.2e-4; // a box-palette bin at least as common as an even spread counts as "a puzzle colour"
   PH.PAL_SHARE = 0.5;  // share of a blob's pixels in puzzle colours
 

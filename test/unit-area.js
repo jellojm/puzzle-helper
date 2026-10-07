@@ -64,5 +64,11 @@ const { robustUnit } = require('./seg-metrics');
   console.log('WP1 (stable unit):     ' + fmt(on));
   const ok = on.worst <= 0.2 && on.pieces <= n * 1.05;
   console.log(ok ? 'PASS  stable unit within 20% and catalog within 5%' : 'FAIL  stable unit / catalog out of bounds');
-  process.exitCode = ok ? 0 : 1;
+  // v0.22.1, owner's close-up IMG_3623 (blob areas and corner scores as read):
+  // two touching pieces (score 0.032) must not outvote two clean ones
+  const w = (s) => Math.min(1, s / PH.UNIT_SURE);
+  const u = PH.massMode([85069, 79638, 175023], [w(0.210), w(0.283), w(0.032)]);
+  const okVote = u > 70000 && u < 95000;
+  console.log(`${okVote ? 'PASS' : 'FAIL'}  the size vote trusts clean pieces over a touching pair  — ${Math.round(u)} px² (clean pieces 80-85k; unweighted ${Math.round(PH.massMode([85069, 79638, 175023]))})`);
+  process.exitCode = ok && okVote ? 0 : 1;
 })();

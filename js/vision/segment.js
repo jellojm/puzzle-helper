@@ -448,10 +448,12 @@
   };
 
   // Mass-weighted mode of log2(area), quarter-octave bins: the size that most
-  // of the piece-like *area* belongs to.
-  PH.massMode = function (areas) {
+  // of the piece-like *area* belongs to. Optional weights (0-1) per area: how
+  // sure it is one piece.
+  PH.UNIT_SURE = 0.15; // corner score from which a blob fully counts as one piece in the size vote
+  PH.massMode = function (areas, weights) {
     const bins = new Map();
-    for (const a of areas) { const k = Math.round(Math.log2(a) * 4); bins.set(k, (bins.get(k) || 0) + a); }
+    areas.forEach((a, i) => { const k = Math.round(Math.log2(a) * 4); bins.set(k, (bins.get(k) || 0) + a * (weights ? weights[i] : 1)); });
     let best = null;
     for (const [k, m] of bins) {
       // smooth with the neighbouring bins so a split peak isn't missed
@@ -460,7 +462,7 @@
     }
     // refine: area-weighted mean of the blobs within half an octave of the peak
     let s = 0, w = 0;
-    for (const a of areas) if (Math.abs(Math.log2(a) * 4 - best.k) <= 2) { s += a * a; w += a; }
+    areas.forEach((a, i) => { if (Math.abs(Math.log2(a) * 4 - best.k) <= 2) { const m = a * (weights ? weights[i] : 1); s += a * m; w += m; } });
     return w ? s / w : Math.pow(2, best.k / 4);
   };
 
@@ -787,13 +789,19 @@
     // kitchen photo (IMG_3573) had a wall region touching the top edge pass as
     // "piece-shaped" (score 0.034) and, being 100x a piece's area, it won the
     // mass mode — the photo then catalogued nothing.
-    const like = blobs.filter((b) => !b.edge && b.solidity > 0.6 && b.area < Math.min(maxArea, w * h * 0.12) && PH.pieceScore(b.cnt.data32S, b.area) > PH.MIN_CORNER_SCORE).map((b) => b.area);
+    // Each counts by how surely it is one piece: two touching pieces can pass
+    // the corner test (owner's IMG_3623: score 0.032 against 0.21-0.28 for
+    // the clean ones) and, twice the size, outvoted the clean pieces - the
+    // clean ones then read as half-pieces and nothing was catalogued.
+    // Full weight from a corner score of PH.UNIT_SURE.
+    const likeB = blobs.filter((b) => !b.edge && b.solidity > 0.6 && b.area < Math.min(maxArea, w * h * 0.12)).map((b) => ({ a: b.area, s: PH.pieceScore(b.cnt.data32S, b.area) })).filter((x) => x.s > PH.MIN_CORNER_SCORE);
+    const like = likeB.map((x) => x.a), likeW = likeB.map((x) => Math.min(1, x.s / PH.UNIT_SURE));
     // Two clean pieces of about the same size also set it: a close-up of a
     // few pieces (owner's IMG_3598: 4 pieces, two of them joined by a shadow)
     // otherwise fell to the pile estimate, which put the size at a quarter
     // and called every piece a clump.
-    const unitOwn = like.length >= 3 ? PH.massMode(like) : like.length === 2 && Math.max(...like) < 1.3 * Math.min(...like) ? (like[0] + like[1]) / 2 : null;
-    if (PH.DEBUG_SEG) console.log('piece-like', like.map(Math.round).sort((a, b) => a - b).join(','), 'own', unitOwn);
+    const unitOwn = like.length >= 3 ? PH.massMode(like, likeW) : like.length === 2 && Math.max(...like) < 1.3 * Math.min(...like) ? (like[0] + like[1]) / 2 : null;
+    if (PH.DEBUG_SEG) console.log('piece-like', likeB.map((x) => Math.round(x.a) + ':' + x.s.toFixed(3)).join(','), 'own', unitOwn);
     // A caller-supplied unit (live scanning keeps one across frames) wins.
     // null = unknown: nothing gets split (and the engine calls nothing merged).
     // Dense pile (pieces touching, no isolated ones to learn the size from):

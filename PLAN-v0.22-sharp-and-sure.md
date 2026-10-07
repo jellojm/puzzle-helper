@@ -83,7 +83,41 @@ can't: the check needs the frames before it). `cam-turn.js` is in `npm test`.
 must not do worse than the old engine run on the same idle machine (it has
 time budgets, so a loaded machine changes its result).
 
-### Batch 2 — v0.22.1: sharp reads only
+### Batch 1b — v0.22.1: photos of a few big pieces (owner's choice, before Batch 2)
+
+Owner, 2026-10-07: the close-ups (2-4 pieces, one piece ~4-5% of the view)
+are the typical camera height — "may need to rethink piece size". Their
+labelled photos read 11 of 21 pieces (IMG_3620/3621/3622/3623/3625/3627).
+Measured cause: the photo's piece size, not mainly the shadows.
+- The size vote (mass-weighted mode of piece-like blob areas) let two
+  touching pieces that barely pass the corner test (0.032) outvote two clean
+  ones (0.21, 0.28): IMG_3623 sized pieces at 175k px, the real ones (80k)
+  read as half-pieces. Now each blob counts by its corner score (full from
+  `PH.UNIT_SURE` = 0.15). IMG_3623 1 → 4 of 4. Live frames use the same vote.
+- With no clean single piece (IMG_3622: both blobs are pairs), the pile
+  estimate gave a third of a piece and the splitter cut pieces into
+  fragments. `Engine.photoFit`: a photo whose first pass explains < 75% of
+  its blob area as single pieces (`PH.PHOTO_FIT`) scores, per background
+  model (the picked one + 2 runners-up, one unsplit pass each), each piece
+  size its blobs suggest (clean blobs' areas, half of each big blob) on the
+  blobs directly, then segments the best 2 for real and keeps the best.
+  Photos that read well never search. IMG_3622: both loose pieces read right
+  (one was a fragment); IMG_3627 0 → 2 of 3 (it switches to the two-colour
+  model).
+- Known-weak photos: 11 → 16 of 21 pieces read; join sides measured 14 → 22,
+  partner first 6 → 9, top 3 6 → 11. Floor added to `real-joins.js`.
+- Checks against v0.22.0: IMG_3593 the same (48 checked, identical
+  timeline); IMG_3605 within its run-to-run spread (CPU clock, 23-27
+  checked, 53-73 entries across runs of the same logic; weighting on/off
+  side by side: 27/59 vs 25/64). `run-tests.js` identical on the step
+  clock. All suites and e2e pass. A searching photo costs about 5 extra
+  segmentation passes (~0.4 s each on the PC, so a few seconds on the phone).
+- Left: the pieces inside a pair joined on purpose (IMG_3621, IMG_3622, 4
+  pieces) are not cut along their seam. Assembled parts are deliberately not
+  catalogued, so that needs its own design (seam-following cut). The third
+  IMG_3627 piece is joined to its strong shadow.
+
+### Batch 2 — v0.22.2: sharp reads only
 
 1. **Best-of-N frame for shape reads.** Keep the last ~6 steady frames'
    sharpness (`frameSharpness`, already computed); a close read is taken
@@ -103,7 +137,7 @@ time budgets, so a loaded machine changes its result).
 Tests: replay of the find reports: `read conflicts` must drop by half with
 no loss of confirmed shapes; `real-joins.js` known-weak line should improve.
 
-### Batch 3 — v0.22.2: no false comfort in Find
+### Batch 3 — v0.22.3: no false comfort in Find
 
 1. **A clump is never a partner.** A `merged` entry (area > 1.9 units that
    the splitter couldn't cut) is shown with a dotted outline and the hint
@@ -116,7 +150,7 @@ no loss of confirmed shapes; `real-joins.js` known-weak line should improve.
    back to the centre arrow above ~6 px.
 4. **Look-alike photo IMG_3627 → test.** Needs the owner's answer (§5).
 
-### Batch 4 — v0.22.3: outlines that follow the cut, not the shadow
+### Batch 4 — v0.22.4: outlines that follow the cut, not the shadow
 
 The known-weak joins (IMG_3620, IMG_3625) read the right tab/blank types but
 with shape distance 0.19-0.31 (good is 0.01-0.05). The colour mask grows
@@ -158,7 +192,7 @@ outline is a different curve from the real cut.
 Tests: `real-joins.js` known-weak line moves to the main line; `shape-real.js`
 shape distances on the true pairs ≤ 0.08; `edge-verify.js` unchanged.
 
-### Batch 5 — v0.22.4: counting pieces in a clump
+### Batch 5 — v0.22.5: counting pieces in a clump
 
 1. **An integer count per blob**: `round(area / unit)` corrected by
    piece-likeness, printed in reports. The splitters then cut *to that
