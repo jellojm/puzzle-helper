@@ -1,5 +1,7 @@
 /* Build the answer key for test/real-50.js from the owner's 50-piece video.
  *   node tools/answer-key-build.js <key-pos.json> <out answer.json> <sheet.jpg>
+ *   (VIDEO=reports/IMG_3605.MOV KEYT=76 for another video: KEYT = the
+ *   overview's time in seconds, stored as the key's frame time)
  * key-pos.json: [{n,row,col,x,y}] the 50 pieces' centres in the opening
  * overview frame (found by colour on the white board, numbered by row).
  * Replays the video through the engine, keeps every CLOSE shape read
@@ -15,10 +17,10 @@ const S = require('../test/synth');
 const { videoFrames } = require('../test/videoframes');
 const { writeJpg } = require('../test/imageio');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+require('../test/lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 const [posFile, outFile, sheetFile] = process.argv.slice(2);
-const VIDEO = path.join(__dirname, '..', 'reports', 'IMG_3593.MOV');
+const VIDEO = process.env.VIDEO ? path.resolve(process.env.VIDEO) : path.join(__dirname, '..', 'reports', 'IMG_3593.MOV');
 const canon = (c) => { let b = c; for (let r = 1; r < 4; r++) { const x = c.slice(r) + c.slice(0, r); if (x < b) b = x; } return b; };
 
 (async () => {
@@ -99,6 +101,6 @@ const canon = (c) => { let b = c; for (let r = 1; r < 4; r++) { const x = c.slic
   writeJpg(sheetFile, sheet.cols, sheet.rows, sheet.data);
   const isBorder = (c) => /F/.test(c), isCorner = (c) => /FF/.test(c + c[0]);
   const counts = { pieces: out.length, corner: out.filter((p) => p.code && isCorner(p.code)).length, border: out.filter((p) => p.code && isBorder(p.code) && !isCorner(p.code)).length };
-  fs.writeFileSync(outFile, JSON.stringify({ video: 'reports/IMG_3593.MOV', frame: 30, counts, pieces: out }, null, 1));
+  fs.writeFileSync(outFile, JSON.stringify({ video: 'reports/' + path.basename(VIDEO), frame: process.env.KEYT ? null : 30, t: process.env.KEYT ? +process.env.KEYT : undefined, counts, pieces: out }, null, 1));
   console.log('counts', JSON.stringify(counts), 'without an entry:', out.filter((p) => !p.entry).map((p) => p.n).join(' ') || 'none');
 })();

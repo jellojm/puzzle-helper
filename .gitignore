@@ -2,7 +2,10 @@ node_modules/
 test/out/
 test/_*
 tools/*.pem
-test/fixtures/
+# fixtures stay local (photos, frames), except the answer keys checked by eye
+test/fixtures/**
+!test/fixtures/**/
+!test/fixtures/v*/answer.json
 reports/
 .agent-coordination/
 # OneDrive sync-conflict copies (e.g. NAME-<MACHINE>.md)

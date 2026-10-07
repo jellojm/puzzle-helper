@@ -1834,13 +1834,21 @@
       const m = Math.max(bw, bh) * 0.18;
       const x0 = Math.max(0, Math.floor((bx - m) / scale)), y0 = Math.max(0, Math.floor((by - m) / scale));
       const x1 = Math.min(source.w, Math.ceil((bx + bw + m) / scale)), y1 = Math.min(source.h, Math.ceil((by + bh + m) / scale));
-      const crop = source.getCrop(x0, y0, x1 - x0, y1 - y0);
+      // A big piece (a close-up at the owner's usual height: ~350 px across
+      // in the phone's 1440x1920 frame) is read from a smaller crop, its
+      // side PH.READ_SIDE: a read's cost grows with the crop's area (phone
+      // reports: ~130-210 ms a read, ~0.35 reads a frame).
+      const side = Math.sqrt(d.area) / scale / 1.1;
+      const k = PH.READ_SIDE && side > PH.READ_SIDE ? PH.READ_SIDE / side : 1;
+      let crop = source.getCrop(x0, y0, x1 - x0, y1 - y0);
+      if (k < 1) crop = PH.scaleCrop(crop, k);
       const why = {};
       try {
-        const hint = d.split ? Array.from(d.pts, (v, i) => v / scale - (i % 2 ? y0 : x0)) : null;
-        d.t1 = PH.analyzePiece(crop, { bg: F.bg, threshDE: F.thresh, lut: F.lut, hint, lightW: this.opts.lightW, ox: x0, oy: y0, why, boardRef: this.boardRef || null,
-          // one piece's area in this crop's (source) pixels, for the partial-outline check
-          unitArea: F.unitArea ? F.unitArea / (scale * scale) : null });
+        const hint = d.split ? Array.from(d.pts, (v, i) => (v / scale - (i % 2 ? y0 : x0)) * k) : null;
+        d.t1 = PH.analyzePiece(crop, { bg: F.bg, threshDE: F.thresh, lut: F.lut, hint, lightW: this.opts.lightW, ox: k < 1 ? 0 : x0, oy: k < 1 ? 0 : y0, why, boardRef: this.boardRef || null,
+          // one piece's area in this crop's pixels, for the partial-outline check
+          unitArea: F.unitArea ? F.unitArea / (scale * scale) * k * k : null });
+        if (d.t1 && k < 1) PH.unscaleRead(d.t1, k, x0, y0);
       } catch (e) { d.t1 = null; }
       if (why.seam) this.reject('seam', d);
       // Background scraps and half-detected pieces don't have 4 good corners.

@@ -6,7 +6,7 @@ const path = require('path');
 const S = require('./synth');
 const { readImage, writeJpg } = require('./imageio');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+require('./lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 (async () => {
   let cv = require('@techstark/opencv-js'); if (cv instanceof Promise) cv = await cv; else if (!cv.Mat) await new Promise((r) => (cv.onRuntimeInitialized = r)); PH.cv = cv;

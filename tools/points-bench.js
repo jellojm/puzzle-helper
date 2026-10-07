@@ -21,7 +21,7 @@ const fs = require('fs');
 const S = require('../test/synth');
 const { readImage } = require('../test/imageio');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+require('../test/lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 const ROOT = path.join(__dirname, '..');
 const mode = process.argv[2] || 'colour';

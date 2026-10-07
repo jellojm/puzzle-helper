@@ -11,7 +11,7 @@
 const path = require('path');
 const S = require('./synth');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+require('./lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 // (v0.20: counts().pieces = checked pieces only; this test is about what gets
 // catalogued at all, i.e. entries)

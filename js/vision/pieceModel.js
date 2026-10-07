@@ -342,6 +342,29 @@
    * @param ctx {bg:{L,a,b}, threshDE, lightW, ox, oy (crop origin in source px)}
    */
   PH._segmentCrop = (...a) => segmentCrop(...a); // diagnostics only (test/shape-real.js --sheet)
+  /** A crop scaled by k (< 1: smaller), for reading a big piece at less
+   *  cost (PH.READ_SIDE). */
+  PH.scaleCrop = function (crop, k) {
+    const cv = PH.cv;
+    const src = new cv.Mat(crop.h, crop.w, cv.CV_8UC4); src.data.set(crop.data);
+    const w = Math.max(8, Math.round(crop.w * k)), h = Math.max(8, Math.round(crop.h * k));
+    const dst = new cv.Mat();
+    cv.resize(src, dst, new cv.Size(w, h), 0, 0, cv.INTER_AREA);
+    const out = { w, h, data: new Uint8ClampedArray(dst.data) };
+    src.delete(); dst.delete();
+    return out;
+  };
+  /** A read made from a crop scaled by k, back in source pixels (crop origin
+   *  ox, oy). Everything else in a read is scale-free (edge shapes, relative
+   *  lengths, colours, the print square). */
+  PH.unscaleRead = function (t1, k, ox, oy) {
+    t1.corners = t1.corners.map((c) => [c[0] / k + ox, c[1] / k + oy]);
+    t1.meanSide /= k;
+    for (const e of t1.edges) e.len /= k;
+    if (t1.thumb) { t1.thumb.ox = ox; t1.thumb.oy = oy; t1.thumb.s *= k; }
+    t1.readScale = k;
+    return t1;
+  };
   PH.analyzePiece = function (crop, ctx) {
     const cv = PH.cv;
     const w = crop.w, h = crop.h;
@@ -734,6 +757,7 @@
   // misreads 0.15-0.23; two close reads must still agree to check a piece)
   PH.CLOSE_SIDE = 120; // (overview reads in the owner's video: 70-80 px)
   PH.CLOSE_Q = 0.25;
+  PH.READ_SIDE = Infinity; // read pieces bigger than this (side, source px) from a scaled-down crop (Engine.detT1)
   /** Fewest edges whose types differ between two reads, over the 4 turns. */
   PH.codeDistance = function (a, b) {
     let best = 4;

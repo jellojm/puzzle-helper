@@ -17,7 +17,7 @@
 const path = require('path');
 const S = require('../test/synth');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+require('../test/lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 
 // Labelled candidates from one synthetic table.

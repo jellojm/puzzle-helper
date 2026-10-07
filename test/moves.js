@@ -18,9 +18,7 @@
 'use strict';
 const path = require('path');
 const S = require('./synth');
-globalThis.self = globalThis;
-const VISION = process.env.VISION || path.join(__dirname, '..', 'js', 'vision');
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(VISION, f + '.js'));
+require('./lib/vision')(); // (the modules the app's worker loads; VISION=<dir> for another copy)
 const PH = globalThis.PH;
 
 let failures = 0;

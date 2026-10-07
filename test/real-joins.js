@@ -25,7 +25,7 @@ const fs = require('fs');
 const S = require('./synth');
 const { readImage } = require('./imageio');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+require('./lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 if (process.env.NOPEEL) PH.SHADOW_PEEL = null;
 if (process.env.COLW) PH.COL_W = +process.env.COLW;
@@ -190,6 +190,7 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
   check('the true partner ranks first for at least 65% of join sides', top1 >= 0.65 * N, `${top1}/${N}`);
   check('the true partner is in the top 3 for at least 80%', top3 >= 0.8 * N, `${top3}/${N}`);
   check('colour along the seam agrees for at least 90% of true joins (where trusted)', colPass >= 0.9 * colN, `${colPass}/${colN}`);
+  require('./lib/results').record('real-joins', null, { joinSides: N, typeOk, top1, top3, shapeTop1, ties, colPass, colN, weakRead, weakSides: weak.n, weakType: weak.type, weakTop1: weak.top1, weakTop3: weak.top3, pool: pool.length, failures });
   console.log(failures ? `\n${failures} FAILED` : '\nall passed');
   process.exitCode = failures ? 1 : 0;
 })();

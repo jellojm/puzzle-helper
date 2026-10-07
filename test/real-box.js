@@ -10,7 +10,7 @@ const fs = require('fs');
 const S = require('./synth');
 const { readImage, writeJpg } = require('./imageio');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+require('./lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 const OUT = path.join(__dirname, 'out');
 fs.mkdirSync(OUT, { recursive: true });

@@ -13,7 +13,7 @@
 const path = require('path');
 const S = require('./synth');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+require('./lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 PH.CLOSE_SIDE = 40; // synthetic pieces are small (the phone's close reads: 150+ px); this test is about other things
 
@@ -151,7 +151,7 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
     const gone = B && !B.t2.cands.some((c) => c.col === cell.col && c.row === cell.row);
     const litAfter = eng.filterIds().includes(A.id);
     check('its box spot leaves other pieces\' candidates', !!B && gone, B ? `#${B.id}: ${before} -> ${B.t2.cands.length} candidate spots` : 'no piece shares a spot');
-    check('finders skip a placed piece', !litAfter && (litBefore || !eng.filterIds().length || true), `lit before ${litBefore}, after ${litAfter}`);
+    check('finders skip a placed piece', !litAfter, `lit before ${litBefore}, after ${litAfter}`); // (it may not have been lit before: only edge pieces are)
     check('counted', eng.counts().inPuzzle === 1);
     const saved = eng.exportPiece(A);
     check('saved with the catalog', saved.inPuzzle > 0);

@@ -8,7 +8,7 @@
 const path = require('path');
 const S = require('./synth');
 globalThis.self = globalThis;
-for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'engine']) require(path.join(__dirname, '..', 'js', 'vision', f + '.js'));
+require('./lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 PH.CLOSE_SIDE = 80; // synthetic pieces are ~105 px across (the phone's close reads: 150+)
 (async () => {
