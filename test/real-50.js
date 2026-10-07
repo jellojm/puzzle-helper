@@ -24,6 +24,10 @@ const fs = require('fs');
 const S = require('./synth');
 const { videoFrames } = require('./videoframes');
 globalThis.self = globalThis;
+// CLOCK=cpu: the engine's time budgets run on this process's CPU time, not
+// the wall clock, so other work on the machine (other agents' tests) barely
+// changes the result. Use it to compare two versions (VISION=<other js/vision>).
+if (process.env.CLOCK === 'cpu') require('./cpu-clock');
 const VISION = process.env.VISION || path.join(__dirname, '..', 'js', 'vision');
 // the modules the app's worker loads
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'border', 'flow', 'engine']) require(path.join(VISION, f + '.js'));
@@ -60,7 +64,7 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
   const rnd = PH.mulberry32(7);
   const step = VARIANT === 'phone6' ? 6 : 5;
   const to = VARIANT === 'overview' ? 3 : 1e9;
-  let n = 0, maxChecked = 0, maxAt = 0;
+  let n = 0, maxChecked = 0, maxAt = 0, firstAt = null, at30 = 0;
   const t0 = Date.now();
   const timeline = [];
   // Identity, not geometry: during the opening overview (the key's own frame,
@@ -109,10 +113,13 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
     const c = eng.counts();
     const checked = c.checked !== undefined ? c.checked : c.pieces;
     if (checked > maxChecked) { maxChecked = checked; maxAt = f.t; }
+    if (checked && firstAt === null) firstAt = f.t; // (owner: "pieces took a while to read")
+    if (f.t <= 30) at30 = checked;
     if (n % 25 === 0) { timeline.push(`${f.t.toFixed(0)}s:${checked}` + (process.env.BG ? `(${eng.bgModel ? eng.bgModel.kind : '-'},${out.dets.length}d,${c.entries})` : '')); }
   }
   const c = eng.counts();
   console.log(`${VARIANT}: ${n} frames in ${((Date.now() - t0) / 1000).toFixed(0)} s; timeline ${timeline.join(' ')}`);
+  console.log(`speed: first checked piece at ${firstAt === null ? '-' : firstAt.toFixed(1) + ' s'}, ${at30} checked at 30 s`);
   console.log('counts', JSON.stringify(c));
   console.log('rejects', JSON.stringify(eng.rejects));
   if (globalThis.__ds) { const D = globalThis.__ds, m = (a) => (a.reduce((s, x) => s + x[0], 0) / Math.max(1, a.length)).toFixed(2); console.log('good dets/frame all', m(D), 'still', m(D.filter((x) => x[1])), 'moving', m(D.filter((x) => !x[1])), 'voted frames', D.filter((x) => x[2]).length + '/' + D.length); }

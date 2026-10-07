@@ -43,13 +43,30 @@ const LAYOUTS = [
   { file: 'IMG_3602.JPG', cols: 2, rows: 4, what: '2x4 on the white board' },
   // 2026-10-07 (joined in IMG_3614/3615/3617/3618, apart in the same layout)
   // (measured, not yet held to the pass bars: weaker reads under the lamp)
-  { file: 'IMG_3620.JPG', cols: 2, rows: 2, what: '2x2 red urchin, cream counter', weak: true },
+  { file: 'IMG_3620.JPG', cols: 2, rows: 2, what: '2x2 red urchin, cream counter', weak: true }, // (joins confirmed by the owner, marked in colour; assembled: IMG_3614)
+  // the same 4 pieces turned and moved (owner): top-left and bottom-left each a
+  // quarter turn clockwise, the right two still joined (that seam not counted)
+  { file: 'IMG_3621.JPG', n: 4, at: [[0.36, 0.38], [0.75, 0.47], [0.26, 0.69], [0.74, 0.665]], joins: [[0, 2, 1, 3], [0, 3, 2, 1], [2, 2, 3, 3]], what: 'IMG_3620 pieces turned and moved', weak: true },
   // pieces turned when taken apart: the joins labelled by hand - piece index
   // in reading order (top to bottom), side facing 0 up 1 right 2 down 3 left
   { file: 'IMG_3625.JPG', n: 2, joins: [[0, 1, 1, 0]], what: 'yellow fish pair (joined in IMG_3618), both turned', weak: true },
+  // a look-alike: the middle piece has the same print but fits neither (owner,
+  // 2026-10-07, edges marked in blue: top's bottom blank <-> bottom's right
+  // tab). Strong lamp shadows: v0.22.0 reads none of the three (the photo's
+  // background check picks a model that joins each piece to its shadow).
+  // two loose pieces beside a joined pair (owner, 2026-10-07, joins marked in
+  // colour): top-left's bottom tab <-> the pair's upper piece's left blank;
+  // bottom-left's top blank <-> the pair's lower piece's left tab; top-left's
+  // left blank <-> bottom-left's left tab (assembled: IMG_3615, a 2x2 - these
+  // 3 + the pair's own seam). Pieces by position (at: x, y as
+  // fractions of the photo), order as listed.
+  { file: 'IMG_3622.JPG', n: 4, at: [[0.34, 0.42], [0.70, 0.50], [0.30, 0.64], [0.70, 0.635]], joins: [[0, 2, 1, 3], [2, 0, 3, 3], [0, 3, 2, 3]], what: 'two loose pieces + a joined pair, cream counter', weak: true },
+  // the same 4 pieces apart (owner): the pair's upper piece turned a quarter
+  // clockwise, the others as in IMG_3622; the pair's seam is a join here
+  { file: 'IMG_3623.JPG', n: 4, at: [[0.30, 0.41], [0.66, 0.44], [0.245, 0.65], [0.69, 0.685]], joins: [[0, 2, 1, 0], [2, 0, 3, 3], [0, 3, 2, 3], [1, 3, 3, 0]], what: 'IMG_3622 pieces apart, one turned', weak: true },
+  { file: 'IMG_3627.JPG', n: 3, joins: [[0, 2, 2, 1]], what: 'look-alike trio, cream counter, lamp shadows', weak: true },
 ];
-// (IMG_3622: a joined pair and two loose pieces; IMG_3624: all three turned,
-// seams not certain by eye - not used)
+// (IMG_3624: all three turned, seams not certain by eye - not used)
 const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
 
 (async () => {
@@ -63,12 +80,13 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
     const full = new cv.Mat(im.h, im.w, cv.CV_8UC4); full.data.set(im.data);
     const mat = new cv.Mat(); cv.resize(full, mat, new cv.Size(Math.round(im.w / DIV), Math.round(im.h / DIV)), 0, 0, cv.INTER_AREA); full.delete();
     const eng = new PH.Engine({ checkedOnly: false, autoTilt: false });
+    const W = mat.cols, H = mat.rows;
     eng.processSnap(S.matSource(cv, mat)); mat.delete();
     const out = [];
     for (const p of eng.pieces.values()) {
       if (!p.t1) continue;
       const c = p.t1.corners;
-      out.push({ id: nextId++, file, t1: p.t1, cx: c.reduce((t, q) => t + q[0], 0) / 4, cy: c.reduce((t, q) => t + q[1], 0) / 4 });
+      out.push({ id: nextId++, file, t1: p.t1, cx: c.reduce((t, q) => t + q[0], 0) / 4, cy: c.reduce((t, q) => t + q[1], 0) / 4, W, H });
     }
     return out;
   };
@@ -92,14 +110,33 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
     // the layout: the rows by height, each row left to right (pieces cut by
     // the photo's edge are never read)
     const n = L.n || L.cols * L.rows;
-    const ok = ps.length >= n;
-    check(`${L.file} (${L.what}): every piece of the layout read`, ok, `${ps.length} read, ${n} in the layout; codes ${ps.map((p) => p.t1.code).join(' ')}`);
-    if (!ok) continue;
-    // keep the n pieces of the main group (closest to their common centre)
-    const mx = PH.median(ps.map((p) => p.cx)), my = PH.median(ps.map((p) => p.cy));
-    const grid = ps.slice().sort((a, b) => Math.hypot(a.cx - mx, a.cy - my) - Math.hypot(b.cx - mx, b.cy - my)).slice(0, n).sort((a, b) => a.cy - b.cy);
+    const readLine = `${L.file} (${L.what}): every piece of the layout read`;
+    let grid;
+    if (L.at) {
+      // pieces named by where they lie (fractions of the photo): the read
+      // piece nearest each spot, within 0.1 (reading order flips when two sit
+      // level). Joins between pieces that did read are still measured.
+      const used = new Set();
+      grid = L.at.map(([fx, fy]) => { let b = null, bd = 0.1; for (const p of ps) { const d = Math.hypot(p.cx / p.W - fx, p.cy / p.H - fy); if (d < bd && !used.has(p)) { bd = d; b = p; } } if (b) used.add(b); return b; });
+      const missing = grid.map((g, i) => (g ? null : '#' + (i + 1))).filter(Boolean);
+      const why = `${n - missing.length} of ${n} read at their spots; codes ${grid.map((g) => (g ? g.t1.code : '-')).join(' ')}${missing.length ? '; not read: ' + missing.join(' ') : ''}`;
+      if (missing.length && L.weak) console.log(`WEAK  ${readLine}  — ${why} (known-weak: measured, not failed)`); else check(readLine, !missing.length, why);
+      if (missing.length && !L.weak) continue;
+    } else {
+      const ok = ps.length >= n;
+      const readWhy = `${ps.length} read, ${n} in the layout; codes ${ps.map((p) => p.t1.code).join(' ')}`;
+      if (!ok && L.weak) { console.log(`WEAK  ${readLine}  — ${readWhy} (known-weak: measured, not failed)`); continue; }
+      check(readLine, ok, readWhy);
+      if (!ok) continue;
+      // keep the n pieces of the main group (closest to their common centre)
+      const mx = PH.median(ps.map((p) => p.cx)), my = PH.median(ps.map((p) => p.cy));
+      grid = ps.slice().sort((a, b) => Math.hypot(a.cx - mx, a.cy - my) - Math.hypot(b.cx - mx, b.cy - my)).slice(0, n).sort((a, b) => a.cy - b.cy);
+    }
     if (L.joins) {
-      for (const [i, di, k, dk] of L.joins) joins.push({ weak: !!L.weak, file: L.file, where: `#${i + 1}${'URDL'[di]}-#${k + 1}${'URDL'[dk]}`, a: grid[i], ka: edgeToward(grid[i], di), b: grid[k], kb: edgeToward(grid[k], dk) });
+      for (const [i, di, k, dk] of L.joins) {
+        if (!grid[i] || !grid[k]) continue; // (a piece of it didn't read)
+        joins.push({ weak: !!L.weak, file: L.file, where: `#${i + 1}${'URDL'[di]}-#${k + 1}${'URDL'[dk]}`, a: grid[i], ka: edgeToward(grid[i], di), b: grid[k], kb: edgeToward(grid[k], dk) });
+      }
       continue;
     }
     const at = [];
