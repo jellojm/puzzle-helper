@@ -117,25 +117,49 @@ Measured cause: the photo's piece size, not mainly the shadows.
   catalogued, so that needs its own design (seam-following cut). The third
   IMG_3627 piece is joined to its strong shadow.
 
-### Batch 2 — v0.22.2: sharp reads only
+### Batch 2 — v0.22.2: re-reads that agree (planned as "sharp reads only")
 
-1. **Best-of-N frame for shape reads.** Keep the last ~6 steady frames'
-   sharpness (`frameSharpness`, already computed); a close read is taken
-   only from a frame at or above the 75th percentile of the recent
-   sharpness, as assemblies already do. Fewer reads, far fewer conflicts.
-2. **Sharpness cue.** A tiny bar beside the status pill: full when the frame
-   is sharp, hollow when smeared. "Hold still" text only when it stays
-   hollow for 2 s. The owner learns the pace without a setting.
-3. **Torch and exposure probe (small, check on the phone first).** Try
-   `track.applyConstraints({advanced:[{torch:true}]})` and `exposureMode`;
-   WebKit's support changed across iOS 17-18 and nothing online is reliable.
-   If the torch works, offer it as a one-tap light in Find mode: shorter
-   exposure, fewer smears, and shadows filled from the camera side.
-4. **Prefer the centre-of-frame, sharpest view when fusing** (already
-   partly in `fuseShapes`); add the per-read sharpness to the fusion weight.
+Measured first (`real-50.js` READSTUDY=<file>: every close read, the read it
+was compared with, and, with an answer key, whether it was right):
+- IMG_3593 (white board): close reads 97% right (173/178), the first read of
+  every piece right; sharpness does not predict the wrong ones.
+- IMG_3605 (lamp-lit counter): reads agree 57% of the time (white board
+  83%); the blurrier of two reads under ~30 agrees 34%, over 60 85%.
+  Frame-wide sharpness (`frameSharpness`) does not predict agreement at all,
+  so plan item 1 (best-of-N frames) is dropped.
+- A fixed higher quality bar for close reads (`CLOSE_Q` 0.25 -> 0.45/0.55)
+  loses on both videos: IMG_3605 27-30 -> 18-23 checked, IMG_3593 48 -> 46
+  (first piece at 11 s instead of 5 s at 0.55). Even soft reads help.
+- The real block: **every pair of re-reads with the same edge types that
+  failed to agree failed on the edge-length gate alone** (27 of 80 such pairs
+  on IMG_3605, 17 of 109 on IMG_3593, all of those right per the key). Their
+  opposite sides were stretched together (median 24% / 13% aspect change: a
+  view from another angle, a tilt corrected a little differently); after
+  taking the stretch out they match like agreeing pairs.
 
-Tests: replay of the find reports: `read conflicts` must drop by half with
-no loss of confirmed shapes; `real-joins.js` known-weak line should improve.
+**Built:**
+1. `PH.shapeAgree` (re-reads of the piece already linked to that spot) also
+   accepts a stretched read: lengths compared per pair of opposite sides
+   (`shapeAlign(a, b, true)`), stretch within `PH.STRETCH_MAX` (0.3 log), and
+   a tighter outline distance `PH.STRETCH_D` (0.08). It counts toward checking
+   but is not averaged into the stored shape (it would bend the lengths that
+   matching uses). `PH.samePiece` (identity: duplicates, moved pieces) stays
+   strict. Rescues 15/27 and 11/17 of those pairs (0 wrong on the key).
+   v0.22.1 -> v0.22.2, CPU clock, IMG_3605 3 runs each: checked at 30 s
+   16/17/16 -> 18/18/18, at the end 27/27/29 -> 27/28/31; IMG_3593 34 -> 36
+   at 30 s, 48 at the end both. `test/stretch-agree.js`: a stretched re-read
+   of the same piece agrees 47/47 (26 without).
+2. "Hold still a moment — the pieces look smeared" in the hint line while 6+
+   of the last 10 close reads are smeared, judged against the session's own
+   usual outline sharpness (`Engine.noteReadSharp`, `PH.SHARP_REL` 0.6),
+   because a fixed level fails on pale pieces: crisp synthetic reads sit
+   under the bar the counter's blurred ones reach. Points to the flashlight
+   (already under More, plan item 3) when the phone offers it. Reports count
+   `blurHint`. `quality-gate.js` checks it.
+- Not built: item 4 (sharpness-weighted fusion), with no evidence it helps.
+- The bigger limit on the counter video: 19 of 24 unchecked entries got only
+  ONE close read in the whole video (new entries seen late, or duplicates
+  from map drift). That is about coverage and catalogue hygiene, not reading.
 
 ### Batch 3 — v0.22.3: no false comfort in Find
 

@@ -31,13 +31,14 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
     for (let y = vh / 2; y <= Math.max(vh / 2, scat.TH - vh / 2) + 1; y += vh * 0.45) for (let x = vw / 2; x <= Math.max(vw / 2, scat.TW - vw / 2) + 1; x += vw * 0.3) for (let k = 0; k < per; k++) out.push([x + k * 6, y]);
     return out;
   };
-  const run = (stops, zoom, still, order, prep) => {
+  const run = (stops, zoom, still, order, prep, blur) => {
     const eng = new PH.Engine();
     if (prep) prep(eng);
     const seq = order ? order(stops) : stops;
     for (const [x, y] of seq) {
       const fr = S.cameraFrame(cv, scat.table, x, y, 0, zoom, FW, FH);
-      eng.processFrame(S.matSource(cv, fr), { still });
+      if (blur) cv.GaussianBlur(fr, fr, new cv.Size(0, 0), blur); // a smeared view the motion sensor missed (long exposure)
+      eng.lastOut = eng.processFrame(S.matSource(cv, fr), { still });
       fr.delete();
     }
     return eng;
@@ -80,6 +81,17 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
     const lvl2 = e2.boardLevel({ L: 120 });
     const odd2 = Math.abs(Math.log(120 / lvl2)) > Math.log(1.25);
     check('a sudden dark frame is odd light; the same light kept for ~12 frames is normal', odd1 && !odd2, `level ${lvl1} then ${lvl2}`);
+  }
+
+  // v0.22.2: the page says "hold still" when most close reads are smeared
+  // (out.coach.soft = share of the last 10 close reads well below the
+  // session's usual sharpness): crisp all along, then the same sweep smeared
+  {
+    const crisp = good.lastOut && good.lastOut.coach;
+    const both = run(stopsAt(1.5, 3), 1.5, true);
+    for (const [x, y] of stopsAt(1.5, 3)) { const fr = S.cameraFrame(cv, scat.table, x, y, 0, 1.5, FW, FH); cv.GaussianBlur(fr, fr, new cv.Size(0, 0), 2.5); both.lastOut = both.processFrame(S.matSource(cv, fr), { still: true }); fr.delete(); }
+    const smeared = both.lastOut.coach;
+    check('smeared reads are reported as smeared, crisp ones not', crisp && smeared && smeared.reads >= 6 && smeared.soft >= 0.6 && crisp.soft <= 0.3, `crisp ${crisp && crisp.soft} (${crisp && crisp.reads} reads), blurred ${smeared && smeared.soft} (${smeared && smeared.reads} reads)`);
   }
 
   // v0.10.0 deadlock (owner's 200-piece session: 0 pieces in 3 minutes): a

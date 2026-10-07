@@ -889,6 +889,7 @@
       out.pframe = pfOut;
       if (this.borderFoundNow) { out.borderFound = true; this.borderFoundNow = false; }
       out.coach = this.coachNow;
+      if (out.coach && this.readSoft && this.readSoft.length) { out.coach.reads = this.readSoft.length; out.coach.soft = +(this.readSoft.filter(Boolean).length / this.readSoft.length).toFixed(2); }
       if (this.cellsDirty && now() - (this.cellsAt || 0) > 2000) this.assignCellsNow();
       out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2, border: this.pfMs || 0 };
       this.pfMs = 0;
@@ -1767,6 +1768,21 @@
     }
     /** Another close read agreed with piece p's close shape: one more
      *  independent confirmation when it comes from a later view (4+ frames). */
+    /** Is a close read's outline smeared? Its edge sharpness against this
+     *  session's usual (75th percentile of the last 40 close reads): below
+     *  PH.SHARP_REL of it. Relative, because the level depends on the scene
+     *  (the outline's contrast with the table: pale pieces on a white board
+     *  are crisp at a level a dark piece reaches only when blurred). Keeps
+     *  the last 10 verdicts for the page's "hold still" hint. */
+    noteReadSharp(sharp) {
+      const H = this.readSharpHist || (this.readSharpHist = []);
+      H.push(sharp); if (H.length > 40) H.shift();
+      const ref = H.length >= 8 ? H.slice().sort((a, b) => a - b)[Math.floor(H.length * 0.75)] : null;
+      const soft = ref !== null && sharp < ref * PH.SHARP_REL;
+      const V = this.readSoft || (this.readSoft = []);
+      V.push(soft); if (V.length > 10) V.shift();
+      return soft;
+    }
     noteCloseAgree(p, t1) {
       if (!PH.isCloseRead(t1) || !PH.isCloseRead(p.t1)) return;
       if (this.fNo - (p.closeAgreeF === undefined ? -1e9 : p.closeAgreeF) < 4) return;
@@ -1883,9 +1899,9 @@
         if (!p.t1 || p.t1 === d.t1) continue;
         if (PH.isCloseRead(d.t1) !== PH.isCloseRead(p.t1)) { d.fused = false; continue; } // far and close reads never mix (the job loop below upgrades far to close)
         let m = PH.samePiece(d.t1, p.t1);
-        if (!m.ok) { const sa = PH.shapeAgree(d.t1, p.t1); if (sa) m = { ok: true, r: sa.r, d: sa.d }; }
+        if (!m.ok) { const sa = PH.shapeAgree(d.t1, p.t1); if (sa) m = { ok: true, r: sa.r, d: sa.d, stretched: sa.stretched }; }
         if (m.ok) {
-          if ((p.t1.nObs || 1) < 8) PH.fuseShapes(p.t1, d.t1, m.r);
+          if ((p.t1.nObs || 1) < 8 && !m.stretched) PH.fuseShapes(p.t1, d.t1, m.r); // (a stretched view agrees but would bend the stored lengths)
           this.noteCloseAgree(p, d.t1);
           if (!p.rd || p.rd.stale) this.notePlacement(p, { thumb: d.t1.thumb, corners: [0, 1, 2, 3].map((k) => d.t1.corners[(k - m.r + 4) % 4]) }); // (the job loop skips this read now)
           this.touch(p); this.version++;
@@ -1954,7 +1970,12 @@
           if (j.pri > 0 && j.d.t1 === undefined && now() > t1Deadline && (confirms >= 1 || (j.pri >= 2 && this.fNo % 2))) break;
           if (j.pri > 0) confirms++;
           const t1 = this.detT1(j.d);
+          if (PH.DEBUG_JOB) PH.DEBUG_JOB(j.p.id, j.pri, t1, this.fNo); // (tests: every read attempt)
           if (t1) t1.centre = +j.centre.toFixed(2);
+          if (PH.DEBUG_READ && t1) PH.DEBUG_READ(j.p.id, t1, this.fNo); // (tests: every shape read)
+          // how crisp the recent close-up reads were (the page asks the user
+          // to hold still when most are smeared)
+          if (t1 && t1.meanSide >= PH.CLOSE_SIDE && t1.quality) this.noteReadSharp(t1.quality.sharp);
           if (PH.DEBUG_Q) PH.DEBUG_Q('  read', j.p.id, 'pri', j.pri, t1 ? 'side ' + Math.round(t1.meanSide) + ' q ' + (t1.quality && t1.quality.q) + ' code ' + t1.code + ' amp ' + t1.edges.map((e) => e.amp.toFixed(2) + (e.unc ? '?' : '')).join('/') : 'FAILED', 'stored', j.p.t1 && j.p.t1.code, 'fused', !!j.d.fused, t1 && j.p.t1 ? 'same ' + JSON.stringify((({ ok, d }) => ({ ok, d: +d.toFixed(3) }))(PH.samePiece(t1, j.p.t1))) : '');
           if (!t1) {
             j.p.t1Fail = (j.p.t1Fail || 0) + 1;
@@ -2035,9 +2056,10 @@
             j.p.t1Frame = this.fNo;
             let m = PH.samePiece(t1, old);
             // (a piece linked to this spot only needs its shape to agree)
-            if (!m.ok) { const sa = PH.shapeAgree(t1, old); if (sa) m = { ok: true, r: sa.r, d: sa.d }; }
+            if (!m.ok) { const sa = PH.shapeAgree(t1, old); if (sa) m = { ok: true, r: sa.r, d: sa.d, stretched: sa.stretched }; }
             if (m.ok) { // two views agree: the shape is confirmed (averaged)
-              if ((old.nObs || 1) < 8) PH.fuseShapes(old, t1, m.r);
+              if ((old.nObs || 1) < 8 && !m.stretched) PH.fuseShapes(old, t1, m.r); // (a stretched view agrees but would bend the stored lengths)
+              if (m.stretched) this.rejects.stretchAgree = (this.rejects.stretchAgree || 0) + 1;
               this.noteCloseAgree(j.p, t1);
               // No map placement yet (moved, or catalogued before v0.10.1):
               // place it from this read, with this read's picture - the stored
@@ -3558,6 +3580,10 @@
   PH.sureFit = (m, rank) => rank === 0 && (m.prob || 0) >= 0.5 && !m.tie && m.colOk !== false && !!(m.mutual || m.loopOk || (m.adj || 0) >= 0.3);
   // Assembled-part blob checks (Engine.puzzleLike); set from the owner's video
   // and the real assembled-puzzle photo, see test/real-50.js.
+  // a close read whose outline is under this share of the session's usual
+  // sharpness is smeared (owner's counter video IMG_3605: the blurrier of two
+  // reads under ~30 agreed 34% of the time, over 60: 85%)
+  PH.SHARP_REL = 0.6;
   PH.PHOTO_FIT = 0.75; // a photo explaining less of its pieces' area than this as single pieces searches (Engine.photoFit)
   PH.PAL_MIN = 1.2e-4; // a box-palette bin at least as common as an even spread counts as "a puzzle colour"
   PH.PAL_SHARE = 0.5;  // share of a blob's pixels in puzzle colours

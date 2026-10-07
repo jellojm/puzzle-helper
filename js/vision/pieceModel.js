@@ -566,13 +566,22 @@
 
   /** Best rotation aligning a to b: a.edges[k] corresponds to b.edges[(k+r)%4]. */
   PH.LEN_GATE = +(typeof process !== 'undefined' && process.env && process.env.LEN_GATE) || 0.08; // two reads of one piece: each edge's relative length within this
-  PH.shapeAlign = function (a, b) {
+  // stretch: compare edge lengths after taking out each read's stretch (the
+  // ratio of its two pairs of opposite sides, within PH.STRETCH_MAX of the
+  // other's) - a view from another angle, or a tilt corrected a little
+  // differently, makes one direction longer and the other shorter.
+  const axisNorm = (t) => { const L = t.edges.map((e) => e.lenRel), p = (L[0] + L[2]) / 2 || 1, q = (L[1] + L[3]) / 2 || 1; return { n: [L[0] / p, L[1] / q, L[2] / p, L[3] / q], asp: Math.log(q / p) }; };
+  PH.shapeAlign = function (a, b, stretch) {
     let best = Infinity, bestR = -1;
+    const na = stretch ? axisNorm(a) : null, nb = stretch ? axisNorm(b) : null;
     for (let r = 0; r < 4; r++) {
       let ok = true, d = 0;
+      // (a quarter turn swaps b's two directions: its stretch flips sign)
+      if (stretch && Math.abs(na.asp - (r % 2 ? -nb.asp : nb.asp)) > PH.STRETCH_MAX) continue;
       for (let k = 0; k < 4 && ok; k++) {
         const ea = a.edges[k], eb = b.edges[(k + r) % 4];
-        if ((ea.type !== eb.type && !ea.unc && !eb.unc) || Math.abs(ea.lenRel - eb.lenRel) > PH.LEN_GATE) { ok = false; break; }
+        const dl = stretch ? Math.abs(na.n[k] - nb.n[(k + r) % 4]) : Math.abs(ea.lenRel - eb.lenRel);
+        if ((ea.type !== eb.type && !ea.unc && !eb.unc) || dl > PH.LEN_GATE) { ok = false; break; }
         const n = ea.sig.length / 2, sb = PH.sigAs(eb.sig, n, eb.gtrim, ea.gtrim || 0);
         let s = 0;
         for (let i = 0; i < n; i++) s += Math.hypot(ea.sig[2 * i] - sb[2 * i], ea.sig[2 * i + 1] - sb[2 * i + 1]);
@@ -744,10 +753,18 @@
   /** Two reads of the piece already linked to this spot agree on its shape:
    *  the same edge types and a close outline (print is not compared - it
    *  differs between a 155 px and a 129 px view of one piece). */
+  // Two re-reads of one spot whose sides differ only by a stretch (owner's
+  // videos: every same-code pair that failed to agree failed on the length
+  // gate alone, with a 13-24% median stretch; all such pairs in IMG_3593 were
+  // the right piece per its key) agree when the outline is close (PH.STRETCH_D).
   PH.shapeAgree = function (a, b) {
     const al = PH.shapeAlign(a, b);
-    return al.r >= 0 && al.d < PH.ANCHOR_SHAPE ? al : null;
+    if (al.r >= 0 && al.d < PH.ANCHOR_SHAPE) return al;
+    const st = PH.shapeAlign(a, b, true);
+    return st.r >= 0 && st.d < PH.STRETCH_D ? Object.assign(st, { stretched: true }) : null;
   };
+  PH.STRETCH_MAX = 0.3; // log ratio: up to ~35% difference in a read's long/short side ratio
+  PH.STRETCH_D = 0.08;  // outline distance for a stretched agreement (tighter than ANCHOR_SHAPE)
   /** A shape signature (x,y pairs, evenly spaced along the edge) at n points:
    *  reads saved with another PH.GEOM_PTS.n compare with today's. */
   // A signature resampled to n points; from/to: the fraction of the arc left

@@ -32,6 +32,7 @@ const VISION = process.env.VISION || path.join(__dirname, '..', 'js', 'vision');
 // the modules the app's worker loads
 for (const f of ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'border', 'flow', 'engine']) require(path.join(VISION, f + '.js'));
 const PH = globalThis.PH;
+if (process.env.PHSET) Object.assign(PH, JSON.parse(process.env.PHSET)); // experiments: PHSET='{"CLOSE_Q":0.5}'
 const ROOT = path.join(__dirname, '..');
 const CASES = {
   3593: { video: 'IMG_3593.MOV', n: 50, key: path.join(__dirname, 'fixtures', 'v3593', 'answer.json') },
@@ -73,6 +74,18 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
   const KEYF = fs.existsSync(KEY) ? JSON.parse(fs.readFileSync(KEY, 'utf8')) : null;
   const votes = new Map(); // key n -> Map(entry id -> count)
   const readLog = new Map(); // READS=1: every shape read per entry, to see why one stays unchecked
+  // READSTUDY=<file.json>: every close read (frame, entry, sharpness, code),
+  // scored against the key at the end (which read was right)
+  const study = process.env.READSTUDY ? { reads: [], frames: [] } : null;
+  if (study) PH.DEBUG_READ = (id, t1, fNo) => {
+    if (!PH.isCloseRead(t1)) { (study.far = study.far || []).push({ fNo, id, side: Math.round(t1.meanSide), q: t1.quality ? t1.quality.q : null }); return; }
+    const p = eng.pieces.get(id), o = p && p.t1 && PH.isCloseRead(p.t1) ? p.t1 : null; // the stored close read it is compared with
+    const m = o ? PH.samePiece(t1, o) : null, sa = o && !(m && m.ok) ? PH.shapeAgree(t1, o) : null;
+    study.reads.push({ fNo, t: curT, id, sharp: t1.quality ? t1.quality.sharp : null, q: t1.quality ? t1.quality.q : null, side: Math.round(t1.meanSide), code: t1.code, centre: t1.centre,
+      len: t1.edges.map((e) => +e.lenRel.toFixed(3)), tilt: t1.tilt || null,
+      vs: o ? { agree: !!((m && m.ok) || sa), d: m && isFinite(m.d) ? +m.d.toFixed(3) : null, len: o.edges.map((e) => +e.lenRel.toFixed(3)), dNoGate: (() => { const g = PH.LEN_GATE; PH.LEN_GATE = Infinity; const al = PH.shapeAlign(t1, o); PH.LEN_GATE = g; return al.r >= 0 ? { d: +al.d.toFixed(3), r: al.r } : null; })(), sharp: o.quality ? o.quality.sharp : null, q: o.quality ? o.quality.q : null, code: o.code, nObs: o.nObs || 1 } : null });
+  };
+  if (study) PH.DEBUG_JOB = (id, pri, t1, fNo) => { (study.jobs = study.jobs || []).push([fNo, id, pri, t1 ? Math.round(t1.meanSide) : 0]); };
   if (process.env.READS) PH.DEBUG_Q = (...a) => { if (String(a[0]).includes('read')) { const id = a[1]; if (!readLog.has(id)) readLog.set(id, []); readLog.get(id).push(a.slice(2).join(' ')); } };
   const tilt = { pitch: 0, roll: 0 };
   let curT = 0;
@@ -98,6 +111,8 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
       if (e && e.gain > 0.05) { tilt.pitch = tilt.pitch * 0.5 + e.pitch * 0.5; tilt.roll = tilt.roll * 0.5 + e.roll * 0.5; }
     }
     const out = eng.processFrame(src, { still: f.still, tilt: { down: PH.downFromAngles(tilt.pitch, tilt.roll), fov: 66 } });
+    if (study) (study.seen = study.seen || []).push([eng.fNo, f.still ? 1 : 0, out.dets.filter((d) => d.id && !d.border).map((d) => [d.id, Math.round(Math.sqrt(d.area) / (eng.lastProc ? eng.lastProc.scale : 1) / 1.1), d.merged ? 1 : 0])]);
+    if (study) { const P = eng.lastProc; if (P) { let s1 = 0, s2 = 0, m = 0; const W = P.w, D = P.data; for (let y = 2; y < P.h - 2; y += 2) for (let x = 2; x < W - 2; x += 2) { const g = (i) => D[4 * i + 1]; const i = y * W + x, v = 4 * g(i) - g(i - 1) - g(i + 1) - g(i - W) - g(i + W); s1 += v; s2 += v * v; m++; } study.frames.push({ fNo: eng.fNo, t: f.t, still: !!f.still, sharp: +Math.sqrt(Math.max(0, s2 / m - (s1 / m) ** 2)).toFixed(2) }); } }
     if (process.env.DETSTATS) { const g = out.dets.filter((d) => !d.border && d.status !== "merged").length; (globalThis.__ds = globalThis.__ds || []).push([g, f.still ? 1 : 0, eng.edgeVoter ? +(eng.edgeVoter.voted || 0) : 0]); }
     if (KEYF && f.t >= 1.4 && f.t <= 2.7 && eng.lastProc) {
       const sc = eng.lastProc.scale, unit = Math.sqrt(eng.unitLive || 1000);
@@ -148,6 +163,9 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
     check('no border found on loose pieces', !eng.pframe, eng.pframe ? 'border marked' : '');
     if (c.gone !== undefined) check('nothing marked gone (no piece was moved)', c.gone === 0, `${c.gone} gone`);
   }
+  if (study) for (const r of study.reads) { const e = eng.pieces.get(eng.finalId(r.id)); r.fid = e ? e.id : null; r.state = e ? (e.state || 'checking') : 'gone'; r.fAgree = e ? e.closeAgree || 0 : null; }
+  if (study) study.entries = [...eng.pieces.values()].map((e) => ({ id: e.id, state: e.state || 'checking', pos: e.pos, island: e.island, gone: !!e.gone, closeAgree: e.closeAgree || 0, close: !!(e.t1 && PH.isCloseRead(e.t1)), code: e.t1 ? e.t1.code : null, sightings: e.sightings || 0 })), study.unit = eng.unitTable ? eng.unitTable() : null;
+  if (study && !fs.existsSync(KEY)) { fs.writeFileSync(process.env.READSTUDY, JSON.stringify(study)); console.log(`read study: ${study.reads.length} close reads -> ${process.env.READSTUDY}`); }
   if (fs.existsSync(KEY) && VARIANT !== 'overview') {
     const key = JSON.parse(fs.readFileSync(KEY, 'utf8'));
     // the entry each key piece became (identity from the overview, through merges)
@@ -163,6 +181,12 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
         console.log(`  #${k.n} (${k.code}):`, e ? `entry ${e.id} ${e.state || 'checking'} closeRead ${!!(e.t1 && PH.isCloseRead(e.t1))} side ${e.t1 ? Math.round(e.t1.meanSide) : '-'} q ${e.t1 && e.t1.quality ? e.t1.quality.q : '-'} closeAgree ${e.closeAgree || 0} sightings ${e.sightings || 0} moments ${e.moments || 0} closeViews ${e.closeViews || 0} code ${e.t1 ? e.t1.code : '-'} gone ${!!e.gone}` : 'no entry near it'); } }
     // one-to-one: similarity key -> map by RANSAC on nearest pairs, then nearest within half a piece
     const res = matchKey(key, got, cv, byIdentity);
+    if (study) { // each read's entry (followed through merges) -> its key piece -> right or not
+      const keyOf = new Map(); for (const [kn, e] of res.assigned) if (e) keyOf.set(e.id, key.pieces.find((k) => k.n === kn));
+      for (const r of study.reads) { const k = keyOf.get(eng.finalId(r.id)); r.key = k ? k.n : null; r.right = k ? cyc(r.code, k.code) : null; }
+      fs.writeFileSync(process.env.READSTUDY, JSON.stringify(study));
+      console.log(`read study: ${study.reads.length} close reads, ${study.reads.filter((r) => r.key).length} on key pieces -> ${process.env.READSTUDY}`);
+    }
     if (process.env.SHEET) { // key crop | the entry's own picture, per key piece (to check the association by eye)
       const rows = key.pieces.map((k) => { const e = res.assigned.get(k.n); return { n: k.n, code: k.code, id: e ? e.id : null, ecode: e && e.t1 ? e.t1.code : null, thumb: e && e.t1 ? { w: e.t1.thumb.w, h: e.t1.thumb.h, data: Array.from(e.t1.thumb.data) } : null, how: byIdentity.has(k.n) ? 'id' : 'pos' }; });
       fs.writeFileSync(process.env.SHEET, JSON.stringify(rows));

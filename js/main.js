@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.22.1';
+const APP_VERSION = '0.22.2';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -153,6 +153,7 @@ function onWorkerMessage(e) {
       tuneFrameRate();
       updateStats(m.counts, m.tracking);
       showDistanceHint(m.view);
+      showBlurHint(m.coach);
       coachFrame(m.coach);
       if (S.debug) showDebug(m);
       break;
@@ -855,6 +856,20 @@ function showDistanceHint(v) {
   const far = $('modeHint').textContent.startsWith('Too far');
   if (v.tooFar) $('modeHint').textContent = v.needCm ? `Too far to read pieces — hold the phone about ${v.needCm} cm above the table` : 'Too far to read pieces — hold the phone closer';
   else if (far) $('modeHint').textContent = modeHint(S.mode);
+}
+// "Hold still" when most recent close-up reads came out smeared (lamp light
+// means long exposures: every one of the owner's 2026-10-07 screenshots was
+// blurred, and smeared reads agree with each other ~23% of the time, so
+// pieces take long to check). Shown in place of the mode hint until the
+// reads are crisp again.
+function showBlurHint(c) {
+  if (S.mode === 'map' || !S.ready || $('modeHint').textContent.startsWith('Too far') || $('modeHint').textContent.startsWith('Tilt the phone')) return;
+  const on = $('modeHint').textContent.startsWith('Hold still');
+  const torchHelp = !$('torchRow').hidden && !S.torch;
+  if (c && c.reads >= 6 && c.soft >= 0.6) {
+    if (!on) bump('blurHint');
+    $('modeHint').textContent = 'Hold still a moment — the pieces look smeared' + (torchHelp ? ' (or turn on the flashlight under More)' : '');
+  } else if (on && (!c || c.soft <= 0.3)) $('modeHint').textContent = modeHint(S.mode);
 }
 // Running match accuracy from Fits/No answers (the answer key).
 function showAccuracy(st) {
