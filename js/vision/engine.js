@@ -66,6 +66,7 @@
       this.bestCache = new Map(); // 'id:edge' -> {v, best}: best partner per edge (mutual-best check)
       this.rejects = {}; // why detections were not catalogued (reports)
       this.boardRef = null; this.boardSeen = null; // the scan's board colour (noteBoard)
+      this.boardRecent = []; // the board's lightness in recent frames (odd-light check)
     }
 
     // ---------- catalog helpers ----------
@@ -756,12 +757,17 @@
       this.frameCtx = { source, scale: proc.scale, bg: this.bg, thresh: this.thresh, lut: seg.lut, unitArea: seg.unitArea, still: info.still !== false, deadline: t0 + this.opts.budgetMs, live: true, fg: seg.fg, procW: proc.w, procH: proc.h,
         rgba: proc.invalid ? proc.data : null }; // (a straightened tilted view has empty corners outside the camera image: alpha 0)
       this.frameCtx.view = this.viewGeometry(this.unitLive || seg.unitArea, proc.scale, source.w, source.h);
-      // A frame much darker or brighter than the scan's usual board (the
+      // A frame much darker or brighter than the board in recent frames (the
       // phone's shadow over the whole view, an exposure jump): its colours and
       // even its outlines are off. It may keep pieces linked to their spots,
       // but decides nothing new - no new entries, no "gone" or "swapped", no
-      // re-finding by shape (plan item 7).
-      this.frameCtx.offLight = !!(this.boardRef && boardNow && Math.abs(Math.log((boardNow.L || 1) / this.boardRef.L)) > Math.log(1.25));
+      // re-finding by shape (plan item 7). Judged against the recent level,
+      // not the scan's reference: a light that stays (a lamp, another table,
+      // a new exposure) is normal after ~12 frames. Against the reference, a
+      // scan carried from the glass table to the counter was "odd light"
+      // forever and never added a piece (v0.22.0, report 03-23-12).
+      const lvl = this.boardLevel(boardNow);
+      this.frameCtx.offLight = !!(lvl && boardNow && Math.abs(Math.log((boardNow.L || 1) / lvl)) > Math.log(1.25));
       this.frameCtx.boardL = boardNow ? Math.round(boardNow.L) : null;
       if (this.frameCtx.offLight) this.rejects.offLight = (this.rejects.offLight || 0) + 1;
       for (const [k, c] of this.cands) if (this.fNo - c.last > 6) this.cands.delete(k); // lost from view
@@ -1636,6 +1642,15 @@
       if (S.length < 8) return;
       this.boardRef = { L: PH.median(S.map((v) => v[0])), a: PH.median(S.map((v) => v[1])), b: PH.median(S.map((v) => v[2])) };
       this.boardSeen = null; this.boardRefDirty = true;
+    }
+    /** The board's usual lightness for the odd-light check: the median of
+     *  the last ~24 frames (this one included); null (nothing to judge
+     *  against) until 3 frames are in. Never the scan's saved reference: it
+     *  may come from another table or another evening. */
+    boardLevel(bg) {
+      const R = this.boardRecent;
+      if (bg && bg.L > 15) { R.push(bg.L); if (R.length > 24) R.shift(); }
+      return R.length >= 3 ? PH.median(R) : null;
     }
     /** Share of the processing frame's pixels within radius r of point f that
      *  show bare board (not foreground). */

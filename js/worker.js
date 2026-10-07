@@ -84,30 +84,64 @@ function camStop() {
   if (camReader) { try { camReader.cancel(); } catch (_) { /* gone */ } camReader = null; }
   if (camLatest) { camLatest.close(); camLatest = null; }
 }
-// A VideoFrame as an image source (same interface as bitmapSource).
-function videoFrameSource(vf) {
-  const w = vf.displayWidth, h = vf.displayHeight;
+// iPhone camera frames read here arrive in the sensor's landscape
+// orientation while the page shows a portrait video (owner's reports:
+// "frame 1920x1440 vs video 1440x1920"). camRot is the clockwise turn that
+// puts them the video's way up, worked out by the page from thumbnails
+// (camProbe). Not VideoFrame.rotation: whether drawImage already applies it
+// can't be checked here, and a double turn would put every mark wrong.
+let camRot = null;
+// Draw VideoFrame `vf` (w x h) turned `rot` degrees clockwise, scaled by s,
+// with the turned image's point (x0, y0) at the canvas origin.
+function drawTurned(ctx, vf, w, h, rot, s, x0, y0) {
+  const M = rot === 90 ? [0, 1, -1, 0, h, 0] : rot === 270 ? [0, -1, 1, 0, 0, w] : rot === 180 ? [-1, 0, 0, -1, w, h] : [1, 0, 0, 1, 0, 0];
+  ctx.setTransform(s * M[0], s * M[1], s * M[2], s * M[3], s * M[4] - x0, s * M[5] - y0);
+  ctx.drawImage(vf, 0, 0, w, h);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+// A VideoFrame as an image source (same interface as bitmapSource), turned
+// `rot` degrees clockwise.
+function videoFrameSource(vf, rot) {
+  const fw = vf.displayWidth, fh = vf.displayHeight;
+  const side = rot === 90 || rot === 270;
+  const w = side ? fh : fw, h = side ? fw : fh;
   return {
     w, h,
     getProc(maxW) {
       const scale = Math.min(1, maxW / Math.max(w, h));
       const pw = Math.round(w * scale), ph = Math.round(h * scale);
       const c = canvas2d(pw, ph, 'proc' + pw);
-      c.ctx.drawImage(vf, 0, 0, pw, ph);
+      if (rot) drawTurned(c.ctx, vf, fw, fh, rot, scale, 0, 0); else c.ctx.drawImage(vf, 0, 0, pw, ph);
       return { w: pw, h: ph, data: c.ctx.getImageData(0, 0, pw, ph).data, scale };
     },
     getCrop(x, y, cw, ch) {
       const c = canvas2d(cw, ch, 'crop');
       c.ctx.clearRect(0, 0, cw, ch);
-      c.ctx.drawImage(vf, x, y, cw, ch, 0, 0, cw, ch);
+      if (rot) drawTurned(c.ctx, vf, fw, fh, rot, 1, x, y); else c.ctx.drawImage(vf, x, y, cw, ch, 0, 0, cw, ch);
       return { w: cw, h: ch, data: c.ctx.getImageData(0, 0, cw, ch).data };
     },
     rgba() {
       const c = canvas2d(w, h, 'full');
-      c.ctx.drawImage(vf, 0, 0);
+      if (rot) drawTurned(c.ctx, vf, fw, fh, rot, 1, 0, 0); else c.ctx.drawImage(vf, 0, 0);
       return { w, h, data: c.ctx.getImageData(0, 0, w, h).data };
     },
   };
+}
+// Grey thumbnails of `vf` turned 90 and 270 degrees, long side 32, for the
+// page to compare against its own video (which way up is right).
+function camProbe(vf) {
+  const fw = vf.displayWidth, fh = vf.displayHeight, s = 32 / Math.max(fw, fh);
+  const tw = Math.max(1, Math.round(fh * s)), th = Math.max(1, Math.round(fw * s));
+  const out = { w: tw, h: th };
+  for (const r of [90, 270]) {
+    const c = canvas2d(tw, th, 'probe');
+    c.ctx.clearRect(0, 0, tw, th);
+    drawTurned(c.ctx, vf, fw, fh, r, s, 0, 0);
+    const d = c.ctx.getImageData(0, 0, tw, th).data, g = new Float32Array(tw * th);
+    for (let i = 0; i < g.length; i++) g[i] = d[4 * i] * 0.3 + d[4 * i + 1] * 0.59 + d[4 * i + 2] * 0.11;
+    out['r' + r] = g;
+  }
+  return out;
 }
 
 function frameFrom(src, msg, bitmap) {
@@ -327,6 +361,7 @@ const handlers = {
     camPump(msg.track); // runs on its own, outside the message chain
   },
   camTrackOff() { camStop(); },
+  camRot(msg) { camRot = msg.rot; },
   // test hook (e2e): a WebAssembly trap like the one in the owner's screenshots
   __trap() { throw new WebAssembly.RuntimeError('Out of bounds memory access (test)'); },
   frame(msg) {
@@ -334,7 +369,13 @@ const handlers = {
       // newest camera frame read in the worker (none yet: tell the page)
       const vf = camLatest; camLatest = null;
       if (!vf) { post({ type: 'frame', noFrame: true }); return; }
-      try { frameFrom(videoFrameSource(vf), msg, null); } finally { vf.close(); }
+      // Sideways compared with the page's video: turn it (camRot).
+      const sideways = msg.vw && msg.vh && (vf.displayWidth > vf.displayHeight) !== (msg.vw > msg.vh);
+      if (sideways && camRot === null) {
+        try { post({ type: 'frame', camProbe: camProbe(vf) }); } finally { vf.close(); }
+        return;
+      }
+      try { frameFrom(videoFrameSource(vf, sideways ? camRot : 0), msg, null); } finally { vf.close(); }
       // Frames that arrive but are blank (all one value) would quietly
       // catalogue nothing: 10 in a row -> back to the page's bitmaps.
       const d = engine.lastProc && engine.lastProc.data;

@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.21.4';
+const APP_VERSION = '0.22.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -96,6 +96,13 @@ function onWorkerMessage(e) {
       if (m.noFrame) { // worker camera has no frame yet
         S.busy = false;
         if (++S.wcEmpty > 15) stopWorkerCam('no camera frames in the worker');
+        break;
+      }
+      if (m.camProbe) { // the worker's frames are sideways: which way to turn them
+        S.busy = false;
+        const rot = camProbeTurn(m.camProbe);
+        if (rot) { W.post({ type: 'camRot', rot }); S.camPath = 'worker (turned ' + rot + '°)'; }
+        else if (++S.wcProbes > 8) stopWorkerCam('could not tell which way up the worker frames are');
         break;
       }
       if (m.fromTrack) {
@@ -291,8 +298,33 @@ function startWorkerCam() {
   try {
     const t = S.track.clone();
     W.post({ type: 'camTrack', track: t }, [t]);
-    S.workerCam = true; S.wcEmpty = 0; S.camPath = 'worker';
+    S.workerCam = true; S.wcEmpty = 0; S.wcProbes = 0; S.camPath = 'worker';
   } catch (e) { stopWorkerCam('track transfer: ' + e.message); }
+}
+// The worker's sideways frames turned 90 and 270 degrees (tiny grey thumbs),
+// against the video as the page shows it: the clockwise turn that matches
+// clearly better, or null to try again on a later frame (a blank view).
+function camProbeTurn(p) {
+  const c = S.probeCanvas || (S.probeCanvas = document.createElement('canvas'));
+  c.width = p.w; c.height = p.h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(video, 0, 0, p.w, p.h);
+  const d = ctx.getImageData(0, 0, p.w, p.h).data, g = new Float32Array(p.w * p.h);
+  for (let i = 0; i < g.length; i++) g[i] = d[4 * i] * 0.3 + d[4 * i + 1] * 0.59 + d[4 * i + 2] * 0.11;
+  const r90 = camCorr(g, p.r90), r270 = camCorr(g, p.r270);
+  S.camProbeLast = [+r90.toFixed(2), +r270.toFixed(2)];
+  if (Math.max(r90, r270) < 0.5 || Math.abs(r90 - r270) < 0.2) return null;
+  return r90 > r270 ? 90 : 270;
+}
+// Normalised correlation of two equal-length arrays (-1..1; 0 if flat).
+function camCorr(a, b) {
+  const n = Math.min(a.length, b.length);
+  let ma = 0, mb = 0;
+  for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+  ma /= n; mb /= n;
+  let sab = 0, saa = 0, sbb = 0;
+  for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; sab += x * y; saa += x * x; sbb += y * y; }
+  return saa > 1e-6 && sbb > 1e-6 ? sab / Math.sqrt(saa * sbb) : 0;
 }
 function stopWorkerCam(why) {
   if (!S.workerCam && S.wcOff) return;
@@ -570,7 +602,7 @@ async function sendFrame() {
     S.lastTilt = currentTilt();
     S.sentAt = performance.now();
     bump('framesSent');
-    W.post({ type: 'frame', fromTrack: true, still: S.lastStill, tilt: S.lastTilt, sentAt: performance.timeOrigin + performance.now() });
+    W.post({ type: 'frame', fromTrack: true, still: S.lastStill, tilt: S.lastTilt, vw: video.videoWidth, vh: video.videoHeight, sentAt: performance.timeOrigin + performance.now() });
     clearTimeout(S.wcTimer);
     S.wcTimer = setTimeout(() => stopWorkerCam('no frame back within 3 s'), 3000);
     return;
@@ -685,7 +717,10 @@ function updateStats(c, tracking) {
   S.counts = c;
   // Only checked pieces are counted (v0.20); entries still being checked
   // show as amber "scan closer" rings and are counted apart.
-  const parts = [`${c.pieces} pieces`];
+  // Before the first piece is checked, "0 pieces" over pieces in plain view
+  // read as "not working" (owner's screenshot IMG_3629): say what's in view.
+  const inView = S.last && S.last.dets ? S.last.dets.filter((d) => !d.border).length : 0;
+  const parts = [c.pieces || !inView ? `${c.pieces} pieces` : `reading ${inView} in view`];
   if (c.gone) parts.push(`${c.gone} moved, not found yet`);
   if (S.box) parts.push(`${c.placed} on box picture`);
   if (c.unchecked) parts.push(`scan closer at ${c.unchecked} ◌`);
@@ -789,9 +824,9 @@ $('fovMeasure').onclick = measureFov;
 
 // ---------- capture coach ----------
 // Watches the last ~40 frames for setups that defeat the camera and says
-// what to change, once per problem per session: pale pieces that blend into
-// the board (a dark cloth fixes it: 9% -> 100% of pale pieces read right in
-// testing) and glare.
+// what to change, once per problem per session: glare. No tip asks to change
+// the table (owner, 2026-10-07: no cloth); pale pieces that blend into the
+// board turn on the engine's texture channel instead (coachNow.texture).
 S.coachWin = []; S.coachSeen = {};
 function coachFrame(c) {
   if (!c || S.mode !== 'scan' || S.teaching) return;
@@ -802,8 +837,7 @@ function coachFrame(c) {
   const n = W.reduce((s, x) => s + x.n, 0), low = W.reduce((s, x) => s + x.low, 0), glare = W.reduce((s, x) => s + x.glare, 0) / W.length;
   S.coachNow = { n, low, glare: +glare.toFixed(3) };
   let tip = null;
-  if (n >= 25 && low / n >= 0.3) tip = ['pale', 'Many pieces blend into the table, so their outlines get cut short. Lay a dark cloth or towel under them — pale pieces read far better on dark. (With a glass table, a tablet showing a white screen underneath works too.)'];
-  else if (glare >= 0.04) tip = ['glare', 'Glare is washing out part of the view. Move the light off to the side, or tilt the phone a little — the tilt is corrected.'];
+  if (glare >= 0.04) tip = ['glare', 'Glare is washing out part of the view. Tilt the phone a little — the tilt is corrected.'];
   if (!tip || S.coachSeen[tip[0]]) return;
   S.coachSeen[tip[0]] = true;
   bump('coach_' + tip[0]);
@@ -1631,7 +1665,7 @@ async function finishReport(workerData, analyzed, boxImg) {
     // capture coach: pieces blending into the board / glare over the last ~40 frames, and which tips were shown
     coach: { now: S.coachNow || null, shown: Object.keys(S.coachSeen || {}) },
     cameraFps: { wanted: S.fpsWanted || null, got: S.track && S.track.getSettings ? S.track.getSettings().frameRate : null },
-    cameraPath: S.camPath || 'bitmap', lastPhoto: S.lastPhoto || null, fovMeasure: S.fovResult || null,
+    cameraPath: S.camPath || 'bitmap', camProbe: S.camProbeLast ? { corr90_270: S.camProbeLast, tries: S.wcProbes } : null, lastPhoto: S.lastPhoto || null, fovMeasure: S.fovResult || null,
     power: { active: S.active, idle: S.idle, idleOn: S.idleOn, calm: S.calm, gap: Math.round(frameGap()), wakeLock: !!S.wakeLock },
     // Camera-motion tracker health: how often it was sure of a step, its cost
     // on this phone, and the recent motion level it uses for stillness.

@@ -86,9 +86,10 @@ function writePng(file, mat) {
     await page.evaluate(() => { const t = document.getElementById('debugToggle'); t.checked = true; t.dispatchEvent(new Event('change')); });
     // Wait for OpenCV download + first frames.
     // (v0.20: the top bar counts checked pieces; entries still being checked
-    // show as "scan closer at N" - together, what has been catalogued)
-    const catalogued = (t) => parseInt(t, 10) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0);
-    await page.waitForFunction(() => { const t = document.getElementById('stats').textContent; return parseInt(t, 10) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0) > 0; }, null, { timeout: 120000 });
+    // show as "scan closer at N" - together, what has been catalogued; v0.22:
+    // "reading N in view" until the first piece is checked = 0 checked)
+    const catalogued = (t) => (parseInt(t, 10) || 0) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0);
+    await page.waitForFunction(() => { const t = document.getElementById('stats').textContent; return (parseInt(t, 10) || 0) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0) > 0; }, null, { timeout: 120000 });
     await page.waitForTimeout(15000);
     const stats1 = await page.textContent('#stats');
     const dbg = await page.textContent('#debug');
@@ -365,13 +366,13 @@ function writePng(file, mat) {
     await page.waitForTimeout(500);
     const nSaved = await page.evaluate(() => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1]);
     await page.click('#newPuzzle');
-    await page.waitForFunction(() => /^0 pieces/.test(document.getElementById('stats').textContent), null, { timeout: 8000 }).catch(() => {});
+    await page.waitForFunction(() => /^(0 pieces|reading \d+ in view)/.test(document.getElementById('stats').textContent), null, { timeout: 8000 }).catch(() => {});
     const afterNew = await page.textContent('#stats');
     await page.click('#menuBtn');
     await page.waitForFunction(() => document.querySelectorAll('#libList .lib-row button').length > 0, null, { timeout: 8000 }).catch(() => {});
     await page.evaluate(() => { const row = [...document.querySelectorAll('#libList .lib-row')].find((r) => /E2E puzzle/.test(r.textContent)); if (row) row.querySelector('button').click(); });
     const reopened = await page.waitForFunction((n) => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1] === n, nSaved, { timeout: 10000 }).then(() => true).catch(() => false);
-    check('Puzzle library: save, start a new puzzle, open the saved one again', saved && /^0 pieces/.test(afterNew) && reopened, `saved ${saved} (${n0} pieces before, ${nSaved} as saved); after New: ${afterNew}; reopened with ${nSaved} pieces: ${reopened}`);
+    check('Puzzle library: save, start a new puzzle, open the saved one again', saved && /^(0 pieces|reading \d+ in view)/.test(afterNew) && reopened, `saved ${saved} (${n0} pieces before, ${nSaved} as saved); after New: ${afterNew}; reopened with ${nSaved} pieces: ${reopened}`);
     await page.click('#closeMenu').catch(() => {});
 
     check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));

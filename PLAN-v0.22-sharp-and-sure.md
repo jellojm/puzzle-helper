@@ -46,10 +46,42 @@ the phone. No new settings; values are tuned by tests.
    orientation instead of switching the path off (check the turn direction
    on the phone with a report).
 
-Tests: `report-replay.js` of 03-23-12 frames must create entries;
-`quality-gate.js` gains an offLight re-base case; `real-50.js` still exactly
-50 and no slower to the first checked piece (new metric: *seconds to first
-checked* and *checked at 30 s*, printed by the test).
+**Built (v0.22.0, 2026-10-07):**
+- Cause of IMG_3629's "0 pieces", found in the reports: the 03-23-12 session
+  continued the glass-table scan (same 20×15 box) on the counter. The board
+  reference saved with that scan came from the glass (L ≈ 110-137); the
+  counter reads L ≈ 175, so every frame was "odd light". The check now
+  compares with the median board lightness of the last ~24 frames
+  (`Engine.boardLevel`), not the saved reference. The reference itself is
+  kept for the colour correction (`PH.lightFix`), so colours stay comparable
+  within a scan. `quality-gate.js`: a reference carried from another table
+  gives 0 of 43 pieces on the old engine and 43 of 43 now. A sudden dark frame
+  is still "odd light"; the same light held for ~12 frames is normal.
+- Headline: "reading N in view" in place of "0 pieces" until the first piece
+  is checked.
+- The cloth tip is removed. Pale pieces still switch on the texture channel.
+  The glare tip now says only "tilt the phone".
+- Worker camera: sideways frames are turned to match the video. The turn is
+  worked out from the picture: the worker sends
+  32 px grey thumbnails turned 90° and 270°, and the page keeps the one that
+  correlates with its own video (by at least 0.2 more, and at least 0.5).
+  After 8 views it can't decide on, it falls back to bitmaps as before. Reports
+  carry `camProbe`. New `test/cam-turn.js` (headless Edge, real VideoFrames)
+  checks pixel-exact turns, crops and scaling, and that the right turn is
+  picked both ways.
+
+Measured against v0.21.4 on the same machine (CPU-time clock, run side by
+side): IMG_3593 48 vs 48 checked, identical timeline, first piece checked at
+5.0 s in both. IMG_3605 23 vs 24 checked (noise), 16 vs 15 at 30 s.
+`run-tests.js` on a step clock (deterministic): identical (93/96, 85
+checked). Its "live sweep" check fails under load, on the old code too. e2e
+all passed.
+
+Tests: `quality-gate.js` covers the carried reference (a single report frame
+can't: the check needs the frames before it). `cam-turn.js` is in `npm test`.
+`real-50.js` now prints *first checked piece at* and *checked at 30 s*; it
+must not do worse than the old engine run on the same idle machine (it has
+time budgets, so a loaded machine changes its result).
 
 ### Batch 2 — v0.22.1: sharp reads only
 
@@ -99,7 +131,27 @@ outline is a different curve from the real cut.
 2. **Shadow-aware colour distance.** A pixel that is a darker version of the
    board colour (same a/b within tolerance, lower L) is board, not piece,
    unless the texture channel says otherwise.
-3. **Neck and head width, and depth, as explicit edge features** (research
+3. **The photo's background check must not pick a shadow-joined model.**
+   IMG_3627 (owner's labelled look-alike trio, now a known-weak case in
+   `real-joins.js`, join `[0, 2, 2, 1]`): the app reads 0 of 3 pieces. Of the
+   candidates, the single-colour model fuses each piece with its lamp shadow
+   (blobs with corner scores 0.05-0.10, nothing reads). The two-colour model
+   gives the three piece-sized blobs (0.03, 0.31, 0.37) but scores 1 against
+   3. Two scraps of 205 and 3838 px pass the shape test, pull the median blob
+   size down, and an 86k px piece counts as "too big" (`scoreBg`). Forced to
+   the two-colour model, the top and middle pieces read (BTBT, BTBT, as the
+   owner's marks show). The bottom one still fails: its strong shadow joins
+   along the top-left. Fix: a mass-weighted common size, with candidate
+   models scored by how well their blobs read, not only how many there are.
+   For photos, which are analysed once, compare shape reads. Then 2 above
+   (shadow-aware colour) for the third piece.
+   IMG_3622 (owner, 2026-10-07: three joins marked in colour; assembled in
+   IMG_3615 as a 2×2) is now known-weak too, with pieces labelled by
+   position. 2 of 4 read: the top-left piece and the pair's upper piece. The
+   bottom-left piece and the pair's lower piece don't. The one join that can
+   be measured (green) doesn't rank its partner first. These two photos are
+   the bar for Batch 4: all 7 pieces read, and the 4 joins ranked.
+4. **Neck and head width, and depth, as explicit edge features** (research
    item 11, never built): three numbers per edge that are robust to
    outline noise and cheap to compare before the 32-point signature.
 

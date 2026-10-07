@@ -31,8 +31,9 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
     for (let y = vh / 2; y <= Math.max(vh / 2, scat.TH - vh / 2) + 1; y += vh * 0.45) for (let x = vw / 2; x <= Math.max(vw / 2, scat.TW - vw / 2) + 1; x += vw * 0.3) for (let k = 0; k < per; k++) out.push([x + k * 6, y]);
     return out;
   };
-  const run = (stops, zoom, still, order) => {
+  const run = (stops, zoom, still, order, prep) => {
     const eng = new PH.Engine();
+    if (prep) prep(eng);
     const seq = order ? order(stops) : stops;
     for (const [x, y] of seq) {
       const fr = S.cameraFrame(cv, scat.table, x, y, 0, zoom, FW, FH);
@@ -60,6 +61,26 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
   const good = run(stopsAt(1.5, 3), 1.5, true);
   const c = good.counts();
   check('a steady sweep catalogues the pieces, once each', c.entries >= n * 0.85 && c.entries <= n, `${c.entries} of ${n}`);
+
+  // v0.22.0 (report 03-23-12: 0 pieces, 418 of 420 frames "odd light"): a scan
+  // carried from the glass table (board L ~110) to the bright counter keeps
+  // the glass table's light reference. The new light must become normal.
+  {
+    const boardL = good.frameCtx.boardL; // this synthetic table's board
+    const refL = boardL > 140 ? boardL / 1.6 : Math.min(250, boardL * 1.6); // another table's: well past the 1.25x odd-light limit
+    const carried = run(stopsAt(1.5, 3), 1.5, true, null, (eng) => { eng.boardRef = { L: refL, a: 131, b: 140 }; });
+    const cc = carried.counts();
+    check('a light reference from another table does not block cataloguing', cc.entries >= c.entries * 0.85, `${cc.entries} entries (normal ${c.entries}); board L ${boardL}, carried reference ${Math.round(refL)}; odd-light frames ${carried.rejects.offLight || 0}`);
+    // A brief shadow or exposure jump is still odd light; a lasting one is not.
+    const e2 = new PH.Engine();
+    for (let i = 0; i < 20; i++) e2.boardLevel({ L: 175 });
+    const lvl1 = e2.boardLevel({ L: 120 });
+    const odd1 = Math.abs(Math.log(120 / lvl1)) > Math.log(1.25);
+    for (let i = 0; i < 12; i++) e2.boardLevel({ L: 120 });
+    const lvl2 = e2.boardLevel({ L: 120 });
+    const odd2 = Math.abs(Math.log(120 / lvl2)) > Math.log(1.25);
+    check('a sudden dark frame is odd light; the same light kept for ~12 frames is normal', odd1 && !odd2, `level ${lvl1} then ${lvl2}`);
+  }
 
   // v0.10.0 deadlock (owner's 200-piece session: 0 pieces in 3 minutes): a
   // section (merged blob) catalogued in the very first steady frame made the
