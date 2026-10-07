@@ -814,6 +814,7 @@
     // the budget left, and at most one per frame; photos split everything.
     const live = opts.splitBudgetMs !== undefined;
     let pilesSplit = 0;
+    const cornerLater = [];
     for (const b of blobs) {
       // Clusters of a few pieces always; whole piles too unless the caller
       // turned that off (time-limited on live frames by splitBudgetMs).
@@ -828,10 +829,23 @@
         // with a straight cut that read as a border side: false "edge pieces"
         // with a seam inside (owner, 2026-10-04).
         const concaveOk = b.area <= 3 * unitA || b.solidity < 0.8;
-        const pieces = PH.splitBlob(b.cnt, labMat, unitA, w, h) || (opts.concave !== false && concaveOk ? PH.splitConcave(b.cnt, unitA) : null);
+        const pieces = PH.splitBlob(b.cnt, labMat, unitA, w, h) || (opts.concave !== false && concaveOk ? PH.splitTouching(b.cnt, unitA, w, h, splitEnd, false) : null);
         if (pieces) { b.cnt.delete(); for (const p of pieces) parts.push({ cnt: p, split: true, parent: { area: b.area / unitA, solidity: b.solidity } }); continue; }
+        // corner cuts are slow (~5-10 ms): only once every clump has had the
+        // fast splitters, with the time that is left
+        // (a few loose pieces only: an assembled part is all ~90 deg seams, and
+        // cutting it along them broke the border into 3 parts - open-spots B)
+        if (opts.concave !== false && concaveOk && b.area <= PH.CORNER_MAX_UNITS * unitA) cornerLater.push({ b, part: parts.length });
       }
       parts.push({ cnt: b.cnt, split: false, solidity: b.solidity });
+    }
+    for (const { b, part } of cornerLater) {
+      if (now() >= splitEnd) break;
+      const pieces = PH.splitTouching(b.cnt, unitA, w, h, splitEnd, true);
+      if (!pieces) continue;
+      b.cnt.delete();
+      parts[part] = { cnt: pieces[0], split: true, parent: { area: b.area / unitA, solidity: b.solidity } };
+      for (const p of pieces.slice(1)) parts.push({ cnt: p, split: true, parent: { area: b.area / unitA, solidity: b.solidity } });
     }
     if (labMat) labMat.delete();
     mark('split');
@@ -1031,6 +1045,141 @@
     }
     return out;
   };
+
+  /**
+   * Split touching pieces by their corners (owner's idea, 2026-10-07): with
+   * the tabs and blanks smoothed off, every piece is close to a square, so a
+   * clump of them is a polygon whose corners are ~90 deg - outward ones are
+   * piece corners, inward ones (~270 deg inside) are where two pieces meet -
+   * and whose sides come in ~one piece side. Cuts start at an inward corner
+   * and run on along one of its two sides (the seam continues the side of
+   * the neighbouring piece), or straight to another inward corner, through
+   * the clump. Each cut is judged by its two parts: piece-sized and shaped
+   * like a jigsaw piece (PH.pieceScore, on the real outline); parts still
+   * the size of 2+ pieces are cut again. Returns contour Mats or null.
+   */
+  PH.splitCorners = function (cnt, unitA, w, h, depth) {
+    const cv = PH.cv;
+    depth = depth || 0;
+    const side = Math.sqrt(unitA / 1.1);
+    const br = cv.boundingRect(cnt), pad = 4;
+    const x0 = br.x - pad, y0 = br.y - pad, RW = br.width + 2 * pad, RH = br.height + 2 * pad;
+    const blob = cv.Mat.zeros(RH, RW, cv.CV_8UC1), one = new cv.MatVector(); one.push_back(cnt);
+    cv.drawContours(blob, one, 0, new cv.Scalar(255), -1, cv.LINE_8, new cv.Mat(), 0, new cv.Point(-x0, -y0));
+    one.delete();
+    // tabs off (open), blanks filled (close): knobs are ~0.25-0.35 of a side
+    const r = Math.max(2, Math.round(side * PH.CORNER_KNOB)), kk = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * r + 1, 2 * r + 1));
+    const smooth = new cv.Mat();
+    cv.morphologyEx(blob, smooth, cv.MORPH_OPEN, kk);
+    cv.morphologyEx(smooth, smooth, cv.MORPH_CLOSE, kk);
+    kk.delete();
+    const cs = new cv.MatVector(), hh = new cv.Mat();
+    cv.findContours(smooth, cs, hh, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
+    let big = null, ba = 0;
+    for (let i = 0; i < cs.size(); i++) { const c = cs.get(i), a = cv.contourArea(c); if (a > ba) { ba = a; big = c; } }
+    const cuts = [];
+    if (big) {
+      const poly = new cv.Mat();
+      cv.approxPolyDP(big, poly, side * PH.CORNER_EPS, true);
+      const V = [], n = poly.rows;
+      for (let i = 0; i < n; i++) V.push([poly.data32S[2 * i], poly.data32S[2 * i + 1]]);
+      poly.delete();
+      // orientation: inward corners turn against the outline's direction
+      let s2 = 0; for (let i = 0; i < n; i++) { const a = V[i], b = V[(i + 1) % n]; s2 += a[0] * b[1] - b[0] * a[1]; }
+      const dir = Math.sign(s2) || 1;
+      const inward = [];
+      for (let i = 0; i < n; i++) {
+        const a = V[(i + n - 1) % n], b = V[i], c = V[(i + 1) % n];
+        const cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+        const ang = Math.abs(Math.atan2(cross, (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]))) * 180 / Math.PI; // turn
+        if (cross * dir < 0 && ang > 30) inward.push({ p: b, a, c });
+      }
+      const inside = (x, y) => x >= 0 && y >= 0 && x < RW && y < RH && blob.data[(y | 0) * RW + (x | 0)];
+      // along a ray from p: to where the clump ends (the far side of the seam)
+      const ray = (p, ux, uy) => {
+        const L = Math.hypot(ux, uy); ux /= L; uy /= L;
+        let t = 1.5;
+        while (t < side * PH.CORNER_MAX_CUT && inside(p[0] + ux * t, p[1] + uy * t)) t += 0.5;
+        return t < side * PH.CORNER_MAX_CUT && t > 2 ? [p[0] + ux * (t + 1), p[1] + uy * (t + 1)] : null;
+      };
+      for (const v of inward) {
+        // on along the side coming in, and back along the side going out
+        for (const [ux, uy] of [[v.p[0] - v.a[0], v.p[1] - v.a[1]], [v.p[0] - v.c[0], v.p[1] - v.c[1]]]) {
+          const e = ray(v.p, ux, uy);
+          if (e) cuts.push([v.p, e]);
+        }
+        for (const u of inward) if (u !== v && u.p[0] + u.p[1] * RW > v.p[0] + v.p[1] * RW && Math.hypot(u.p[0] - v.p[0], u.p[1] - v.p[1]) < side * PH.CORNER_MAX_CUT) cuts.push([v.p, u.p]);
+      }
+    }
+    [cs, hh, smooth].forEach((m) => m.delete());
+    // judge each cut by its parts (on the real outline)
+    const partsOf = (cut) => {
+      const m = blob.clone();
+      cv.line(m, new cv.Point(Math.round(cut[0][0]), Math.round(cut[0][1])), new cv.Point(Math.round(cut[1][0]), Math.round(cut[1][1])), new cv.Scalar(0), 2);
+      const c2 = new cv.MatVector(), h2 = new cv.Mat();
+      cv.findContours(m, c2, h2, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE, new cv.Point(x0, y0));
+      const out = [];
+      for (let i = 0; i < c2.size(); i++) { const c = c2.get(i), a = cv.contourArea(c); if (a >= unitA * 0.15) out.push({ c: c.clone(), a }); c.delete(); }
+      [m, c2, h2].forEach((x) => x.delete());
+      return out;
+    };
+    let best = null;
+    cuts.sort((p, q) => Math.hypot(p[1][0] - p[0][0], p[1][1] - p[0][1]) - Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1])); // seams are short
+    for (const cut of cuts.slice(0, PH.CORNER_CUTS)) {
+      const parts = partsOf(cut);
+      let sc = parts.length === 2 ? Infinity : -1;
+      if (sc > 0) for (const q of parts) {
+        if (q.a < PH.CORNER_MIN_PART * unitA) { sc = -1; break; }
+        const s = q.a <= 1.6 * unitA ? PH.pieceScore(q.c.data32S, q.a) : PH.MIN_CORNER_SCORE * 2; // (cut again below)
+        sc = Math.min(sc, s);
+      }
+      if (sc > PH.MIN_CORNER_SCORE * 1.5 && (!best || sc > best.sc)) { if (best) best.parts.forEach((q) => q.c.delete()); best = { sc, parts }; }
+      else parts.forEach((q) => q.c.delete());
+    }
+    blob.delete();
+    if (!best) return null;
+    const out = [];
+    for (const q of best.parts) {
+      const more = q.a > 1.6 * unitA && depth < 4 ? PH.splitCorners(q.c, unitA, w, h, depth + 1) : null;
+      if (more) { q.c.delete(); out.push(...more); } else out.push(q.c);
+    }
+    return out;
+  };
+  /**
+   * Notches first (PH.splitConcave: pieces touching at random angles, often
+   * tab to side), corners for what is left and for parts still 2+ pieces big
+   * (PH.splitCorners: pieces lying square to each other). Synthetic clumps of
+   * 2-4 real-shaped pieces (test/clump-split.js, 300, pieces 40 px): exactly
+   * right 70% with notches alone, 77% together (groups of 4: 42 -> 53%).
+   */
+  PH.splitTouching = function (cnt, unitA, w, h, deadline, useCorners) {
+    const cv = PH.cv;
+    // (corner cuts cost ~5-10 ms a clump: only with time left in the frame's
+    // split budget - spending it all here left other clumps unsplit, which
+    // cost the outline model its lead on the glass photo pieces-1)
+    const time = () => deadline === undefined || deadline === Infinity || now() < deadline - PH.CORNER_MS;
+    // corners only for what doesn't already look like ONE piece (the piece
+    // size can be low - then a whole piece looks two pieces big, and a cut
+    // straight through it leaves two rectangles that pass as pieces)
+    const corners = (c) => (useCorners !== false && time() && PH.pieceScore(c.data32S, cv.contourArea(c)) < PH.CORNER_ONE_PIECE ? PH.splitCorners(c, unitA, w, h) : null);
+    // (useCorners true: called again for a clump the notches already failed on)
+    const first = (useCorners === true ? null : PH.splitConcave(cnt, unitA)) || corners(cnt);
+    if (!first) return null;
+    const out = [];
+    for (const c of first) {
+      const more = cv.contourArea(c) > 1.6 * unitA ? corners(c) || PH.splitConcave(c, unitA) : null;
+      if (more) { c.delete(); out.push(...more); } else out.push(c);
+    }
+    return out;
+  };
+  PH.CORNER_MAX_UNITS = 4.5; // clumps up to ~4 pieces
+  PH.CORNER_CUTS = 12; // cuts tried per clump (shortest first)
+  PH.CORNER_MS = 10; // time a corner split needs
+  PH.CORNER_MAX_CUT = 1.6; // longest cut (of a side): a seam is about one side
+  PH.CORNER_ONE_PIECE = 0.08; // pieceScore: real pieces ~0.1-0.45, merged groups < 0.05
+  PH.CORNER_MIN_PART = 0.75; // a straight cut through ONE piece leaves two rectangles that pass the 4-corner test: parts must be most of a piece
+  PH.CORNER_KNOB = 0.18; // smoothing radius (of a side) that takes off tabs and blanks
+  PH.CORNER_EPS = 0.08; // polygon tolerance (of a side) for the corners
 
   /** The board's colour right around a piece (its local "white"): median Lab
    *  of background pixels in a band just outside the bbox. The phone's own

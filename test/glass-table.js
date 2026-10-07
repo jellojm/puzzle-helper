@@ -39,6 +39,7 @@ const CASES = [
     const eng = new PH.Engine();
     eng.processSnap(S.matSource(cv, m));
     m.delete();
+    if (process.env.BG) console.log(JSON.stringify(eng.bgTried), JSON.stringify(eng.bgModel && eng.bgModel.kind));
     const n = eng.counts().entries;
     const ok = n >= c.minPieces;
     if (!ok) failures++;

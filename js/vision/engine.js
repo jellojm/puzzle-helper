@@ -914,7 +914,10 @@
       const saved = { pose: this.pose, island: this.island, tracks: this.tracks, lost: this.lost };
       const proc = source.getProc(this.opts.snapProcW);
       // A photo may show a different table: pick its background model from scratch.
-      const snapBest = this.opts.autoBg !== false ? this.chooseBackground(proc) : null;
+      // (scored without the live split budget: a photo is analysed once, and
+      // with 40 ms the choice depended on the machine's speed - test
+      // glass-table pieces-1 flipped to a wrong model and 1 piece)
+      const snapBest = this.opts.autoBg !== false ? this.chooseBackground(proc, { splitBudgetMs: undefined }) : null;
       const snapModel = snapBest ? snapBest.c : null;
       const seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel } : { bg: this.bg, bgSmooth: 0.5 }));
       if (!this.bg) this.bg = seg.bg;

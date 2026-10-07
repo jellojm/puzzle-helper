@@ -950,3 +950,23 @@ piles; a "put a cloth under the pieces" prompt when confidence is low.
   2.79 -> 3.00). Off by default. The losses on that video are dense piles
   of touching pieces and lit floor between them at ~40 px a piece, not smear.
   `node test/real-50.js 3609` with FORCEBG='[30,80]', VOTE=1, DETSTATS=1.
+
+### v0.21.1 — splitting touching pieces by their corners (owner's idea, 2026-10-07)
+
+Owner: with the bumps and holes taken off, pieces are ~squares, so a clump
+of them has ~90 deg corners and sides of about one piece. `PH.splitCorners`:
+open + close at 0.18 of a side (tabs off, blanks filled), polygon
+(tolerance 0.08 side), inward corners; cuts run on along a side from an
+inward corner, or to another inward corner (shortest 12, at most 1.6 sides),
+judged by both parts (each >= 0.75 piece, piece-shaped). `PH.splitTouching`
+= notches first, corners for the rest. `test/clump-split.js` (in npm test):
+synthetic clumps of 2-4 real-shaped pieces at random angles, exactly right:
+notches 71%, corners alone 52%, both 77% (groups of 4: 48 -> 58%).
+Guards: not on a blob that already looks like one piece (a cut through one
+piece leaves two rectangles that pass the 4-corner test), only clumps up to
+4.5 pieces (an assembled part is all 90 deg seams: cutting it broke the
+border in open-spots B), and only with the time left after the fast
+splitters. glass-table straight-1: 39 -> 42-43 pieces.
+Also: a photo's background models are scored without the live 40 ms split
+budget (the choice depended on the machine's speed: pieces-1 flipped to a
+wrong model and 1 piece).
