@@ -60,7 +60,9 @@ const FLOOR = CASE.floor || {};
   if (cv instanceof Promise) cv = await cv; else if (!cv.Mat) await new Promise((r) => (cv.onRuntimeInitialized = r));
   PH.cv = cv;
   const { readImage } = require('./imageio');
-  const eng = new PH.Engine(process.env.EDGEBG === '0' ? { edgeBg: false } : {});
+  // ENGINE='{"budgetMs":90}': engine options (experiments)
+  const eng = new PH.Engine(Object.assign(process.env.EDGEBG === '0' ? { edgeBg: false } : {}, process.env.ENGINE ? JSON.parse(process.env.ENGINE) : {}));
+  let dropped = 0;
   if (fs.existsSync(BOX)) {
     const bi = readImage(BOX);
     eng.setBox(PH.createBox(bi, [[0, 0], [bi.w, 0], [bi.w, bi.h], [0, bi.h]], CASE.grid || { pieces: 300, cols: 15, rows: 20 }));
@@ -81,7 +83,13 @@ const FLOOR = CASE.floor || {};
   // scored against the key at the end (which read was right)
   const study = process.env.READSTUDY ? { reads: [], frames: [] } : null;
   if (study) PH.DEBUG_READ = (id, t1, fNo) => {
-    if (!PH.isCloseRead(t1)) { (study.far = study.far || []).push({ fNo, id, side: Math.round(t1.meanSide), q: t1.quality ? t1.quality.q : null }); return; }
+    if (!PH.isCloseRead(t1)) {
+      // a far read; close-size ones that failed only the quality floor are compared with the stored close read
+      const p = eng.pieces.get(id), o = t1.meanSide >= PH.CLOSE_SIDE && p && p.t1 && PH.isCloseRead(p.t1) ? p.t1 : null;
+      const m = o ? PH.samePiece(t1, o) : null, sa = o && !(m && m.ok) ? PH.shapeAgree(t1, o) : null;
+      (study.far = study.far || []).push({ fNo, id, side: Math.round(t1.meanSide), q: t1.quality ? t1.quality.q : null, sharp: t1.quality ? t1.quality.sharp : null, code: t1.code, vs: o ? { agree: !!((m && m.ok) || sa), code: o.code } : null });
+      return;
+    }
     const p = eng.pieces.get(id), o = p && p.t1 && PH.isCloseRead(p.t1) ? p.t1 : null; // the stored close read it is compared with
     const m = o ? PH.samePiece(t1, o) : null, sa = o && !(m && m.ok) ? PH.shapeAgree(t1, o) : null;
     // which key piece this read shows (outline + print against the key's references)
@@ -96,11 +104,16 @@ const FLOOR = CASE.floor || {};
   if (process.env.READS) PH.DEBUG_Q = (...a) => { if (String(a[0]).includes('read')) { const id = a[1]; if (!readLog.has(id)) readLog.set(id, []); readLog.get(id).push(a.slice(2).join(' ')); } };
   const tilt = { pitch: 0, roll: 0 };
   let curT = 0;
+  if (process.env.MISSDBG) { const rp = eng.removePiece.bind(eng); eng.removePiece = (id) => { const p = eng.pieces.get(id); if (p && !(eng.mergedInto && eng.mergedInto.get(id))) console.log(`  drop t=${curT.toFixed(1)} f${eng.fNo} entry ${id} at ${p.pos ? p.pos.map(Math.round) : '-'}: state ${p.state || 'checking'} t1 ${p.t1 ? `side ${Math.round(p.t1.meanSide)} close ${PH.isCloseRead(p.t1)}` : 'none'} t1Fail ${p.t1Fail || 0} closeViews ${p.closeViews || 0} sightings ${p.sightings || 0} moments ${p.moments || 0} closeAgree ${p.closeAgree || 0} reads ${p.nReads || '-'}`); return rp(id); }; }
   if (process.env.VOTE) eng.opts.edgeVote = true;
   if (process.env.FORCEBG) { eng.opts.autoBg = false; eng.bgModel = { kind: 'edges', edgeT: JSON.parse(process.env.FORCEBG) }; }
   if (process.env.BGLOG) { const pk = eng.pickBg.bind(eng); eng.pickBg = (tried) => { const r = pk(tried); console.log('t=' + curT.toFixed(1), tried.map((t) => t.c.kind[0] + (t.c.edgeT ? t.c.edgeT[0] : '') + ':' + t.good + '/' + t.fg).join(' '), '->', r ? r.c.kind : null); return r; }; }
   for await (const f of videoFrames(VIDEO, { step, to })) {
     curT = f.t;
+    // CLOCK=model: a frame that arrives while the engine is still busy with
+    // the last one is skipped, as on the phone (the page sends the newest
+    // frame only when the worker is free)
+    if (CLK.mode() === 'model' && !process.env.NODROP && performance.now() > f.t * 1000 + CLK.PHONE.frameMs) { dropped++; continue; }
     let data = f.data;
     if (VARIANT === 'light' && Math.floor(f.t / 4) % 3 !== 0) { // 4 s bursts, darker then brighter
       const k = Math.floor(f.t / 4) % 3 === 1 ? 0.6 : 1.4;
@@ -194,7 +207,7 @@ const FLOOR = CASE.floor || {};
   }
   if (study) for (const r of study.reads) { const e = eng.pieces.get(eng.finalId(r.id)); r.fid = e ? e.id : null; r.state = e ? (e.state || 'checking') : 'gone'; r.fAgree = e ? e.closeAgree || 0 : null; }
   // the run's numbers, kept in test/results/history.jsonl (tools/trend.js)
-  const M = { checked, entries: c.entries, unchecked: c.unchecked, maxChecked, firstAt: firstAt === null ? null : +firstAt.toFixed(1), at30, border: c.border, corner: c.corner, islands: c.islands, frames: n,
+  const M = { dropped, checked, entries: c.entries, unchecked: c.unchecked, maxChecked, firstAt: firstAt === null ? null : +firstAt.toFixed(1), at30, border: c.border, corner: c.corner, islands: c.islands, frames: n,
     whyUnchecked: eng.whyUnchecked ? eng.whyUnchecked() : null, stretchAgree: eng.rejects.stretchAgree || 0,
     poseMoved: eng.rejects.poseMoved || 0, mapSolves: eng.mapSolves || 0, lastSolve: eng.lastSolve || null };
   if (study) study.entries = [...eng.pieces.values()].map((e) => ({ id: e.id, state: e.state || 'checking', pos: e.pos, island: e.island, gone: !!e.gone, closeAgree: e.closeAgree || 0, close: !!(e.t1 && PH.isCloseRead(e.t1)), code: e.t1 ? e.t1.code : null, sightings: e.sightings || 0 })), study.unit = eng.unitTable ? eng.unitTable() : null;
@@ -204,7 +217,7 @@ const FLOOR = CASE.floor || {};
     // the entry each key piece became (identity from the overview, through merges)
     const byIdentity = new Map();
     let lost = 0;
-    for (const [n, v] of votes) { const id = [...v.entries()].sort((a, b) => b[1] - a[1])[0][0]; const e = eng.pieces.get(eng.finalId(id)); if (e) byIdentity.set(n, e); else lost++; } // (an entry dropped outright: position decides)
+    for (const [n, v] of votes) { const id = [...v.entries()].sort((a, b) => b[1] - a[1])[0][0]; const e = eng.pieces.get(eng.finalId(id)); if (e) byIdentity.set(n, e); else { lost++; if (process.env.MISSDBG) console.log(`  identity lost: #${n} was entry ${id} (final ${eng.finalId(id)})`); } } // (an entry dropped outright: position decides)
     M.identity = byIdentity.size;
     console.log(`identity: ${byIdentity.size}/${key.pieces.length} key pieces followed from the key overview (${lost} of their entries were dropped later)`);
     // How true is the table map? Key overview -> map through the pieces
@@ -229,7 +242,7 @@ const FLOOR = CASE.floor || {};
       } }
     const got = [...eng.pieces.values()].filter((p) => p.pos && !p.gone && p.state === 'checked');
     // why a key piece has no checked entry: the nearest entry of any state
-    { const fitAll = require('./keymatch').fitKey(cv, PH, key.pieces, [...eng.pieces.values()].filter((p) => p.pos));
+    { const fitAll = require('./keymatch').fitKey(cv, PH, key.pieces, [...eng.pieces.values()].filter((p) => p.pos), key.pieces.filter((k) => byIdentity.has(k.n)).map((k) => [k, byIdentity.get(k.n)]));
       for (const k of key.pieces) { const e = byIdentity.has(k.n) ? byIdentity.get(k.n) : fitAll.assign.get(k.n); if (e && e.state === 'checked' && !e.gone) continue;
         if (e && process.env.READS && (!process.env.READS_N || process.env.READS_N.split(',').includes(String(k.n)))) { const ids = [...readLog.keys()].filter((id) => eng.finalId(id) === e.id); for (const id of ids) for (const r of readLog.get(id).slice(0, 12)) console.log('      read', id, r); }
         console.log(`  #${k.n} (${k.code}):`, e ? `entry ${e.id} ${e.state || 'checking'} closeRead ${!!(e.t1 && PH.isCloseRead(e.t1))} side ${e.t1 ? Math.round(e.t1.meanSide) : '-'} q ${e.t1 && e.t1.quality ? e.t1.quality.q : '-'} closeAgree ${e.closeAgree || 0} sightings ${e.sightings || 0} moments ${e.moments || 0} closeViews ${e.closeViews || 0} code ${e.t1 ? e.t1.code : '-'} gone ${!!e.gone}` : 'no entry near it'); } }
@@ -238,7 +251,7 @@ const FLOOR = CASE.floor || {};
     Object.assign(M, { matched: res.matched, extra: res.extra, doubles: res.doubles, codeOk: res.codeOk });
     if (study) { // each read's entry (followed through merges) -> its key piece -> right or not
       const keyOf = new Map(); for (const [kn, e] of res.assigned) if (e) keyOf.set(e.id, key.pieces.find((k) => k.n === kn));
-      for (const r of study.reads) { const k = keyOf.get(eng.finalId(r.id)); r.key = k ? k.n : null; r.right = k ? cyc(r.code, k.code) : null; }
+      for (const r of study.reads.concat(study.far || [])) { const k = keyOf.get(eng.finalId(r.id)); r.key = k ? k.n : null; r.right = k && k.code ? cyc(r.code, k.code) : null; }
       fs.writeFileSync(process.env.READSTUDY, JSON.stringify(study));
       console.log(`read study: ${study.reads.length} close reads, ${study.reads.filter((r) => r.key).length} on key pieces -> ${process.env.READSTUDY}`);
     }
@@ -264,7 +277,7 @@ const cyc = (a, b) => { for (let r = 0; r < 4; r++) if (a.slice(r) + a.slice(0, 
 function matchKey(key, got, cv, byIdentity) {
   const K = key.pieces;
   if (!got.length) return { matched: 0, extra: 0, doubles: 0, codeOk: 0, codeBad: [], missing: K.map((k) => k.n) };
-  const fit = require('./keymatch').fitKey(cv, PH, K, got);
+  const fit = require('./keymatch').fitKey(cv, PH, K, got, byIdentity ? K.filter((k) => byIdentity.has(k.n)).map((k) => [k, byIdentity.get(k.n)]) : null);
   // identity first (it can't be fooled by a bent map); position only for key pieces without one
   // 1. by shape: each key piece's reference read (answer.json, checked by eye)
   //    against every checked entry - outline and print, within a loose
@@ -310,6 +323,13 @@ function matchKey(key, got, cv, byIdentity) {
     if (cyc(code, k.code)) codeOk++; else codeBad.push(`#${k.n}:${k.code}/${code || '-'}`);
   }
   const missing = K.filter((k) => ![...used.values()].includes(k)).map((k) => k.n);
+  if (process.env.MISSDBG) { // where the map put each missing key piece, and the nearest unmatched entry
+    const free = got.filter((e) => !used.has(e.id));
+    for (const k of K.filter((k) => missing.includes(k.n))) {
+      const g = fit.map(k.x, k.y), near = free.map((e) => ({ e, d: Math.hypot(e.pos[0] - g[0], e.pos[1] - g[1]) / fit.unit })).sort((a, b) => a.d - b.d)[0];
+      console.log(`  missing #${k.n} ${k.code || ''} at map (${g.map((v) => v.toFixed(0))}): nearest free entry ${near ? `${near.e.id} ${near.d.toFixed(2)} units, code ${near.e.t1 ? near.e.t1.edges.map((x) => x.type).join('') : '-'}` : 'none'}`);
+    }
+  }
   const assigned = new Map(); for (const [id, k] of used) assigned.set(k.n, got.find((p) => p.id === id));
   return { matched, extra: got.length - used.size, doubles, codeOk, codeBad, missing, assigned };
 }

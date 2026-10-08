@@ -14,14 +14,27 @@ paced) for single comparisons; `tools/ab.js <ref> test/real-50.js <case>
 --runs 3 --clock cpu` for the spread. The map is chaotic (one different
 decision early changes the whole run), so a single run never decides.
 
+## For the next agent
+
+Live: v0.23.3 (tags v0.22.0-v0.23.3). Start with `test/README.md` (clocks,
+results history, `tools/ab.js`, `tools/trend.js`) and the milestone table.
+Owner decisions and constraints: memory files project-owner-decisions-2026-10-07,
+project-no-phone-reviews, feedback-no-environment-changes. Known at phone
+pace (`CLOCK=model`), not yet fixed: run-tests "live sweep" catalogues 87/96,
+table-view "every read piece has a placement" fails - read pieces may lack a
+Map picture on the phone.
+
 ## Milestones
 
 | Version | Milestone | State |
 |---|---|---|
 | 0.23.0 | The map stays true on long close-up sweeps | published |
 | 0.23.1 | Joined pairs read piece by piece (photos) | published |
-| 0.23.2 | Find mode: a clumped partner drawn as itself; one verdict per pair | see below |
-| later | quality-failed close reads as agreement; shadow outlines; glass table | |
+| 0.23.2 | Find mode: a clumped partner drawn as itself; one verdict per pair | published |
+| 0.23.3 | Cheaper reads at the phone's pace (same results); real pieces no longer dropped after one failed read | published |
+| - | Close-up reads that failed only the quality floor count as agreement | dropped: they agree 1 in 10 (IMG_3605, model clock; accepted reads 65-88%) |
+| - | Live reads at a capped resolution | not shipped: helps the phone model, costs edge codes (see below) |
+| later | false "assembled part" / "gone" on loose pieces (1 run in 3 at PC pace, old and new alike); counter video's few pieces placed 6-15 off; seam cut on live frames; seam edge read round the tab; Map placements at phone pace; shadow outlines (IMG_3627); glass table (IMG_3609) | |
 
 ## 0.23.0 — the map stays true
 
@@ -119,3 +132,101 @@ From the owner's screenshots of 2026-10-07:
 `test/find-mode.js`: 45 synthetic pairs, none with the other side's word,
 none strong under 85%; a clump is unnumbered and the piece in it is drawn
 where the map puts it, highlighted, marked as in a clump.
+
+## Not shipped — live reads at a capped resolution
+
+`real-50.js` with `CLOCK=model` now also **skips frames that arrive while
+the engine is busy**, as the phone does (the page sends the newest frame
+only when the worker is free). That changed the picture: at the phone's
+own costs (its reports: ~85 ms a segmentation pass, ~170 ms to read a
+~350 px close-up piece) IMG_3593 skipped 120 of 412 frames, its first piece
+was checked at 11 s instead of 5 s, and 21 at 30 s instead of 35 - the
+owner's "pieces took a while to read". A bigger frame budget made it worse
+(more reads a frame, fewer frames: 45 ms stays).
+
+Reading a big piece from a smaller crop (`PH.READ_SIDE_LIVE`, side 140 px,
+live frames only - photos keep full resolution, where it cost accuracy):
+
+| phone speed vs estimate | IMG_3605 checked | IMG_3593 checked | IMG_3593 at 30 s | IMG_3593 codes |
+|---|---|---|---|---|
+| x0.8 | 23 -> 31 | 44 -> 47 | 23 -> 35 | 44 -> 46 |
+| x1.0 | 20 -> 27 | 48 -> 46 | 21 -> 34 | 48 -> 45 |
+| x1.25 | 7 -> 19 | 44 -> 42 | 12 -> 21 | 43 -> 35 |
+
+Frames skipped at x1.0: 180 -> 39 (counter), 120 -> 9 (white board).
+The trade-off (accepted by the owner for checked counts): on the white
+board 2 fewer checked at the end and 3 fewer edge codes right at the
+estimated phone speed - more (8 codes) if the phone is slower than
+estimated. Caps 160-260 were tried too (results jump between caps: the map
+is chaotic); 140 and 160 were the best pair.
+
+Next here: get the codes back - e.g. re-read a checked piece at full
+resolution when a frame has time to spare, or keep the sharpest close read
+per edge.
+
+**Decision: not shipped.** At PC pace (`CLOCK=cpu`) the fixed cap fails the
+IMG_3593 floors (key pieces matched 43 < 45, codes 42 < 45; 17 entries left
+unchecked) and marks a piece gone on IMG_3605. An adaptive form (cap only
+while the median of the last 8 frame times is over `PH.BEHIND_MS` 200 ms,
+off under half of it) keeps the PC floors (47 checked, 46 codes) but at
+phone pace it toggles and helps less than the fixed cap (IMG_3605 26 / 22 /
+21 at x1 / x0.8 / x1.25; IMG_3593 45 / 45 / 34). Code, `Engine.behind` and
+`PH.READ_SIDE_LIVE` are kept, off. The phone-paced harness (frames skipped
+while busy) stays: it is the closest the tests get to the owner's phone.
+The lever left: a cheaper full-resolution read (profile `PH.analyzePiece`).
+
+## 0.23.3 — the same reads, at less than half the cost
+
+The lever the capped reads pointed at. Profiled `PH.analyzePiece` over the
+owner's photos (the phone's SIMD OpenCV build, in node): **25.3 -> 10.3 ms a
+read (0.41)**, every read on every photo test identical (real-joins metrics,
+edge-verify, open-spots, border-auto, seam-split: old vs new outputs diffed).
+
+- the whole crop's Laplacian variance (`t1.sharp`) was a third of the time
+  and read by nothing (`quality.sharp`, the outline's own, is what's used);
+- the read's outline hint grown by a 25-35 px disc (`cv.dilate`, a quarter
+  of the time) and the seam check's ~50 px erosion: `PH.dilateDisc` /
+  `PH.erodeDisc` grow each row's runs by the kernel's half-width at each row
+  offset - pixel for pixel cv.dilate / cv.erode (`test/dilate-disc.js`, 120
+  random masks), 0.2 vs 1.5-8 ms;
+- live segmentation 0.8 of its time: medians of Lab bytes counted instead of
+  sorted (`PH.median` on 0-255 integers, `PH.localWhite`): identical values
+  (20 000 random arrays; 3000 random localWhite cases).
+
+`CLOCK=model` now charges reads 0.41 and segmentation 0.8 of the reports'
+costs (`MODEL_READ=2.44 MODEL_SEG=1.25` = before).
+
+Two things the faster engine showed:
+
+- **Real pieces dropped after one failed read.** The read back-off counts
+  the frames a failed piece waits in `t1Fail`, so the "6 failed reads and 20
+  sightings: not a piece" rule fired after one failed read - before the
+  retry (at 8). Their numbers changed when they came back. Now
+  `p.readFails` (real failures), `PH.DROP_READ_FAILS` 3.
+- **The "hold still" baseline** was the last 40 close reads; at the new
+  read rate a blurred spell filled it and became "usual" (quality-gate
+  failed at PC pace). `PH.SHARP_HIST` 100: the same span of time.
+
+And one in the test: the key fit (`test/keymatch.js`) by position alone
+turned the near-symmetric 5x10 key half round when two rows lost identity
+(scored "40/50, 9 extra" for a map that was right: median 0.05 off). It now
+starts from the pieces followed by identity.
+
+Old engine (each at its own cost) vs new, `RESULTS=0`, 2026-10-08:
+
+| | v0.23.2 | v0.23.3 |
+|---|---|---|
+| phone pace, IMG_3593 checked at 30 s | 21 | 38 |
+| phone pace, IMG_3593 matched / codes / doubles | 48 / 48 / 4 | 48 / 47 / 2 |
+| phone pace, IMG_3593 frames skipped | 120 | 4 |
+| phone pace, IMG_3605 checked / at 30 s | 19 / 10 | 29 / 19 |
+| phone pace, IMG_3605 matched / extra | 15 / 4 | 27 / 2 |
+| phone pace, IMG_3605 frames skipped | 178 | 17 |
+| PC pace (3 runs), IMG_3593 at 30 s / codes | 36 / 47-48 | 38 / 47 |
+| PC pace (3 runs), IMG_3605 matched / extra | 23-24 / 5-8 | 24-26 / 2-7 |
+
+At PC pace both engines show, about 1 run in 3, an "assembled part" on the
+loose pieces of IMG_3593 and a piece marked gone on IMG_3605 - not new, not
+seen at phone pace (also not at x0.25-x0.5 phone cost); next to look at.
+`READ_SIDE_LIVE` stays off: at full resolution the phone now skips few frames.
+

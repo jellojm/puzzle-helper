@@ -3,18 +3,25 @@
  * entries sit on the engine's table map (straightened). A similarity fit
  * leaves the far edge off by more than half a piece, so: a similarity by
  * RANSAC to start, then a homography refitted on the nearest pairs.
- *   const M = fitKey(cv, PH, key, entries)  ->  M.map(x, y) = [mx, my], M.unit, M.inliers
+ *   const M = fitKey(cv, PH, key, entries[, seed])  ->  M.map(x, y) = [mx, my], M.unit, M.inliers
  */
 'use strict';
 
-function fitKey(cv, PH, key, entries) {
+function fitKey(cv, PH, key, entries, seed) {
   const pts = entries.filter((p) => p.pos);
   const unit = Math.sqrt(PH.median(pts.map((p) => p.area || 1000)));
   const near = (q, tol) => { let b = null, bd = Infinity; for (const p of pts) { const d = Math.hypot(p.pos[0] - q[0], p.pos[1] - q[1]); if (d < bd) { bd = d; b = p; } } return bd < tol ? b : null; };
-  // 1. similarity by RANSAC over random pairs
+  // 1. similarity by RANSAC over random pairs - or, given key pieces whose
+  // entries are known (`seed`: [[keyPiece, entry]], identity from the
+  // overview), fitted to those: the key is a near-symmetric grid, and with a
+  // few rows unknown a fit by position alone can turn it half round (a
+  // 2026-10-07 replay: rows 1-2 scored "missing", ~11 pieces off)
   const rnd = PH.mulberry32(3);
   let best = null;
-  for (let it = 0; it < 5000 && pts.length > 1; it++) {
+  const sd = (seed || []).filter(([, e]) => e && e.pos);
+  if (sd.length >= 6) { const T = PH.simFit(sd.map(([k]) => [k.x, k.y]), sd.map(([, e]) => e.pos)); if (T) best = { T, inl: Infinity }; }
+  const seeded = !!best;
+  for (let it = 0; it < 5000 && pts.length > 1 && !seeded; it++) {
     const a = key[Math.floor(rnd() * key.length)], b = key[Math.floor(rnd() * key.length)];
     const A = pts[Math.floor(rnd() * pts.length)], B = pts[Math.floor(rnd() * pts.length)];
     if (a === b || A === B) continue;

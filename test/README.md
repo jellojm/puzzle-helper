@@ -35,6 +35,11 @@ Settings:
     run-tests "live sweep" 87/96, table-view "every read piece has a
     placement") – that is the phone's pacing, worth knowing, not a bug in
     the clock.
+    Since v0.23.3 a read is charged 0.41 and a segmentation pass 0.8 of the
+    reports' costs (the engine got cheaper, measured with the phone's SIMD
+    OpenCV build in node); `MODEL_READ=2.44 MODEL_SEG=1.25` = the engine
+    before. real-50 under `model` also **skips frames that arrive while the
+    engine is busy**, as the phone does.
 
 ## Results over time
 
@@ -68,3 +73,9 @@ in piece sides; robust fit), one-to-one, doubles, codes.
 - `SHEET=<file.json>` (real-50 with a key): each key piece's entry and its
   stored picture, for checking by eye.
 - `KEYDBG=1`: the per-frame shift that lines the key up with the frame.
+- `MISSDBG=1`: each dropped entry (why it could go) and each key piece left
+  without an entry (where the key fit puts it, the nearest free entry).
+
+The key fit (`test/keymatch.js`) starts from the pieces followed by identity
+when there are 6+: by position alone it could turn the near-symmetric 5x10
+grid half round and score two whole rows "missing" (2026-10-07).

@@ -1385,7 +1385,10 @@
     const pad = Math.max(3, Math.round(0.15 * Math.max(r.width, r.height)));
     const x0 = Math.max(0, r.x - pad), y0 = Math.max(0, r.y - pad);
     const x1 = Math.min(w - 1, r.x + r.width + pad), y1 = Math.min(h - 1, r.y + r.height + pad);
-    const Ls = [], As = [], Bs = [];
+    // (8-bit Lab: medians by counting, not sorting - the sort was ~1/6 of a
+    // live frame's segmentation)
+    const C = new Int32Array(768);
+    let n = 0;
     const lim = thresh * 0.7;
     for (let y = y0; y <= y1; y += 2) {
       const inY = y >= r.y && y < r.y + r.height;
@@ -1393,12 +1396,17 @@
         if (inY && x >= r.x && x < r.x + r.width) { x = r.x + r.width - 1; continue; } // skip the piece's own box
         const p = y * w + x;
         if (distData[p] >= lim) continue;
-        Ls.push(lab[3 * p]); As.push(lab[3 * p + 1]); Bs.push(lab[3 * p + 2]);
+        C[lab[3 * p]]++; C[256 + lab[3 * p + 1]]++; C[512 + lab[3 * p + 2]]++; n++;
       }
     }
-    if (Ls.length < 16) return null;
-    return { L: PH.median(Ls), a: PH.median(As), b: PH.median(Bs) };
+    if (n < 16) return null;
+    return { L: medianOfCounts(C, 0, n), a: medianOfCounts(C, 256, n), b: medianOfCounts(C, 512, n) };
   };
+  /** PH.median of n byte values counted in C[o .. o+255]. */
+  function medianOfCounts(C, o, n) {
+    const m = n >> 1, at = (rank) => { let c = 0; for (let v = 0; v < 256; v++) { c += C[o + v]; if (c > rank) return v; } return 255; };
+    return n % 2 ? at(m) : (at(m - 1) + at(m)) / 2;
+  }
   /** How to take the light out of colours read next to board colour `w`
    *  ([L, a, b] or {L, a, b}), against `ref` - this session's usual board
    *  colour (Engine.boardRef, a slow running average): lightness scaled by

@@ -47,9 +47,17 @@ exports.frameAt = (tMs) => {
 // segmentation pass ~75-115 ms for a 640x480 processing image, of which ~35
 // ms is getting the pixels; a shape read ~130-210 ms for a ~350 px piece
 // (a ~480x480 crop); frames every ~170-280 ms.
+// v0.23.3: reads cost ~0.41 of what those reports showed (the phone's SIMD
+// OpenCV build in node, the owner's photos: 25.3 -> 10.3 ms a read) - no
+// unused whole-crop Laplacian, and the large dilation / erosion of a read
+// done by rows of runs (PH.dilateDisc), the same pixels.
+// Segmentation ~0.8 (same measure, a live frame: 45 -> 36 ms; medians of
+// Lab bytes counted instead of sorted).
+// MODEL_READ=<k> / MODEL_SEG=<k> scale the read / segmentation cost (2.44 /
+// 1.25 = the engine before v0.23.3).
 const PHONE = {
-  segPerPx: 85 / (640 * 480),
-  readPerPx: 170 / (480 * 480),
+  segPerPx: 0.8 * 85 / (640 * 480) * (+process.env.MODEL_SEG || 1),
+  readPerPx: 0.41 * 170 / (480 * 480) * (+process.env.MODEL_READ || 1),
   frameMs: 200,
 };
 exports.PHONE = PHONE;

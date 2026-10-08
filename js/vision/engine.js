@@ -304,8 +304,12 @@
             const reads = close && ((A.closeAgree || 0) >= 2 || A.photoRead);
             const seen = A.photoRead || ((A.sightings || 0) >= 4 && (A.moments || 0) >= 2);
             if (reads && seen && own) { A.state = 'checked'; A.checkedAt = Date.now(); st.checked++; this.touch(A); this.version++; this.matchCache.clear(); }
-            else if (!close && (A.closeViews || 0) >= 20 || (!A.t1 && (A.t1Fail || 0) >= 6 && (A.sightings || 0) >= 20)) {
+            else if (!close && (A.closeViews || 0) >= 20 || (!A.t1 && (A.readFails || 0) >= PH.DROP_READ_FAILS && (A.sightings || 0) >= 20)) {
               // seen up close many times and still no good close read: not a piece
+              // (readFails, not t1Fail: t1Fail also counts the frames a failed
+              // piece waits before its next try, so "6" was one failed read -
+              // real pieces were dropped before their retry, and came back
+              // under a new number: 2026-10-07, 3-9 of 50 in the board video)
               this.removePiece(A.id); st.dropped++;
             }
           }
@@ -909,6 +913,13 @@
       if (out.coach && this.readSoft && this.readSoft.length) { out.coach.reads = this.readSoft.length; out.coach.soft = +(this.readSoft.filter(Boolean).length / this.readSoft.length).toFixed(2); }
       if (this.cellsDirty && now() - (this.cellsAt || 0) > 2000) this.assignCellsNow();
       out.timings = { seg: t1 - t0, map: t2 - t1, work: now() - t2, total: now() - t0, t1: work.t1, t2: work.t2, border: this.pfMs || 0 };
+      // Falling behind the camera? (median of the last 8 frames over
+      // PH.BEHIND_MS; back under half of it to stop) - then big pieces are read
+      // from smaller crops (Engine.detT1, PH.READ_SIDE_LIVE)
+      { const H = this.frameTimes || (this.frameTimes = []); H.push(out.timings.total); if (H.length > 8) H.shift();
+        const m = H.length >= 4 ? PH.median(H) : 0;
+        if (!this.behind && m > PH.BEHIND_MS) this.behind = true; else if (this.behind && m < PH.BEHIND_MS * 0.5) this.behind = false;
+        out.behind = !!this.behind; }
       this.pfMs = 0;
       for (const k in segT) out.timings['seg_' + k] = segT[k];
       wT.out = now() - tw;
@@ -1879,7 +1890,9 @@
      *  the last 10 verdicts for the page's "hold still" hint. */
     noteReadSharp(sharp) {
       const H = this.readSharpHist || (this.readSharpHist = []);
-      H.push(sharp); if (H.length > 40) H.shift();
+      // (the last ~100 close reads: ~40 at the phone's read rate before
+      // v0.23.3 - reads now cost ~0.4 as much, so the same span of time)
+      H.push(sharp); if (H.length > PH.SHARP_HIST) H.shift();
       const ref = H.length >= 8 ? H.slice().sort((a, b) => a - b)[Math.floor(H.length * 0.75)] : null;
       const soft = ref !== null && sharp < ref * PH.SHARP_REL;
       const V = this.readSoft || (this.readSoft = []);
@@ -1941,8 +1954,12 @@
       // in the phone's 1440x1920 frame) is read from a smaller crop, its
       // side PH.READ_SIDE: a read's cost grows with the crop's area (phone
       // reports: ~130-210 ms a read, ~0.35 reads a frame).
-      const side = Math.sqrt(d.area) / scale / 1.1;
-      const k = PH.READ_SIDE && side > PH.READ_SIDE ? PH.READ_SIDE / side : 1;
+      // (only on live frames while the engine is falling behind the camera:
+      // a smaller crop costs accuracy - the owner's counter photos, and the
+      // white-board video at PC pace - but on the phone a full-size read of
+      // a close-up piece (~170 ms) made it skip ~30% of frames)
+      const side = Math.sqrt(d.area) / scale / 1.1, cap = F.live && this.behind ? Math.min(PH.READ_SIDE, PH.READ_SIDE_LIVE) : PH.READ_SIDE;
+      const k = cap && side > cap ? cap / side : 1;
       let crop = source.getCrop(x0, y0, x1 - x0, y1 - y0);
       if (k < 1) crop = PH.scaleCrop(crop, k);
       const why = {};
@@ -2113,7 +2130,7 @@
           if (t1 && t1.meanSide >= PH.CLOSE_SIDE && t1.quality) this.noteReadSharp(t1.quality.sharp);
           if (PH.DEBUG_Q) PH.DEBUG_Q('  read', j.p.id, 'pri', j.pri, t1 ? 'side ' + Math.round(t1.meanSide) + ' q ' + (t1.quality && t1.quality.q) + ' code ' + t1.code + ' amp ' + t1.edges.map((e) => e.amp.toFixed(2) + (e.unc ? '?' : '')).join('/') : 'FAILED', 'stored', j.p.t1 && j.p.t1.code, 'fused', !!j.d.fused, t1 && j.p.t1 ? 'same ' + JSON.stringify((({ ok, d }) => ({ ok, d: +d.toFixed(3) }))(PH.samePiece(t1, j.p.t1))) : '');
           if (!t1) {
-            j.p.t1Fail = (j.p.t1Fail || 0) + 1;
+            j.p.t1Fail = (j.p.t1Fail || 0) + 1; j.p.readFails = (j.p.readFails || 0) + 1;
             if (!j.p.t1 && j.d.notPiece && j.p.t1Fail >= 4) { this.removePiece(j.p.id); j.d.id = null; }
             continue;
           }
@@ -2225,7 +2242,7 @@
           }
           j.p.t1 = t1;
           j.p.t1Frame = this.fNo;
-          j.p.t1Fail = 0;
+          j.p.t1Fail = 0; j.p.readFails = 0;
           j.p.closeAgree = nc ? 1 : 0; j.p.closeAgreeF = this.fNo;
           this.notePlacement(j.p);
           j.p.t2 = null;
@@ -3747,6 +3764,9 @@
   // sharpness is smeared (owner's counter video IMG_3605: the blurrier of two
   // reads under ~30 agreed 34% of the time, over 60: 85%)
   PH.SHARP_REL = 0.6;
+  PH.SHARP_HIST = 100; // ... of the session's usual (75th percentile) over this many close reads
+  PH.BEHIND_MS = 200;   // a frame's time (median of 8) over this: the camera outruns the engine (the phone's ~5 fps)
+  PH.DROP_READ_FAILS = 3; // an entry never read after this many failed reads (and 20 sightings) is not a piece
   PH.MAP_SOLVE = true;   // re-solve the map from the kept views (Engine.solveMap) ...
   PH.MAP_VIEWS = 300;    // ... the last this many views ...
   PH.MAP_SOLVE_EVERY = 30; // ... every this many frames ...

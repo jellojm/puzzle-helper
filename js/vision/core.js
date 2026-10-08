@@ -209,8 +209,20 @@
     return { T, inliers: tryT(T) };
   };
 
+  const MED_C = new Int32Array(256);
   PH.median = function (arr) {
-    if (!arr.length) return 0;
+    const n = arr.length;
+    if (!n) return 0;
+    // byte values (Lab channels - most calls on a frame): count, don't sort
+    let bytes = n > 48;
+    if (bytes) for (let i = 0; i < n; i++) { const v = arr[i]; if (!(v >= 0 && v <= 255 && (v | 0) === v)) { bytes = false; break; } }
+    if (bytes) {
+      MED_C.fill(0);
+      for (let i = 0; i < n; i++) MED_C[arr[i]]++;
+      const at = (rank) => { let c = 0; for (let v = 0; v < 256; v++) { c += MED_C[v]; if (c > rank) return v; } return 255; };
+      const m = n >> 1;
+      return n % 2 ? at(m) : (at(m - 1) + at(m)) / 2;
+    }
     const s = Array.from(arr).sort((x, y) => x - y);
     const m = s.length >> 1;
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;

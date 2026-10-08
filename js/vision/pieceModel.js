@@ -158,6 +158,53 @@
     return peeled;
   }
 
+  /**
+   * cv.dilate(m, m, the (2r+1)^2 MORPH_ELLIPSE kernel), the same pixels, in
+   * place, for a mask made of a few runs per row (a filled outline). OpenCV
+   * steps the whole kernel over every pixel; this grows each row's runs by
+   * the kernel's half-width at each row offset (v0.23.3: the 25-35 px
+   * dilation of a read's outline hint was a quarter of a read's time).
+   */
+  PH.dilateDisc = function (m, r) {
+    const cv = PH.cv, w = m.cols, h = m.rows, d = m.data;
+    const ker = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * r + 1, 2 * r + 1));
+    const kd = ker.data, ks = 2 * r + 1, hw = new Int32Array(ks);
+    for (let i = 0; i < ks; i++) { hw[i] = -1; for (let j = 0; j < ks; j++) if (kd[i * ks + j]) { hw[i] = r - j; break; } }
+    ker.delete();
+    // each row's runs [start, end) of set pixels
+    const runs = new Array(h);
+    for (let y = 0; y < h; y++) {
+      const R = [], o = y * w;
+      for (let x = 0; x < w; x++) if (d[o + x]) { const s = x; while (x < w && d[o + x]) x++; R.push(s, x); }
+      runs[y] = R;
+    }
+    const row = new Int32Array(w + 1);
+    for (let y = 0; y < h; y++) {
+      row.fill(0);
+      let any = false;
+      for (let i = 0; i < ks; i++) {
+        const yy = y + i - r, a = hw[i];
+        if (a < 0 || yy < 0 || yy >= h) continue;
+        const R = runs[yy];
+        for (let k = 0; k < R.length; k += 2) {
+          const s = Math.max(0, R[k] - a), e = Math.min(w, R[k + 1] + a);
+          if (e > s) { row[s]++; row[e]--; any = true; }
+        }
+      }
+      const o = y * w;
+      if (!any) { d.fill(0, o, o + w); continue; }
+      let c = 0;
+      for (let x = 0; x < w; x++) { c += row[x]; d[o + x] = c ? 255 : 0; }
+    }
+  };
+
+  /** cv.erode(m, m, the same ellipse kernel), the same pixels, in place
+   *  (outside the image counts as set, as in cv.erode). */
+  PH.erodeDisc = function (m, r) {
+    const cv = PH.cv;
+    cv.bitwise_not(m, m); PH.dilateDisc(m, r); cv.bitwise_not(m, m);
+  };
+
   function segmentCrop(lab, w, h, bg, threshDE, lightW, lut, hint, boundary, peel) {
     const cv = PH.cv;
     const dist = new cv.Mat(h, w, cv.CV_8UC1);
@@ -196,10 +243,9 @@
       const mv = new cv.MatVector(); mv.push_back(pm);
       cv.fillPoly(hm, mv, new cv.Scalar(255));
       const g = Math.max(3, Math.round(Math.max(w, h) * 0.03));
-      const gk = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * g + 1, 2 * g + 1));
-      cv.dilate(hm, hm, gk);
+      PH.dilateDisc(hm, g);
       cv.bitwise_and(mask, hm, mask);
-      [hm, pm, mv, gk].forEach((m) => m.delete());
+      [hm, pm, mv].forEach((m) => m.delete());
     }
     const contours = new cv.MatVector();
     const hier = new cv.Mat();
@@ -368,7 +414,11 @@
   PH.analyzePiece = function (crop, ctx) {
     const cv = PH.cv;
     const w = crop.w, h = crop.h;
+    // (PH.DEBUG_AP: time per stage, for profiling)
+    const TT = PH.DEBUG_AP ? { px: w * h } : null; let tt = TT ? performance.now() : 0;
+    const mk = TT ? (k) => { const t = performance.now(); TT[k] = (TT[k] || 0) + t - tt; tt = t; } : () => {};
     const lab = PH.rgbaToLab(crop.data, w, h);
+    mk('lab');
     const lightW = ctx.lightW === undefined ? 0.5 : ctx.lightW;
     const touchesCrop = (pts) => {
       for (let i = 0; i < pts.length; i += 2) {
@@ -398,14 +448,17 @@
     if (PH.SHADOW_PEEL && ctx.peel !== false) { // shadows peeled off first; kept only if a whole piece remains
       seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, false, true);
       if (!fits(seg)) { seg.filled.delete(); seg = null; }
+      mk('segPeel');
     }
-    if (!seg) seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, false);
+    if (!seg) { seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, false); mk('segPlain'); }
     if (useOutline && !fits(seg)) {
       const withOutline = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, true);
       seg.filled.delete(); seg = withOutline;
+      mk('segOutline');
     }
     if (!fits(seg)) { seg.filled.delete(); return null; }
 
+    mk('segment');
     let P = PH.resampleClosed(seg.pts, N).pts;
     if (PH.polyArea(P) < 0) { // make clockwise on screen
       const R = new Float32Array(P.length);
@@ -413,6 +466,7 @@
       P = R;
     }
     const cr = findCorners(P, seg.area);
+    mk('corners');
     if (!cr) { seg.filled.delete(); return null; }
     const ci = cr.idx;
     const corners = ci.map((i) => [P[2 * i], P[2 * i + 1]]);
@@ -509,6 +563,7 @@
       e1.cdoubt = PH.colourDoubt(e1, lf); // null: colour trusted
       edges.push(e1);
     }
+    mk('edges');
     const meanSide = edges.reduce((t, e) => t + e.len, 0) / 4;
     for (const e of edges) e.lenRel = e.len / meanSide;
     const code = edges.map((e) => e.type).join('');
@@ -517,12 +572,13 @@
     // the seam between two real pieces across its middle (owner 2026-10-04:
     // false edge pieces "tracing hard color edges across pieces already
     // placed together"). Real pieces have no seam inside.
-    if (flats.some(Boolean) && ctx.seamCheck !== false && PH.innerSeam(lab, w, h, seg.filled, meanSide)) {
+    if (flats.some(Boolean) && ctx.seamCheck !== false && seamInside(lab, w, h, seg.filled, meanSide)) {
       seg.filled.delete();
       if (ctx.why) ctx.why.seam = true;
       return null;
     }
 
+    mk('seamCheck');
     // Rotation-normalized core square (Lab + mask) for box placement.
     const S = PH.SQ;
     const src = cv.matFromArray(4, 1, cv.CV_32FC2, [].concat(...corners));
@@ -536,15 +592,11 @@
     cv.erode(seg.filled, seg.filled, ek);
     cv.warpPerspective(seg.filled, sqm, M, new cv.Size(S, S), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(0));
     const square = { lab: new Uint8Array(sq.data), mask: new Uint8Array(sqm.data) };
+    mk('square');
 
-    // Sharpness (variance of Laplacian on lightness).
-    const Lm = new cv.Mat(h, w, cv.CV_8UC1);
-    for (let p = 0; p < w * h; p++) Lm.data[p] = lab[3 * p];
-    const lap = new cv.Mat();
-    cv.Laplacian(Lm, lap, cv.CV_32F);
-    const mean = new cv.Mat(), sd = new cv.Mat();
-    cv.meanStdDev(lap, mean, sd);
-    const sharp = sd.doubleAt(0, 0) ** 2;
+    // (the whole crop's Laplacian variance, t1.sharp, was a third of a read's
+    // time and read by nothing: quality.sharp below is the outline's own)
+    const sharp = null;
 
     // Small thumbnail for the UI.
     const rgba = new cv.Mat(h, w, cv.CV_8UC4);
@@ -554,6 +606,7 @@
     const tm = new cv.Mat();
     cv.resize(rgba, tm, new cv.Size(tw, th), 0, 0, cv.INTER_AREA);
     const thumb = { w: tw, h: th, data: new Uint8ClampedArray(tm.data), ox: ctx.ox || 0, oy: ctx.oy || 0, s: ts };
+    mk('thumb');
 
     // Read quality: how crisp the piece's own outline is (Laplacian spread in
     // a thin band around its mask - blur flattens it, print inside doesn't
@@ -570,9 +623,11 @@
       edgeSharp = sg.data64F[0];
       [band, bk, g, lp, mu, sg].forEach((m) => m.delete());
     } catch (e) { edgeSharp = 0; }
+    mk('quality');
+    if (TT) PH.DEBUG_AP(TT);
     const quality = { sharp: +edgeSharp.toFixed(1), q: +((edgeSharp / (edgeSharp + 25)) * Math.min(1, meanSide / 90) * Math.min(1, cr.score / 0.15)).toFixed(3) };
 
-    [src, dst, M, labMat, sq, sqm, ek, Lm, lap, mean, sd, rgba, tm, seg.filled].forEach((m) => m.delete());
+    [src, dst, M, labMat, sq, sqm, ek, rgba, tm, seg.filled].forEach((m) => m.delete());
 
     const ox = ctx.ox || 0, oy = ctx.oy || 0;
     return {
@@ -727,9 +782,10 @@
     const kb = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(odd(Math.min(9, side * 0.06)), odd(Math.min(9, side * 0.06))));
     const bh = new cv.Mat();
     cv.morphologyEx(L, bh, cv.MORPH_BLACKHAT, kb);
-    const ke = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(odd(side * 0.12), odd(side * 0.12)));
-    const inner = new cv.Mat();
-    cv.erode(filled, inner, ke);
+    // the outline shrunk by ~0.06 side (an erosion with a ~50 px disc was
+    // most of the seam check's time on a close-up crop: PH.erodeDisc)
+    const ke = new cv.Mat(), inner = filled.clone();
+    PH.erodeDisc(inner, odd(side * 0.12) >> 1);
     const line = new cv.Mat();
     cv.threshold(bh, line, 18, 255, cv.THRESH_BINARY);
     cv.bitwise_and(line, inner, line);
@@ -746,6 +802,21 @@
     [L, kb, bh, ke, inner, line, k3, rest, lab2, stats, cent].forEach((m) => m.delete());
     return A > 50 && big >= 2;
   };
+  // The seam check on a copy scaled to a side of at most PH.SEAM_CHECK_SIDE px:
+  // on a full-size close-up crop it was a fifth of a read's time.
+  PH.SEAM_CHECK_SIDE = Infinity; // (200 falsely rejected IMG_3620's edge piece: the urchin's dots read as a seam at that scale)
+  function seamInside(lab, w, h, filled, side) {
+    const k = side > PH.SEAM_CHECK_SIDE ? PH.SEAM_CHECK_SIDE / side : 1;
+    if (k >= 1) return PH.innerSeam(lab, w, h, filled, side);
+    const cv = PH.cv, W = Math.max(8, Math.round(w * k)), H = Math.max(8, Math.round(h * k));
+    const L3 = new cv.Mat(h, w, cv.CV_8UC3); L3.data.set(lab);
+    const ls = new cv.Mat(), fs = new cv.Mat();
+    cv.resize(L3, ls, new cv.Size(W, H), 0, 0, cv.INTER_AREA);
+    cv.resize(filled, fs, new cv.Size(W, H), 0, 0, cv.INTER_NEAREST);
+    const r = PH.innerSeam(new Uint8Array(ls.data), W, H, fs, side * k);
+    [L3, ls, fs].forEach((m) => m.delete());
+    return r;
+  }
   PH.MIN_CORNER_SCORE = 0.03; // real pieces ~0.05-0.3, fragments ~0.01-0.02 // below this an outline isn't a jigsaw piece
   PH.SAME_SHAPE = 0.05;
   /** A close read: the piece at least this many camera pixels across (corner
@@ -757,7 +828,8 @@
   // misreads 0.15-0.23; two close reads must still agree to check a piece)
   PH.CLOSE_SIDE = 120; // (overview reads in the owner's video: 70-80 px)
   PH.CLOSE_Q = 0.25;
-  PH.READ_SIDE = Infinity; // read pieces bigger than this (side, source px) from a scaled-down crop (Engine.detT1)
+  PH.READ_SIDE = Infinity; // read pieces bigger than this (side, source px) from a scaled-down crop (Engine.detT1) ...
+  PH.READ_SIDE_LIVE = Infinity; // ... on live frames while the engine falls behind the camera (Engine.behind) - off: see PLAN-v0.23 "0.23.3" (it cost edge codes)
   /** Fewest edges whose types differ between two reads, over the 4 turns. */
   PH.codeDistance = function (a, b) {
     let best = 4;
