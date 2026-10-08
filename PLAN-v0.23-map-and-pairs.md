@@ -34,7 +34,8 @@ Map picture on the phone.
 | 0.23.3 | Cheaper reads at the phone's pace (same results); real pieces no longer dropped after one failed read | published |
 | - | Close-up reads that failed only the quality floor count as agreement | dropped: they agree 1 in 10 (IMG_3605, model clock; accepted reads 65-88%) |
 | - | Live reads at a capped resolution | not shipped: helps the phone model, costs edge codes (see below) |
-| later | false "assembled part" / "gone" on loose pieces (1 run in 3 at PC pace, old and new alike); counter video's few pieces placed 6-15 off; seam cut on live frames; seam edge read round the tab; Map placements at phone pace; shadow outlines (IMG_3627); glass table (IMG_3609) | |
+| - | Proof before a far re-find (`PH.MOVE_PROOF`) | not shipped: as many duplicates as jumps saved (see below) |
+| later | far re-finds that tell a drift correction from a look-alike; false "assembled part" on IMG_3593 at PC pace; seam cut on live frames; seam edge read round the tab; Map placements at phone pace; shadow outlines (IMG_3627); glass table (IMG_3609) | |
 
 ## 0.23.0 — the map stays true
 
@@ -229,4 +230,43 @@ At PC pace both engines show, about 1 run in 3, an "assembled part" on the
 loose pieces of IMG_3593 and a piece marked gone on IMG_3605 - not new, not
 seen at phone pace (also not at x0.25-x0.5 phone cost); next to look at.
 `READ_SIDE_LIVE` stays off: at full resolution the phone now skips few frames.
+
+## Not shipped — proof before a far re-find
+
+Where counter-video pieces jump 4-15 pieces on the map (`MISSDBG=1` lists
+each piece off the key's fit with its offset over time): every jump is a
+**re-find** - a close read of a new entry matched a checked piece far away
+("it was moved here"), only allowed when that piece's own spot is not in
+view with something on it. No piece is moved in either video.
+
+`PH.MOVE_PROOF` (kept, off): a far re-find also needs proof the piece left -
+marked gone, or its spot in view and bare. Five settings per video (phone
+pace x1 / x0.8 / x1.25, PC pace x2), summed:
+
+| | off | on |
+|---|---|---|
+| IMG_3605 pieces > 1 off (worst) | 31 (22.2) | 14 (9.6) |
+| IMG_3605 matched / extra | 140 / 18 | 132 / 35 |
+| IMG_3593 the 12-piece jump | every run | never |
+| IMG_3593 matched; doubles at PC pace | 239; 0 | 240; 6 |
+
+Checked against the key (`MISSDBG` classifies each re-find): about half
+the far re-finds put a piece on its **true** place (IMG_3605 at x0.8: 5
+right, 7 wrong) - a drifted entry corrected, often one an earlier wrong
+re-find had moved. Blocked, the drifted entry stays and the piece gets a
+second one: as many extras as jumps saved. Next: tell the two apart -
+e.g. hold a far claim until the old spot is seen (bare: move; taken: the
+new entry is a look-alike and may not claim that piece again).
+
+Also from this work:
+- `real-50.js` "nothing marked gone" now counts **key pieces** only (a key
+  piece's own entry hidden); a stray entry hidden because its spot is bare
+  is reported, not failed (IMG_3605: an entry 1.4 off a piece whose own
+  entry sat elsewhere).
+- The false "assembled part" on IMG_3593 (PC pace only, ~1 run in 3, old
+  and new engines): the owner lays the 50 pieces in rows with small gaps;
+  touching neighbours merge into ~10-piece blobs that grid like a block
+  (10 filled of 49 cells). A "seams joined" share didn't separate them: the
+  blob mask closes the gaps (real parts 0.92-1.00, these >= 0.9 too). A
+  test of the board colour along the seams is the next idea.
 

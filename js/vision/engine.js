@@ -1869,7 +1869,25 @@
       // in view and still taken (then it's there, and this is a look-alike)
       if (!best || !(second > best.d * 1.5)) return null;
       if (best.p.pos && !best.p.gone && this.spotTaken(best.p)) return null;
+      // ... and only with proof it left: marked gone, or its spot in view and
+      // bare. A spot merely out of view proved nothing - look-alikes were
+      // "moved" across the map (2026-10-08, IMG_3605 at the phone's pace:
+      // 10 re-finds, none real - no piece is moved in that video - entries
+      // jumping 4-7 pieces and back). A piece really moved is re-found once
+      // its old spot has been seen empty. (Off: about half the far re-finds
+      // in that video correct a drifted entry; without them it stays behind
+      // and the piece gets a second entry - as many extras as jumps saved.)
+      if (PH.MOVE_PROOF && best.p.pos && !best.p.gone && !this.spotBare(best.p)) return null;
       return best;
+    }
+    /** Is piece p's spot in the current view and bare board (proof it left)? */
+    spotBare(p) {
+      const F = this.frameCtx, T = this.pose;
+      if (!F || !T || p.island !== this.island || !F.fg) return false;
+      const f = PH.simApply(PH.simInvert(T), p.pos[0], p.pos[1]);
+      if (f[0] < 0 || f[1] < 0 || f[0] >= F.procW || f[1] >= F.procH) return false;
+      const r = Math.sqrt(p.area || 1) / PH.simScale(T) * 0.4;
+      return this.bareBoard(f, r) >= 0.8;
     }
     /** Is piece p's spot in the current view with something lying on it? */
     spotTaken(p) {
@@ -1883,7 +1901,7 @@
     /** Another close read agreed with piece p's close shape: one more
      *  independent confirmation when it comes from a later view (4+ frames). */
     /** Is a close read's outline smeared? Its edge sharpness against this
-     *  session's usual (75th percentile of the last 40 close reads): below
+     *  session's usual (75th percentile of the last PH.SHARP_HIST close reads): below
      *  PH.SHARP_REL of it. Relative, because the level depends on the scene
      *  (the outline's contrast with the table: pale pieces on a white board
      *  are crisp at a level a dark piece reaches only when blurred). Keeps
@@ -3766,6 +3784,7 @@
   PH.SHARP_REL = 0.6;
   PH.SHARP_HIST = 100; // ... of the session's usual (75th percentile) over this many close reads
   PH.BEHIND_MS = 200;   // a frame's time (median of 8) over this: the camera outruns the engine (the phone's ~5 fps)
+  PH.MOVE_PROOF = false; // a far re-find ("this checked piece was moved here") needs its old spot gone or seen bare (off: see PLAN-v0.23 "Not shipped - proof before a far re-find")
   PH.DROP_READ_FAILS = 3; // an entry never read after this many failed reads (and 20 sightings) is not a piece
   PH.MAP_SOLVE = true;   // re-solve the map from the kept views (Engine.solveMap) ...
   PH.MAP_VIEWS = 300;    // ... the last this many views ...

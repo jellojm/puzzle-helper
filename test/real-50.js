@@ -104,7 +104,9 @@ const FLOOR = CASE.floor || {};
   if (process.env.READS) PH.DEBUG_Q = (...a) => { if (String(a[0]).includes('read')) { const id = a[1]; if (!readLog.has(id)) readLog.set(id, []); readLog.get(id).push(a.slice(2).join(' ')); } };
   const tilt = { pitch: 0, roll: 0 };
   let curT = 0;
+  const posLog = new Map(); // (MISSDBG) entry id -> [[t, x, y]] whenever it moved
   if (process.env.MISSDBG) { const rp = eng.removePiece.bind(eng); eng.removePiece = (id) => { const p = eng.pieces.get(id); if (p && !(eng.mergedInto && eng.mergedInto.get(id))) console.log(`  drop t=${curT.toFixed(1)} f${eng.fNo} entry ${id} at ${p.pos ? p.pos.map(Math.round) : '-'}: state ${p.state || 'checking'} t1 ${p.t1 ? `side ${Math.round(p.t1.meanSide)} close ${PH.isCloseRead(p.t1)}` : 'none'} t1Fail ${p.t1Fail || 0} closeViews ${p.closeViews || 0} sightings ${p.sightings || 0} moments ${p.moments || 0} closeAgree ${p.closeAgree || 0} reads ${p.nReads || '-'}`); return rp(id); }; }
+  if (process.env.ASMDBG) PH.DEBUG_ASM = (...a) => { if (a[0] === 'grid' && /failed/.test(a[2])) return; console.log(`  asm t=${curT.toFixed(1)} f${eng.fNo}`, ...a); };
   if (process.env.VOTE) eng.opts.edgeVote = true;
   if (process.env.FORCEBG) { eng.opts.autoBg = false; eng.bgModel = { kind: 'edges', edgeT: JSON.parse(process.env.FORCEBG) }; }
   if (process.env.BGLOG) { const pk = eng.pickBg.bind(eng); eng.pickBg = (tried) => { const r = pk(tried); console.log('t=' + curT.toFixed(1), tried.map((t) => t.c.kind[0] + (t.c.edgeT ? t.c.edgeT[0] : '') + ':' + t.good + '/' + t.fg).join(' '), '->', r ? r.c.kind : null); return r; }; }
@@ -170,6 +172,7 @@ const FLOOR = CASE.floor || {};
     if (checked > maxChecked) { maxChecked = checked; maxAt = f.t; }
     if (checked && firstAt === null) firstAt = f.t; // (owner: "pieces took a while to read")
     if (f.t <= 30) at30 = checked;
+    if (process.env.MISSDBG && n % 10 === 0) for (const p of eng.pieces.values()) if (p.pos) { const L = posLog.get(p.id) || []; const q = L[L.length - 1]; if (!q || Math.hypot(q[1] - p.pos[0], q[2] - p.pos[1]) > 8) { L.push([+f.t.toFixed(0), p.pos[0], p.pos[1]]); posLog.set(p.id, L); } }
     if (n % 25 === 0) { timeline.push(`${f.t.toFixed(0)}s:${checked}` + (process.env.BG ? `(${eng.bgModel ? eng.bgModel.kind : '-'},${out.dets.length}d,${c.entries})` : '')); }
   }
   const c = eng.counts();
@@ -203,7 +206,9 @@ const FLOOR = CASE.floor || {};
     const shown = a && (a.shown !== undefined ? a.shown : a.cells > 0 || a.spots > 0);
     check('no assembled part / open spots on loose pieces', !shown, a ? JSON.stringify({ n: a.n, cells: a.cells, spots: a.spots }) : '');
     check('no border found on loose pieces', !eng.pframe, eng.pframe ? 'border marked' : '');
-    if (c.gone !== undefined) check('nothing marked gone (no piece was moved)', c.gone === 0, `${c.gone} gone`);
+    // (with an answer key the check waits for identity: a stray entry - not
+    // a key piece's own - hidden because its spot is bare is right to go)
+    if (c.gone !== undefined && !fs.existsSync(KEY)) check('nothing marked gone (no piece was moved)', c.gone === 0, `${c.gone} gone`);
   }
   if (study) for (const r of study.reads) { const e = eng.pieces.get(eng.finalId(r.id)); r.fid = e ? e.id : null; r.state = e ? (e.state || 'checking') : 'gone'; r.fAgree = e ? e.closeAgree || 0 : null; }
   // the run's numbers, kept in test/results/history.jsonl (tools/trend.js)
@@ -219,6 +224,10 @@ const FLOOR = CASE.floor || {};
     let lost = 0;
     for (const [n, v] of votes) { const id = [...v.entries()].sort((a, b) => b[1] - a[1])[0][0]; const e = eng.pieces.get(eng.finalId(id)); if (e) byIdentity.set(n, e); else { lost++; if (process.env.MISSDBG) console.log(`  identity lost: #${n} was entry ${id} (final ${eng.finalId(id)})`); } } // (an entry dropped outright: position decides)
     M.identity = byIdentity.size;
+    { const gone = [...eng.pieces.values()].filter((p) => p.gone), own = new Set(byIdentity.values());
+      const real = gone.filter((p) => own.has(p));
+      M.goneReal = real.length; M.goneStray = gone.length - real.length;
+      check('no key piece marked gone (no piece was moved)', real.length === 0, `${real.length} key pieces gone${gone.length - real.length ? `; ${gone.length - real.length} stray entries hidden (spot seen bare)` : ''}`); }
     console.log(`identity: ${byIdentity.size}/${key.pieces.length} key pieces followed from the key overview (${lost} of their entries were dropped later)`);
     // How true is the table map? Key overview -> map through the pieces
     // followed by identity (a homography: the overview is filmed at an
@@ -238,6 +247,31 @@ const FLOOR = CASE.floor || {};
           const inl = res.filter((v) => v <= 1.0), out = res.length - inl.length;
           M.mapErr = { n: P.length, within: inl.length, median: inl.length ? +inl[inl.length >> 1].toFixed(2) : null, off: out };
           console.log(`map error vs the key (${P.length} pieces by identity, island ${isl}): within the fit ${inl.length}, median ${inl.length ? inl[inl.length >> 1].toFixed(2) : '-'} piece sides; ${out} more than 1 piece off (worst ${res[res.length - 1].toFixed(2)})`);
+          if (process.env.MISSDBG) for (const g of [...eng.pieces.values()].filter((p) => p.gone && p.pos)) { // a gone entry: the key piece nearest its spot, and that piece's own entry
+            let bk = null, bd = Infinity;
+            for (const k of key.pieces) { const w = h[6] * k.x + h[7] * k.y + h[8], d = Math.hypot((h[0] * k.x + h[1] * k.y + h[2]) / w - g.pos[0], (h[3] * k.x + h[4] * k.y + h[5]) / w - g.pos[1]) / u; if (d < bd) { bd = d; bk = k; } }
+            const own = bk && byIdentity.get(bk.n);
+            console.log(`  gone entry ${g.id} at ${g.pos.map(Math.round)}: nearest key #${bk && bk.n} ${bd.toFixed(1)} sides away; that piece's entry ${own ? own.id + (own === g ? ' (this one)' : ' at ' + own.pos.map(Math.round)) : 'none'}; moves ${(posLog.get(g.id) || []).map(([t, x, y]) => t + 's:' + Math.round(x) + ',' + Math.round(y)).join(' ')}`);
+          }
+          if (process.env.MISSDBG) { // each far re-find: was the new spot that piece's true place (a drift corrected) or not (a look-alike)?
+            const fitOf = (k) => { const w = h[6] * k.x + h[7] * k.y + h[8]; return [(h[0] * k.x + h[1] * k.y + h[2]) / w, (h[3] * k.x + h[4] * k.y + h[5]) / w]; };
+            let right = 0, wrong = 0;
+            for (const ev of (eng.events || []).filter((x) => x.kind === 'refound' && x.pos)) {
+              const fid = eng.finalId(ev.a), kn = [...byIdentity].find(([, e]) => e.id === fid);
+              if (!kn) { console.log(`  refound f${ev.f} entry ${ev.a} at ${ev.pos}: not a followed key piece`); continue; }
+              const k = key.pieces.find((q) => q.n === kn[0]), g = fitOf(k), d = Math.hypot(g[0] - ev.pos[0], g[1] - ev.pos[1]) / u;
+              if (d <= 1) right++; else wrong++;
+              console.log(`  refound f${ev.f} entry ${ev.a} (#${k.n}) at ${ev.pos}: ${d.toFixed(1)} sides from its true place -> ${d <= 1 ? 'right' : 'WRONG'}`);
+            }
+            console.log(`  refounds: ${right} to the true place, ${wrong} elsewhere`);
+          }
+          if (process.env.MISSDBG) for (const [n, e] of P) { // each piece off the fit: where its entry was over the run
+            const k = key.pieces.find((q) => q.n === n), w = h[6] * k.x + h[7] * k.y + h[8], fx = (h[0] * k.x + h[1] * k.y + h[2]) / w, fy = (h[3] * k.x + h[4] * k.y + h[5]) / w;
+            const d = Math.hypot(fx - e.pos[0], fy - e.pos[1]) / u;
+            if (d <= 1) continue;
+            const tr = (posLog.get(e.id) || []).map(([t, x, y]) => `${t}s:${((x - fx) / u).toFixed(1)},${((y - fy) / u).toFixed(1)}`).join(' ');
+            console.log(`  off #${n} entry ${e.id} ${d.toFixed(1)} sides (fit ${fx.toFixed(0)},${fy.toFixed(0)}); offset over time ${tr}`);
+          }
         }
       } }
     const got = [...eng.pieces.values()].filter((p) => p.pos && !p.gone && p.state === 'checked');
