@@ -46,7 +46,9 @@ function check(name, ok, detail) { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}
     worstOff = Math.max(worstOff, Math.hypot(cx - p.pos[0], cy - p.pos[1]) / unit);
   }
   const nShaped = data.pieces.filter((p) => p.shaped).length;
-  check('every read piece has a placement for the map', placed.length > 30 && placed.length >= nShaped * 0.9, `${placed.length} of ${nShaped} shaped`);
+  // (the share is the point; the count only says the sweep read enough: it
+  // was "> 30" and a sweep on a busy PC reads 30-31 - a flaky edge, 2026-10-08)
+  check('every read piece has a placement for the map', placed.length >= 25 && placed.length >= nShaped * 0.9, `${placed.length} of ${nShaped} shaped`);
   check('each picture is centred on its piece', worstOff < 0.3, `worst ${worstOff.toFixed(2)} piece widths off`);
 
   // One consistent map: each piece's drawn angle must equal its true angle

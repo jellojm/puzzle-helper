@@ -39,6 +39,11 @@ const CASES = {
   3605: { video: 'IMG_3605.MOV', n: 38, key: path.join(__dirname, 'fixtures', 'v3605', 'answer.json'), floor: { checked: 24, at30: 14 } },
   // glass table over a mixed floor (wood, carpet, tile), ~300 loose pieces of
   // a 300-piece puzzle; for the see-through 'edges' background model. No key.
+  // owner, 2026-10-08 (v0.23.3; the phone's report from the same session
+  // restarted the vision engine twice): white counter close-ups, and loose
+  // pieces on an oak herringbone table, close-ups. No keys yet.
+  3635: { video: 'IMG_3635.MOV', n: 0, key: null },
+  3636: { video: 'IMG_3636.MOV', n: 0, key: null },
   3609: { video: 'IMG_3609.MOV', n: 300, key: null, box: 'puzzle-report-2026-10-07T01-09-35-box.jpg', grid: { pieces: 300, cols: 20, rows: 15 } },
 };
 const CASE = CASES[process.env.CASE || process.argv[2] || 3593]; // (node test/real-50.js 3605)
@@ -56,9 +61,11 @@ const FLOOR = CASE.floor || {};
 
 (async () => {
   if (!fs.existsSync(VIDEO)) { console.log('SKIP  real-50: video not found (' + VIDEO + ')'); return; }
-  let cv = require('@techstark/opencv-js');
+  // OPENCV=simd: the phone's own build (vendor/), e.g. to chase a crash seen on the phone
+  let cv = require(process.env.OPENCV === 'simd' ? '../vendor/opencv-4.10.0-simd-em3174.js' : process.env.OPENCV ? require('path').resolve(process.env.OPENCV) : '@techstark/opencv-js'); // (OPENCV=<file>: another build)
   if (cv instanceof Promise) cv = await cv; else if (!cv.Mat) await new Promise((r) => (cv.onRuntimeInitialized = r));
   PH.cv = cv;
+  if (process.env.PREGROW) { const m = new cv.Mat(+process.env.PREGROW, 1048576, cv.CV_8UC1); m.delete(); console.log('heap pre-grown to', (cv.HEAP8.buffer.byteLength / 1048576).toFixed(0), 'MB'); } // (experiment: crash at the top of a just-grown heap?)
   const { readImage } = require('./imageio');
   // ENGINE='{"budgetMs":90}': engine options (experiments)
   const eng = new PH.Engine(Object.assign(process.env.EDGEBG === '0' ? { edgeBg: false } : {}, process.env.ENGINE ? JSON.parse(process.env.ENGINE) : {}));
@@ -104,6 +111,8 @@ const FLOOR = CASE.floor || {};
   if (process.env.READS) PH.DEBUG_Q = (...a) => { if (String(a[0]).includes('read')) { const id = a[1]; if (!readLog.has(id)) readLog.set(id, []); readLog.get(id).push(a.slice(2).join(' ')); } };
   const tilt = { pitch: 0, roll: 0 };
   let curT = 0;
+  const stageT = {}; // (STAGES=1) per-stage time summed over the frames
+  process.on('exit', () => { if (!process.env.STAGES) return; const tot = stageT.total || 1; console.log('stages (share of total):', Object.entries(stageT).filter(([k]) => k !== 'total' && k !== 't1' && k !== 't2').sort((a, b) => b[1] - a[1]).slice(0, 14).map(([k, v]) => `${k} ${(100 * v / tot).toFixed(1)}%`).join(', ')); });
   const posLog = new Map(); // (MISSDBG) entry id -> [[t, x, y]] whenever it moved
   if (process.env.MISSDBG) { const rp = eng.removePiece.bind(eng); eng.removePiece = (id) => { const p = eng.pieces.get(id); if (p && !(eng.mergedInto && eng.mergedInto.get(id))) console.log(`  drop t=${curT.toFixed(1)} f${eng.fNo} entry ${id} at ${p.pos ? p.pos.map(Math.round) : '-'}: state ${p.state || 'checking'} t1 ${p.t1 ? `side ${Math.round(p.t1.meanSide)} close ${PH.isCloseRead(p.t1)}` : 'none'} t1Fail ${p.t1Fail || 0} closeViews ${p.closeViews || 0} sightings ${p.sightings || 0} moments ${p.moments || 0} closeAgree ${p.closeAgree || 0} reads ${p.nReads || '-'}`); return rp(id); }; }
   if (process.env.ASMDBG) PH.DEBUG_ASM = (...a) => { if (a[0] === 'grid' && /failed/.test(a[2])) return; console.log(`  asm t=${curT.toFixed(1)} f${eng.fNo}`, ...a); };
@@ -173,6 +182,8 @@ const FLOOR = CASE.floor || {};
     if (checked && firstAt === null) firstAt = f.t; // (owner: "pieces took a while to read")
     if (f.t <= 30) at30 = checked;
     if (process.env.MISSDBG && n % 10 === 0) for (const p of eng.pieces.values()) if (p.pos) { const L = posLog.get(p.id) || []; const q = L[L.length - 1]; if (!q || Math.hypot(q[1] - p.pos[0], q[2] - p.pos[1]) > 8) { L.push([+f.t.toFixed(0), p.pos[0], p.pos[1]]); posLog.set(p.id, L); } }
+    if (process.env.STAGES && out && out.timings) for (const [k, v] of Object.entries(out.timings)) if (typeof v === 'number') stageT[k] = (stageT[k] || 0) + v;
+    if (process.env.HEAPLOG && n % 25 === 0) console.log(`  heap t=${f.t.toFixed(0)}s f${n}: ${(cv.HEAP8.buffer.byteLength / 1048576).toFixed(1)} MB, entries ${eng.pieces.size}, frame ${(out && out.timings ? out.timings.total : 0).toFixed(0)} ms`);
     if (n % 25 === 0) { timeline.push(`${f.t.toFixed(0)}s:${checked}` + (process.env.BG ? `(${eng.bgModel ? eng.bgModel.kind : '-'},${out.dets.length}d,${c.entries})` : '')); }
   }
   const c = eng.counts();
@@ -197,10 +208,10 @@ const FLOOR = CASE.floor || {};
   if (VARIANT === 'overview') {
     check('overview only: nothing is checked from far-away reads', checked === 0, `${checked} checked`);
   } else {
-    goal(`exactly ${N} checked pieces at the end`, checked === N, `${checked}`);
+    if (N) goal(`exactly ${N} checked pieces at the end`, checked === N, `${checked}`); // (N 0: count not known yet)
     if (FLOOR.checked) check(`at least ${FLOOR.checked} checked pieces at the end (floor)`, checked >= FLOOR.checked, `${checked}`);
     if (FLOOR.at30) check(`at least ${FLOOR.at30} checked at 30 s (floor)`, at30 >= FLOOR.at30, `${at30}`);
-    check(`never more than ${N} checked pieces`, maxChecked <= N, `max ${maxChecked} at ${maxAt.toFixed(0)} s`);
+    if (N) check(`never more than ${N} checked pieces`, maxChecked <= N, `max ${maxChecked} at ${maxAt.toFixed(0)} s`);
     if (c.unchecked !== undefined) goal('nothing left unchecked', c.unchecked === 0, `${c.unchecked}`);
     const a = eng.assemblyInfo ? eng.assemblyInfo() : null;
     const shown = a && (a.shown !== undefined ? a.shown : a.cells > 0 || a.spots > 0);

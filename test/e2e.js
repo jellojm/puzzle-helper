@@ -88,9 +88,24 @@ function writePng(file, mat) {
     // (v0.20: the top bar counts checked pieces; entries still being checked
     // show as "scan closer at N" - together, what has been catalogued; v0.22:
     // "reading N in view" until the first piece is checked = 0 checked)
+    // Condition waits, not fixed sleeps (the PC is shared, so timing varies):
+    // `until` waits for a page-side condition and answers whether it came true
+    // (the check after it still fails with its normal message if not);
+    // `stable` waits for a page-side value to stop changing.
+    const until = (fn, arg, timeout = 30000) => page.waitForFunction(fn, arg, { timeout, polling: 250 }).then(() => true).catch(() => false);
+    const stable = async (fn, hold = 1500, timeout = 30000) => {
+      const t0 = Date.now(); let last, since = Date.now();
+      for (;;) {
+        const v = JSON.stringify(await page.evaluate(fn));
+        if (v !== last) { last = v; since = Date.now(); }
+        if (Date.now() - since >= hold || Date.now() - t0 > timeout) return JSON.parse(v === undefined ? 'null' : v);
+        await page.waitForTimeout(250); // (polling interval of the stability wait)
+      }
+    };
     const catalogued = (t) => (parseInt(t, 10) || 0) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0);
     await page.waitForFunction(() => { const t = document.getElementById('stats').textContent; return (parseInt(t, 10) || 0) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0) > 0; }, null, { timeout: 120000 });
-    await page.waitForTimeout(15000);
+    // (the sweep keeps adding pieces: wait for the count the check expects, not 15 s)
+    await until(() => { const t = document.getElementById('stats').textContent; return (parseInt(t, 10) || 0) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0) >= 25; }, null, 90000);
     const stats1 = await page.textContent('#stats');
     const dbg = await page.textContent('#debug');
     console.log('stats after sweep:', stats1, '\n' + dbg);
@@ -101,7 +116,9 @@ function writePng(file, mat) {
     // Box picture.
     await page.click('#boxBtn');
     await page.setInputFiles('#boxInput', path.join(OUT, 'box.jpg'));
-    await page.waitForTimeout(2500);
+    // (picture loaded = Use enabled; then the worker's corner guess may re-size the grid: wait until it settles)
+    await until(() => !document.getElementById('boxUse').disabled && !document.getElementById('boxCanvas').hidden, null, 30000);
+    await stable(() => [document.getElementById('boxCols').value, document.getElementById('boxRows').value], 1500, 15000);
     await page.screenshot({ path: path.join(OUT, 'e2e-box.png') });
     const grid = [await page.inputValue('#boxCols'), await page.inputValue('#boxRows')];
     await page.fill('#boxPieces', '48');
@@ -116,7 +133,8 @@ function writePng(file, mat) {
     await page.waitForFunction(() => /Photo:/.test(document.getElementById('toast').textContent), null, { timeout: 60000 });
     const toast = await page.textContent('#toast');
     console.log('snap toast:', toast);
-    await page.waitForTimeout(6000);
+    // (the snapped pieces are merged and placed on the box a little after the toast)
+    await until(() => { const t = document.getElementById('stats').textContent; const n = (parseInt(t, 10) || 0) + ((t.match(/scan closer at (\d+)/) || [0, 0])[1] | 0); const m = t.match(/(\d+) on box picture/); return n >= 37 && n <= 42 && m && parseInt(m[1], 10) >= 20; }, null, 60000);
     const stats2 = await page.textContent('#stats');
     console.log('stats after snap + box:', stats2);
     const n2 = catalogued(stats2);
@@ -124,11 +142,18 @@ function writePng(file, mat) {
     check('pieces placed on the box', /(\d+) on box picture/.test(stats2) && parseInt(stats2.match(/(\d+) on box picture/)[1], 10) >= 20, stats2);
 
     // Tap a piece that has a shape model and check the Find panel.
-    const pt = await page.evaluate(() => window.__phPick && window.__phPick());
+    // (wait for one in view - the test video loops - rather than look once)
+    // (the picture moves between the look and the tap: a tap that misses is aimed again, up to 6 times)
+    let pt = null;
+    for (let a = 0; a < 6 && !pt; a++) {
+      const p = await page.waitForFunction(() => window.__phPick && window.__phPick(), null, { timeout: 30000, polling: 250 }).then((h) => h.jsonValue()).catch(() => null);
+      if (!p) break;
+      await page.mouse.click(p[0], p[1]);
+      if (await page.waitForSelector('#findPanel:not([hidden])', { timeout: 5000 }).then(() => true).catch(() => false)) pt = p;
+    }
     if (pt) {
-      await page.mouse.click(pt[0], pt[1]);
-      await page.waitForSelector('#findPanel:not([hidden])', { timeout: 10000 });
-      await page.waitForTimeout(1500);
+      // (candidates, verdicts and the box-spot line fill in after the panel opens)
+      await until(() => { const sub = document.getElementById('selSub').textContent; return document.querySelectorAll('.cand').length > 0 && [...document.querySelectorAll('.cand .verdict')].some((e) => e.textContent) && /Box: .*(sure|likely|look alike)|Not placed|Add a box/.test(sub) && (!/Box: column/.test(sub) || !document.getElementById('uprightBox').hidden); }, null, 30000);
       const title = await page.textContent('#selTitle'), sub = await page.textContent('#selSub');
       const cands = await page.$$eval('.cand', (els) => els.length);
       console.log('find panel:', title, '|', sub, '|', cands, 'candidates');
@@ -137,7 +162,7 @@ function writePng(file, mat) {
       // Tier 1 (RESEARCH-ai-puzzle.md): verdict words, the box spot in words,
       // the piece drawn upright, and "In the puzzle" with undo.
       const verdicts = await page.$$eval('.cand .verdict', (els) => els.map((e) => e.textContent).filter(Boolean));
-      check('suggestions carry a verdict word', verdicts.length > 0 && verdicts.every((v) => /^(Strong match|Likely|Maybe|Unlikely|Look-alike)$/.test(v)), verdicts.slice(0, 4).join(', '));
+      check('suggestions carry a verdict word', verdicts.length > 0 && verdicts.every((v) => /^(Strong match|Likely|Maybe|Unlikely|Look-alike|2 possible fits)$/.test(v)), verdicts.join(', '));
       check('box spot said in words', /Box: .*(sure|likely|look alike)|Not placed|Add a box/.test(sub), sub);
       const upright = await page.evaluate(() => !document.getElementById('uprightBox').hidden);
       const placedSpot = /Box: column/.test(sub);
@@ -206,11 +231,11 @@ function writePng(file, mat) {
     // Border (toolbar): corners + edge pieces in one tap, off on the second.
     await page.click('#closeFind').catch(() => {});
     await page.click('#edgesBtn');
-    await page.waitForTimeout(800);
+    await until(() => document.getElementById('edgesBtn').getAttribute('aria-pressed') === 'true' && /border pieces/.test(document.getElementById('toast').textContent), null, 30000);
     await page.screenshot({ path: path.join(OUT, 'e2e-border-lit.png') }); // whole outlines, shaded
     const borderOn = await page.evaluate(() => ({ pressed: document.getElementById('edgesBtn').getAttribute('aria-pressed'), toast: document.getElementById('toast').textContent }));
     await page.click('#edgesBtn');
-    await page.waitForTimeout(300);
+    await until(() => document.getElementById('edgesBtn').getAttribute('aria-pressed') === 'false', null, 30000);
     const borderOff = await page.evaluate(() => document.getElementById('edgesBtn').getAttribute('aria-pressed'));
     check('Border button lights up corners + edges and toggles off', borderOn.pressed === 'true' && /border pieces/.test(borderOn.toast) && borderOff === 'false', `${borderOn.toast} | off: ${borderOff}`);
     check('Snap is off the toolbar (kept under More)', await page.evaluate(() => !document.querySelector('#toolbar #snapBtn') && !!document.querySelector('#menu #snapBtn')));
@@ -218,7 +243,7 @@ function writePng(file, mat) {
     // Zones (tray sorting) and "fill this spot" on the enlarged box picture.
     await page.click('#toolbar [data-mode="find"]').catch(() => {});
     await page.click('#findBar [data-filter="zones"]');
-    await page.waitForTimeout(800);
+    await until(() => document.querySelector('#findBar [data-filter="zones"]').classList.contains('on') && /colour of their area/.test(document.getElementById('toast').textContent), null, 30000);
     const zones = await page.evaluate(() => ({ on: document.querySelector('#findBar [data-filter="zones"]').classList.contains('on'), toast: document.getElementById('toast').textContent }));
     await page.click('#findBar [data-filter="zones"]');
     check('Zones lights pieces by area of the box', zones.on && /colour of their area/.test(zones.toast), zones.toast.slice(0, 90));
@@ -226,7 +251,8 @@ function writePng(file, mat) {
     if (mm && await mm.isVisible()) {
       let b = await mm.boundingBox();
       await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2); // enlarge
-      await page.waitForTimeout(400);
+      await until(() => document.getElementById('minimap').classList.contains('big'), null, 10000);
+      await stable(() => JSON.stringify(document.getElementById('minimap').getBoundingClientRect()), 600, 10000); // (let the enlarging settle)
       b = await mm.boundingBox();
       await page.mouse.click(b.x + b.width * 0.5, b.y + b.height * 0.5); // pick the middle spot
       const ok = await page.waitForFunction(() => !document.getElementById('findPanel').hidden && /^Spot: column/.test(document.getElementById('selTitle').textContent), null, { timeout: 6000 }).then(() => true).catch(() => false);
@@ -238,7 +264,7 @@ function writePng(file, mat) {
     // Matches: step through pairs; the pair is shaded and joined by an arc.
     await page.click('#pairsBtn');
     const mOpen = await page.waitForFunction(() => !document.getElementById('matchBar').hidden, null, { timeout: 15000 }).then(() => true).catch(() => false);
-    await page.waitForTimeout(1200);
+    await until(() => /(Strong match|Likely|Maybe|Look-alike|Unlikely) \d+%/.test(document.getElementById('matchLabel').textContent), null, 30000);
     const mLabel = mOpen ? await page.textContent('#matchLabel') : '';
     await page.screenshot({ path: path.join(OUT, 'e2e-matches.png') });
     check('Matches: pairs listed with a verdict', mOpen && /(Strong match|Likely|Maybe|Look-alike|Unlikely) \d+%/.test(mLabel), mLabel || 'match bar did not open');
@@ -249,7 +275,8 @@ function writePng(file, mat) {
     await page.click('#menuBtn');
     await page.click('#frameBtn');
     await page.waitForSelector('#frameBar:not([hidden])', { timeout: 5000 });
-    await page.waitForTimeout(800);
+    // (the camera comes back on when the menu closes: Capture needs a live frame)
+    await until(() => { const v = document.getElementById('video'); return v.videoWidth > 0 && v.readyState >= 2; }, null, 30000);
     await page.click('#frameShot');
     const modal = await page.waitForSelector('#frameModal:not([hidden])', { timeout: 5000 }).then(() => true).catch(() => false);
     const canvasW = await page.evaluate(() => document.getElementById('frameCanvas').clientWidth);
@@ -266,7 +293,7 @@ function writePng(file, mat) {
     check('Mark border: a selected piece gets its spot inside the border', spot, JSON.stringify(await page.evaluate(() => window.__phBorder())).slice(0, 120));
     const peekShown = await page.evaluate(() => !document.getElementById('findPeek').hidden);
     if (peekShown) await page.click('#findPeek');
-    await page.waitForTimeout(500);
+    if (peekShown) await until(() => document.getElementById('findPanel').getBoundingClientRect().height < 140, null, 10000);
     const panelH = await page.evaluate(() => document.getElementById('findPanel').getBoundingClientRect().height);
     await page.screenshot({ path: path.join(OUT, 'e2e-border-spot.png') });
     check('Mark border: "Show spot" folds the piece panel out of the way', peekShown && panelH < 140, `panel ${Math.round(panelH)}px tall`);
@@ -285,8 +312,15 @@ function writePng(file, mat) {
       if (d.suggestedFilename().endsWith('.json')) { try { reportJson = JSON.parse(fs.readFileSync(await d.path(), 'utf8')); } catch (_) { /* checked below */ } }
     });
     await page.click('#reportBtn');
-    await page.waitForTimeout(4000);
+    // (wait for the files, not a fixed time: under load the report took > 4 s)
+    for (let t = 0; t < 60 && !(reportJson && dls.some((n) => n.endsWith('analyzed.jpg'))); t++) await page.waitForTimeout(500);
     check('send report produces frame + analyzed view + data files', dls.some((n) => n.endsWith('.json')) && dls.some((n) => n.endsWith('frame.jpg')) && dls.some((n) => n.endsWith('analyzed.jpg')), dls.join(', '));
+    // the camera stays off once the report's snapshot is taken (owner,
+    // 2026-10-08: running behind the share sheet it made the app lag)
+    const paused = await page.evaluate(() => !document.getElementById('resume').hidden);
+    check('after a report the camera is off until Resume', paused, paused ? 'paused, Resume shown' : 'still running');
+    await page.click('#resume').catch(() => {});
+    await until(() => document.getElementById('resume').hidden, null, 15000);
     const want = ['mainThread', 'stats', 'settings', 'device', 'flow'], wantW = ['engine', 'catalog', 'session'];
     const missing = reportJson ? want.filter((k) => !reportJson[k]).concat(wantW.filter((k) => !(reportJson.worker || {})[k])) : ['(no JSON)'];
     const w = (reportJson && reportJson.worker) || {};
@@ -302,6 +336,16 @@ function writePng(file, mat) {
       .then((h) => h.jsonValue()).catch(async () => page.evaluate(() => window.__phRestarts()));
     check('a vision-library crash restarts the engine and keeps the catalog', post.restarts >= 1 && post.ready && post.pieces >= pre.pieces,
       `${pre.pieces} pieces before, ${post.pieces} after; restarts ${post.restarts}`);
+    // ... and carries on where the camera was: no new scan group (owner's
+    // oak-table session 2026-10-08: two restarts left 13 groups and
+    // duplicates of checked pieces). 60 results on: past the 20 lost frames
+    // after which the engine would start a new group. (This test video
+    // re-finds its place even without the saved pose - checked 2026-10-08 -
+    // so this guards against regressions, it doesn't prove the resume.)
+    await page.waitForFunction((f) => window.__phRestarts().frames >= f + 60, post.frames || 0, { timeout: 90000, polling: 300 }).catch(() => {});
+    const later = await page.evaluate(() => window.__phRestarts());
+    check('after the restart the map carries on (no new scan group)', later.islands !== null && later.islands <= pre.islands,
+      `scan groups ${pre.islands} before, ${later.islands} ${later.frames - (post.frames || 0)} results after the restart`);
     // Phone tilted ~35°: feed gravity readings, then tap a piece through the
     // corrected mapping (outline -> screen -> tap -> back to the piece).
     await page.evaluate(() => {
@@ -309,12 +353,16 @@ function writePng(file, mat) {
         accelerationIncludingGravity: { x: 0, y: -5.6, z: -8.0 }, acceleration: { x: 0, y: 0, z: 0 }, rotationRate: { alpha: 0, beta: 0, gamma: 0 },
       })), 50);
     });
-    await page.waitForTimeout(6000);
+    await until(() => /3[0-9]° tilt/.test(document.getElementById('stats').textContent) && /corrected/.test(document.getElementById('debug').textContent), null, 60000);
     const tiltInfo = await page.evaluate(() => ({ stats: document.getElementById('stats').textContent, dbg: document.getElementById('debug').textContent }));
     console.log('tilted:', tiltInfo.stats, '|', tiltInfo.dbg.split(String.fromCharCode(10)).pop());
     check('tilt reading shown and correction applied', /3[0-9]° tilt/.test(tiltInfo.stats) && /corrected/.test(tiltInfo.dbg), tiltInfo.stats);
     await page.click('#closeFind').catch(() => {});
-    const pt2 = await page.evaluate(() => window.__phPick && window.__phPick());
+    // A catalogued piece in view to tap: wait for one (the test video loops)
+    // rather than look once - after the border was marked, its 25 edge
+    // pieces count as in the puzzle and are not tapped here, so a single
+    // look found none whenever the view held only edge pieces.
+    const pt2 = await page.waitForFunction(() => window.__phPick && window.__phPick(), null, { timeout: 30000, polling: 250 }).then((h) => h.jsonValue()).catch(() => null);
     if (pt2) {
       await page.mouse.click(pt2[0], pt2[1]);
       const opened = await page.waitForSelector('#findPanel:not([hidden])', { timeout: 8000 }).then(() => true).catch(() => false);
@@ -324,8 +372,7 @@ function writePng(file, mat) {
     // Table view (Map mode): camera off, pieces drawn from above, same tools.
     await page.click('#closeFind').catch(() => {});
     await page.click('#toolbar [data-mode="map"]');
-    await page.waitForFunction(() => window.__phMapState && window.__phMapState().pieces > 0, null, { timeout: 8000 }).catch(() => {});
-    await page.waitForTimeout(400);
+    await until(() => { const m = window.__phMapState && window.__phMapState(); return m && !m.hidden && !m.active && m.drawn > 5 && (m.size || []).length > 5; }, null, 30000);
     const ms = await page.evaluate(() => window.__phMapState());
     check('Map: camera off, scanned pieces drawn as pictures', !ms.hidden && !ms.active && ms.drawn > 5, `${ms.drawn} of ${ms.pieces} drawn`);
     await page.screenshot({ path: path.join(OUT, 'e2e-map.png') });
@@ -339,12 +386,12 @@ function writePng(file, mat) {
       await page.click('#closeFind').catch(() => {});
     } else check('Map: tapping a piece opens its matches', false, 'no drawn piece on screen');
     await page.click('#edgesBtn');
-    await page.waitForTimeout(400);
+    await until(() => !document.getElementById('tableMap').hidden && document.getElementById('edgesBtn').getAttribute('aria-pressed') === 'true', null, 15000);
     const stillMap = await page.evaluate(() => !document.getElementById('tableMap').hidden && document.getElementById('edgesBtn').getAttribute('aria-pressed') === 'true');
     check('Map: Border lights up on the map without leaving it', stillMap);
     await page.click('#edgesBtn');
     await page.click('#toolbar [data-mode="scan"]');
-    await page.waitForTimeout(1500);
+    await until(() => { const m = window.__phMapState(); return m.hidden && m.active; }, null, 30000);
     const back = await page.evaluate(() => window.__phMapState());
     check('Scan again: camera back on, map hidden', back.hidden && back.active, `hidden ${back.hidden}, camera ${back.active}`);
     // ---- v0.16.0: in-app photo, puzzle library, camera path ----
@@ -357,14 +404,13 @@ function writePng(file, mat) {
     const photoOk = await page.waitForFunction(() => /^Photo: \d+ pieces found/.test(document.getElementById('toast').textContent) || /inside the app/.test(document.getElementById('toast').textContent), null, { timeout: 30000 }).then(() => true).catch(() => false);
     const photoMsg = await page.textContent('#toast');
     check('Catalog from a photo, inside the app (or the camera app if it can\'t)', photoOk, photoMsg.slice(0, 100));
-    await page.waitForTimeout(1500);
-    const n0 = await page.evaluate(() => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1]);
+    // (the photo's pieces are merged a little after the toast: take the count once it stops changing)
+    const n0 = await stable(() => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1], 1500, 30000);
     await page.click('#menuBtn');
     await page.click('#libSave');
     const saved = await page.waitForFunction(() => /E2E puzzle/.test(document.getElementById('libList').textContent), null, { timeout: 8000 }).then(() => true).catch(() => false);
     // (saving runs a full housekeeping pass first - v0.20: the count to get back is the one shown now)
-    await page.waitForTimeout(500);
-    const nSaved = await page.evaluate(() => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1]);
+    const nSaved = await stable(() => (document.getElementById('stats').textContent.match(/^(\d+) pieces/) || [])[1], 1500, 15000);
     await page.click('#newPuzzle');
     await page.waitForFunction(() => /^(0 pieces|reading \d+ in view)/.test(document.getElementById('stats').textContent), null, { timeout: 8000 }).catch(() => {});
     const afterNew = await page.textContent('#stats');

@@ -10,7 +10,12 @@ const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-rel
 // build steps in PLAN-hard-issues.md): segmentation ~35% faster in node.
 // Used when the browser has WebAssembly SIMD (iOS 16.4+); otherwise, or if
 // it fails to load, the CDN build above.
-const OPENCV_SIMD_URL = '../vendor/opencv-4.10.0-simd.js';
+// v0.23.4: rebuilt with Emscripten 3.1.74 (was 3.1.45). The 3.1.45 build
+// trapped ("memory access out of bounds") on the owner's oak-table session -
+// twice on the phone, 6 of 6 replays of IMG_3636 in node; this build 0 of 3,
+// and ~10% faster. A new file name so no cache serves the old one.
+// (build: C:/Users/jmott/dev/build-opencv-simd-3174.sh, then the `var Module` patch)
+const OPENCV_SIMD_URL = '../vendor/opencv-4.10.0-simd-em3174.js';
 // A tiny module using one SIMD instruction: does this browser accept SIMD?
 const simdOk = (() => { try { return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])); } catch (_) { return false; } })();
 const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'border', 'engine'];
@@ -194,7 +199,8 @@ async function loadState() {
   const asm = await tx('meta', 'readonly', (s) => s.get('asm'));
   const cellVotes = await tx('meta', 'readonly', (s) => s.get('cellVotes'));
   const boardRef = await tx('meta', 'readonly', (s) => s.get('boardRef'));
-  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null, asm: asm || [], cellVotes: cellVotes || null, boardRef: boardRef || null };
+  const lastPose = await tx('meta', 'readonly', (s) => s.get('lastPose'));
+  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null, asm: asm || [], cellVotes: cellVotes || null, boardRef: boardRef || null, lastPose: lastPose || null };
 }
 function scheduleSave() {
   if (saveTimer || !db) return;
@@ -322,6 +328,16 @@ async function init(msg) {
     db = await openDb();
     const st = await loadState();
     engine.importState(st);
+    // just restarted after a crash: carry on where the camera was (15 s at most:
+    // a restart takes a few seconds; the tracking checks the guess as usual)
+    const lp = st.lastPose;
+    if (lp && Date.now() - lp.t < 15000 && lp.pose && Number.isFinite(lp.pose.a) && Number.isFinite(lp.pose.tx)) {
+      engine.pose = lp.pose; engine.island = lp.island;
+      if (lp.unitLive && lp.unitLiveW) { engine.unitLive = lp.unitLive; engine.unitLiveW = lp.unitLiveW; }
+      if (lp.bgModel) engine.bgModel = lp.bgModel;
+      engine.resumed = true;
+    }
+    if (st.lastPose) await tx('meta', 'readwrite', (s) => s.delete('lastPose'));
     engine.importAsms(st.asm);
     engine.importCellVotes(st.cellVotes);
     engine.fbLog = Array.isArray(st.feedback) ? st.feedback : [];
@@ -704,6 +720,13 @@ async function retire(why, where, err) {
   cvDead = true;
   camStop();
   try { await flushAll(); } catch (_) { /* best effort: most of the catalog is saved already */ }
+  // where the camera was on the map: the fresh engine carries on from there
+  // instead of starting a new scan group (the owner's oak-table session,
+  // 2026-10-08: two restarts, 13 groups, duplicates of pieces already checked)
+  try {
+    const bm = engine && engine.bgModel ? JSON.parse(JSON.stringify(engine.bgModel)) : null;
+    if (db && engine && engine.pose) await tx('meta', 'readwrite', (s) => s.put({ t: Date.now(), pose: { a: engine.pose.a, b: engine.pose.b, tx: engine.pose.tx, ty: engine.pose.ty }, island: engine.island, unitLive: engine.unitLive || null, unitLiveW: engine.unitLiveW || null, bgModel: bm }, 'lastPose'));
+  } catch (_) { /* best effort */ }
   post({ type: 'cvDead', why, where, message: String((err && err.message) || err || why),
     stack: err && err.stack ? String(err.stack).slice(0, 1200) : null, heapMB: heapMB(), build: PH.cvBuild || null });
 }

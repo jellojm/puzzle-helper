@@ -16,7 +16,7 @@ decision early changes the whole run), so a single run never decides.
 
 ## For the next agent
 
-Live: v0.23.3 (tags v0.22.0-v0.23.3). Start with `test/README.md` (clocks,
+Live: v0.23.4 (tags v0.22.0-v0.23.4). Start with `test/README.md` (clocks,
 results history, `tools/ab.js`, `tools/trend.js`) and the milestone table.
 Owner decisions and constraints: memory files project-owner-decisions-2026-10-07,
 project-no-phone-reviews, feedback-no-environment-changes. Known at phone
@@ -42,6 +42,7 @@ drift correction from a look-alike would fix both videos' map jumps.
 | 0.23.3 | Cheaper reads at the phone's pace (same results); real pieces no longer dropped after one failed read | published |
 | - | Close-up reads that failed only the quality floor count as agreement | dropped: they agree 1 in 10 (IMG_3605, model clock; accepted reads 65-88%) |
 | - | Live reads at a capped resolution | not shipped: helps the phone model, costs edge codes (see below) |
+| 0.23.4 | No more engine crashes on the oak table; one good read checks a piece; less work on still views; camera off after a report; tests that don't flake | published |
 | - | Proof before a far re-find (`PH.MOVE_PROOF`), or a claim settled at the old spot (`PH.MOVE_CLAIM`) | not shipped: fix IMG_3593's jump, trade IMG_3605's jumps for extras (see below) |
 | - | A failing colour-only read retried with the outline (`PH.READ_RETRY`) | not shipped: IMG_3605 worse (see below) |
 | later | IMG_3627's third piece: `photoFit` picks a segmentation without it; far re-finds that tell a drift correction from a look-alike; false "assembled part" on IMG_3593 at PC pace; seam cut on live frames; seam edge read round the tab; Map placements at phone pace; shadow outlines (IMG_3627); glass table (IMG_3609) | |
@@ -319,4 +320,69 @@ Two findings:
   pieces > 1 off 39 -> 48; IMG_3593 unchanged): there the outline channel
   takes in the lamp shadows, and the extra reads are poor. A retry would
   need the shadow peel on the outline too.
+
+## 0.23.4 — the crash, "one good read", less work, steady tests
+
+Owner, 2026-10-08 (reports 03-33/03-34/03-39, videos IMG_3635 white counter
+and IMG_3636 oak herringbone table): "still drops pieces when zoomed out and
+is losing track of so much ... not many matches"; "a good scan should be
+everything we need ... drop the multiple pass rule if the first pass was
+good ... reduce heavy compute"; "the camera should be switched off right
+after snapshots are taken"; "testing should not be flaky".
+
+- **Crash.** The oak report: two "Out of bounds memory access" traps,
+  each restarting the vision worker (tracking lost, new scan groups -
+  13 by the end). Replayed in node on our SIMD build (`OPENCV=simd`,
+  `real-50.js 3636`): 6 of 6 runs crash (v0.23.2 too; also with the heap
+  grown to 400 MB first - not memory growth); the CDN build 0 of 2. Our
+  build rebuilt with Emscripten 3.1.74 (was 3.1.45): 0 of 3 crashes over
+  the whole video, and ~10% faster (segmentation 41-50 vs 49-55 ms). The
+  single call that trapped does not trap alone: state-dependent. **Not
+  proven gone**: a JS-side misuse that a different allocator layout hides
+  is still possible (next: a SAFE_HEAP debug build, replay IMG_3636).
+  Shipped as `vendor/opencv-4.10.0-simd-em3174.js` (new name: no cache
+  serves the old one); build script `C:/Users/jmott/dev/build-opencv-simd-3174.sh`.
+- **Resume after a restart**: the worker saves the pose, scan group, piece
+  size and background model when it retires; a fresh engine within 15 s
+  starts from them. (e2e's new check passes, but also passes without the
+  resume - its video re-finds its place anyway: unproven on the phone.)
+- **One good read** (`PH.ONE_READ_Q` 0.6): a close read of quality >= 0.6
+  checks a piece alone (still with 4 sightings at 2 moments). IMG_3593
+  against the key: such reads right 115 of 116, first reads 32 of 32. Five
+  settings per video, summed: IMG_3593 checked at 30 s 181 -> 201, first at
+  5.0 -> 4.2 s, matched 239 = 239, codes 235 = 235; IMG_3605 at 30 s
+  90 -> 119, matched 132 -> 138, extras 23 -> 34 (one run 40 checked of 38).
+- **Less work on still views** (main.js `viewSettled`, `SETTLED_GAP`): the
+  phone spent 45-82% of its time on still frames that read nothing new.
+  Nothing changing for 6 results and nothing in view left to check -> a
+  frame every 2 s; a 3% camera move wakes it at once. (Not measurable in
+  node; e2e passes.)
+- **No assembled part over checked loose pieces** (`PH.ASM_LOOSE_VETO`): a
+  big blob over 2+ checked loose pieces' spots is those pieces touching
+  (oak table: 3 phantom parts). Removes the false "assembled part" (oak, and
+  the IMG_3593 PC-pace one); the search is still ~1/3 of an oak frame -
+  next: why (hi-res pass, puzzleLike) on loose tables.
+- **Report**: the camera stays on only for the snapshot, then off until
+  Resume (e2e check).
+- **Tests that don't flake**: e2e checks waited fixed times and then
+  sampled once - under load the report took > 4 s ("no JSON"), and the tilt
+  tap found only the 25 border pieces (counted "in the puzzle" once the
+  border was marked) in view. All fixed sleeps before checks are now
+  condition waits; "2 possible fits" is a verdict the check now knows;
+  table-view's "> 30 read" edge (30-31 on a busy PC) is a floor of 25.
+  e2e 41/41 in 5 runs under heavy load.
+- `real-50.js`: cases 3635/3636 (no keys yet), `OPENCV=simd|<file>`,
+  `HEAPLOG`, `STAGES`, `MISSDBG`, `ASMDBG`.
+
+Direction review (fable subagent, 2026-10-08), next in order:
+1. **Far views**: zoomed out, checked pieces are drawn as "scan closer"
+   rings - the oak report's last frame: 35 detections, 10 linked, 17 rings;
+   pieces ~20 px. Link far views as a whole (pose from inliers, then match
+   piece-sized blobs to map spots within ~0.8 piece) and draw checked pieces
+   at their map spots.
+2. **Few matches**: shown pairs need both pieces checked, mutual top-1 and
+   min(prob) >= 0.8; without a box picture `totalPieces` defaults to 1000
+   (the owner's typed count should be used); 17 of 28 true join sides are
+   near-ties. Measure the gate on real-joins before changing it.
+3. The oak table itself: 7 checked at 30 s (IMG_3636).
 

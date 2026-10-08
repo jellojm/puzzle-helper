@@ -301,7 +301,10 @@
           if (own) A.sharedSpot = false;
           if (A.state !== 'checked') {
             const close = A.t1 && PH.isCloseRead(A.t1);
-            const reads = close && ((A.closeAgree || 0) >= 2 || A.photoRead);
+            // (or one close read good enough on its own: IMG_3593, every close
+            // read against the key - quality >= 0.6 right 115 of 116, a first
+            // read 32 of 32; two agreeing reads cost a second read and seconds)
+            const reads = close && ((A.closeAgree || 0) >= 2 || A.photoRead || (PH.ONE_READ_Q && A.t1.quality && A.t1.quality.q >= PH.ONE_READ_Q));
             const seen = A.photoRead || ((A.sightings || 0) >= 4 && (A.moments || 0) >= 2);
             if (reads && seen && own) { A.state = 'checked'; A.checkedAt = Date.now(); st.checked++; this.touch(A); this.version++; this.matchCache.clear(); }
             else if (!close && (A.closeViews || 0) >= 20 || (!A.t1 && (A.readFails || 0) >= PH.DROP_READ_FAILS && (A.sightings || 0) >= 20)) {
@@ -3203,7 +3206,24 @@
       const side = unit && unit < proc.w * proc.h * 0.15 ? Math.sqrt(unit) : null;
       const pick = (ds, P, sd) => ds.filter((d) => (d.big || d.area > (sd ? sd * sd * 3.5 : P.w * P.h * 0.06)) && (!sd || Math.min(d.bbox[2], d.bbox[3]) >= sd * 1.2)) // (not a thin strip along the frame edge)
         .sort((x, y) => y.area - x.area).slice(0, photo ? 6 : 2);
+      // A blob over the spots of 2+ checked loose pieces is those pieces
+      // touching, not an assembled part (its pieces are never catalogued
+      // loose): the owner's 45 loose pieces on the oak table made 3 phantom
+      // parts (311/75/39 cells), and the search was ~23% of each frame there.
+      const inv = !photo && this.pose ? PH.simInvert(this.pose) : null;
+      const looseIn = (d) => {
+        if (!inv || !d.pts) return 0;
+        let n = 0;
+        for (const p of this.pieces.values()) {
+          if (!p.pos || p.gone || p.inPuzzle || p.island !== this.island || !this.isChecked(p)) continue;
+          const [x, y] = PH.simApply(inv, p.pos[0], p.pos[1]);
+          if (x < d.bbox[0] || y < d.bbox[1] || x > d.bbox[0] + d.bbox[2] || y > d.bbox[1] + d.bbox[3]) continue;
+          if (PH.pointInPoly(x, y, d.pts) && ++n >= 2) return n;
+        }
+        return n;
+      };
       const blobs = pick(dets, proc, side).filter((d) => {
+        if (PH.ASM_LOOSE_VETO && looseIn(d) >= 2) { this.rejects.asmLoose = (this.rejects.asmLoose || 0) + 1; return false; }
         const v = this.puzzleLike(d, seg, proc);
         if (PH.DEBUG_BLOB) PH.DEBUG_BLOB(d, v);
         if (!v.ok) this.rejects.notPuzzle = (this.rejects.notPuzzle || 0) + 1;
@@ -3816,6 +3836,8 @@
   PH.BEHIND_MS = 200;   // a frame's time (median of 8) over this: the camera outruns the engine (the phone's ~5 fps)
   PH.MOVE_PROOF = false; // a far re-find ("this checked piece was moved here") needs its old spot gone or seen bare (off: see PLAN-v0.23 "Not shipped - proof before a far re-find")
   PH.MOVE_CLAIM = false; // ... or the claim waits for a look at the piece's own spot (Engine.settleClaim; off: PLAN-v0.23)
+  PH.ASM_LOOSE_VETO = true; // a big blob over 2+ checked loose pieces is not an assembled part (Engine.findSpots)
+  PH.ONE_READ_Q = 0.6; // a close read of this quality checks a piece alone (else two agreeing close reads)
   PH.DROP_READ_FAILS = 3; // an entry never read after this many failed reads (and 20 sightings) is not a piece
   PH.MAP_SOLVE = true;   // re-solve the map from the kept views (Engine.solveMap) ...
   PH.MAP_VIEWS = 300;    // ... the last this many views ...

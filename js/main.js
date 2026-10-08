@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.23.3';
+const APP_VERSION = '0.23.4';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -59,6 +59,10 @@ const S = {
 const IDLE_MS = 90000;   // phone left sitting still -> pause the camera
 const BASE_GAP = 110;    // ~9 frames/s while something is happening
 const MAX_GAP = 600;     // ~1.7 frames/s when nothing at all is changing
+// ... and every 2 s once everything in view is checked as well: the phone
+// spent 45-82% of its time segmenting still views where nothing more was read
+// (reports 2026-10-07/08). Camera motion wakes it at once (loop()).
+const SETTLED_GAP = 2000;
 window.addEventListener('error', (e) => logError('page: ' + e.message));
 window.addEventListener('unhandledrejection', (e) => logError('promise: ' + (e.reason && e.reason.message || e.reason)));
 function logError(msg) { S.errors.push({ t: new Date().toISOString(), msg: String(msg) }); if (S.errors.length > 50) S.errors.shift(); }
@@ -362,7 +366,7 @@ function tuneFrameRate() {
 // open, the app in the background, or the phone left sitting still. The camera
 // is released outright (not just paused) so the recording indicator goes out.
 function scanningWanted() {
-  return S.running && !document.hidden && !S.pickerOpen && !S.idle && S.mode !== 'map' &&
+  return S.running && !document.hidden && !S.pickerOpen && !S.idle && !S.reporting && S.mode !== 'map' &&
     $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden && $('start').hidden;
 }
 // Last real camera view, kept when the camera is switched off (menu, idle)
@@ -641,8 +645,13 @@ async function sendFrame() {
 function frameGap() {
   // While something is highlighted the user is hunting for it on the table, so
   // keep the view responsive however long they hold still.
-  const cap = S.last && S.last.highlights && S.last.highlights.length ? 250 : MAX_GAP;
-  return Math.min(cap, BASE_GAP * Math.pow(1.5, Math.min(S.calm, 6)));
+  const cap = S.last && S.last.highlights && S.last.highlights.length ? 250 : S.calm >= 6 && viewSettled() ? SETTLED_GAP : MAX_GAP;
+  return Math.min(cap, BASE_GAP * Math.pow(1.5, Math.min(S.calm, 9)));
+}
+// Nothing in view left to do: every piece checked (no "scan closer" rings).
+function viewSettled() {
+  const L = S.last;
+  return !!(L && L.dets && L.dets.length && !L.dets.some((d) => !d.border && (d.status === 'checking' || d.status === 'unknown')));
 }
 
 function loop() {
@@ -659,6 +668,9 @@ function loop() {
   S.rafN = (S.rafN || 0) + 1;
   if (trackingNeeded() && S.rafN % (S.flow ? S.flow.every : 2) === 0) trackStep();
   const shift = shiftSince(S.last);
+  // The camera moved since the last result: back to the full frame rate
+  // (frames are paced down while nothing changes; frameGap)
+  if (shift && S.calm && S.last && Math.hypot(shift.dx, shift.dy) > (S.last.frameW || 640) * 0.03) S.calm = 0;
   // Redraw only when there is a new result, the camera moved the marks by
   // more than half a pixel, a pulsing highlight (capped at ~20 fps) or
   // something asked for one — not 60 times a second regardless.
@@ -1635,9 +1647,23 @@ $('reportBtn').onclick = () => {
   $('menu').hidden = true;
   noteActivity(); applyPower(); // the camera was off behind the menu; let it come back
   toast('Preparing report…', 10000);
-  // Give the stream a moment so the report still carries a live camera frame.
-  setTimeout(() => W.post({ type: 'report' }), 900);
+  // Give the stream a moment so the report still carries a live camera frame,
+  // keep that frame, then switch the camera off while the report is built and
+  // shared (owner, 2026-10-08: left running behind the share sheet, it made
+  // the app lag). Back in the app it waits paused: tap to resume.
+  setTimeout(() => {
+    keepLastFrame();
+    S.reporting = true; applyPower();
+    W.post({ type: 'report' });
+    // (no answer from the vision worker - it restarted: don't stay switched off)
+    S.reportT = setTimeout(() => { if (S.reporting && !S.reportShown) { $('toast').hidden = true; reportDone(); } }, 20000);
+  }, 900);
 };
+function reportDone() {
+  if (!S.reporting) return;
+  S.reporting = false; S.reportShown = false; clearTimeout(S.reportT);
+  S.idle = true; applyPower(); // (paused: the Resume button brings the camera back)
+}
 function rafSummary() {
   const n = Math.min(rafGapN, RAF_GAPS.length);
   if (!n) return null;
@@ -1654,6 +1680,10 @@ async function deviceInfo() {
   return d;
 }
 async function finishReport(workerData, analyzed, boxImg) {
+  S.reportShown = true; // (the share sheet may stay open long: the safety timeout waits)
+  try { await finishReport1(workerData, analyzed, boxImg); } finally { reportDone(); }
+}
+async function finishReport1(workerData, analyzed, boxImg) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const files = [];
   try {
@@ -1760,7 +1790,7 @@ window.__phAsm = () => { // test hook: the assembled part, and the screen point 
 // test hook: open an open spot of the assembled part as a tap on it would (the
 // fake camera keeps moving, so a click can land beside it)
 window.__phOpenSpot = () => { const sp = S.last && (S.last.spots || []).find((x) => x.cell); if (sp) openSpot(sp); return !!sp; };
-window.__phRestarts = () => ({ restarts: STATS.workerRestarts || 0, ready: !!S.ready, pieces: S.counts ? S.counts.pieces : null });
+window.__phRestarts = () => ({ restarts: STATS.workerRestarts || 0, ready: !!S.ready, pieces: S.counts ? S.counts.pieces : null, islands: S.counts ? S.counts.islands : null, frames: STATS.results || 0 });
 window.__phStatuses = () => S.last && S.last.dets.map((d) => d.status + (d.border ? '/border' : ''));
 
 // ?video=URL plays a recorded sweep instead of the camera (desktop testing).
