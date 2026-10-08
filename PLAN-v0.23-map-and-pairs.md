@@ -19,8 +19,8 @@ decision early changes the whole run), so a single run never decides.
 | Version | Milestone | State |
 |---|---|---|
 | 0.23.0 | The map stays true on long close-up sweeps | published |
-| 0.23.1 | Joined pairs read piece by piece (photos) | see below |
-| 0.23.2 | Find mode: no clump as a partner; one verdict per pair | |
+| 0.23.1 | Joined pairs read piece by piece (photos) | published |
+| 0.23.2 | Find mode: a clumped partner drawn as itself; one verdict per pair | see below |
 | later | quality-failed close reads as agreement; shadow outlines; glass table | |
 
 ## 0.23.0 — the map stays true
@@ -101,3 +101,21 @@ IMG_3622 2 -> 4); join sides measured 22 -> 30, top 3 11 -> 14 (first 9 ->
 Next for joined pairs: live frames (budget: one clump per still frame), and
 following the seam round the tab (a better line detector at the seam's own
 scale) so the seam edge can be read too.
+
+## 0.23.2 — Find mode tells the truth
+
+From the owner's screenshots of 2026-10-07:
+- **IMG_3630**: a suggested partner was shaded as a two-piece clump. A piece
+  that touches another is linked to the clump's detection, and the overlay
+  shades a piece by its detection. Now `Engine.output` gives the clump no
+  piece number and adds the piece's own outline (its read placement in this
+  view, else a ring at its map spot, status `inClump`); the overlay draws it
+  only when highlighted, taps hit it, and the page says once: "Piece #N is
+  touching another piece - nudge them apart so it can be read on its own."
+- **IMG_3631** "Strong match 70%": the pairs list showed the lower of the
+  two sides' probabilities with ONE side's word. Now the weaker side's word
+  (`PH.weakerVerdict`): no pair is "strong" under 85%.
+
+`test/find-mode.js`: 45 synthetic pairs, none with the other side's word,
+none strong under 85%; a clump is unnumbered and the piece in it is drawn
+where the map puts it, highlighted, marked as in a clump.

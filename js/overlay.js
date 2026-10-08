@@ -10,6 +10,7 @@ export const STATUS = {
   placed: { stroke: '#3ddc84', dash: [] },
   done: { stroke: 'rgba(160,170,180,0.35)', dash: [2, 4] }, // marked as in the puzzle
   merged: { stroke: '#ff9f43', dash: [6, 4] },
+  inClump: { stroke: '#ff9f43', dash: [2, 3] }, // a piece inside a clump: drawn only when highlighted
   // Not a checked piece yet: needs a closer, steadier look (v0.20).
   checking: { stroke: '#ffb300', dash: [5, 4] },
 };
@@ -118,6 +119,7 @@ export function drawOverlay(ctx, res, M, opts) {
   // which is most of what makes the overlay feel heavy on a phone.
   for (const d of res.dets) {
     if (d.id) byId.set(d.id, d);
+    if (d.status === 'inClump') continue; // (its clump is drawn; the piece only when highlighted)
     const st = STATUS[d.status] || STATUS.unknown;
     ctx.globalAlpha = d.border ? 0.5 : 0.9;
     if (marks) {

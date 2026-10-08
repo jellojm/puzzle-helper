@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.23.1';
+const APP_VERSION = '0.23.2';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -117,6 +117,10 @@ function onWorkerMessage(e) {
       // shifted by however far the camera has moved since.
       m.flowBase = S.flowAtSend;
       S.last = m;
+      // A suggested partner lying against another piece: shaded on its own,
+      // and said once (owner's IMG_3630: a partner shaded as a two-piece clump).
+      { const h = m.highlights && m.highlights.find((x) => x.inClump && (x.role === 'gold' || x.role === 'silver'));
+        if (h && !(S.clumpSaid || (S.clumpSaid = new Set())).has(h.id)) { S.clumpSaid.add(h.id); toast(`Piece #${h.id} is touching another piece — nudge them apart so it can be read on its own.`, 4500); } }
       S.busy = false;
       bump('results');
       // lag = send -> result on the page (grab + transfer + queue + analysis + reply).

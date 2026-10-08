@@ -442,6 +442,9 @@
     if (p >= 0.5) return 'likely';
     return 'maybe';
   };
+  // Of two verdicts (a pair seen from each side), the weaker.
+  const VERDICT_RANK = { weak: 0, alike: 1, maybe: 2, likely: 3, strong: 4 };
+  PH.weakerVerdict = (a, b) => ((VERDICT_RANK[a] ?? 0) <= (VERDICT_RANK[b] ?? 0) ? a : b);
   // A loop is only as good as its weakest join.
   PH.loopScore = (p) => Math.max(p[0], p[1], p[2], p[3]) + 0.25 * (p[0] + p[1] + p[2] + p[3]);
 })(typeof self !== 'undefined' ? self : globalThis);

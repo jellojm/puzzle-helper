@@ -2942,7 +2942,9 @@
           pairs.push({
             a: id, b: m.id, edgeA: r.edge, edgeB: m.edge,
             prob: Math.min(m.prob, back.prob || 0),
-            loopOk: !!m.loopOk, verdict: m.verdict,
+            // the weaker side's word, as the shown % is the weaker side's
+            // (owner's screenshot IMG_3631: "Strong match 70%" - one side's word)
+            loopOk: !!m.loopOk, verdict: PH.weakerVerdict(m.verdict, back.verdict),
             aLocated: !!A.pos && A.island === this.island,
             bLocated: !!B.pos && B.island === this.island,
           });
@@ -3532,24 +3534,43 @@
     output(dets, proc) {
       const inv = this.pose ? PH.simInvert(this.pose) : null;
       const byId = new Map();
+      const inClump = []; // pieces of this view that lie inside a clump (touching another piece)
       const outDets = dets.map((d) => {
         const p = d.id ? this.pieces.get(d.id) : null;
         let status = 'unknown';
         if (d.merged) status = 'merged';
         else if (p && this.isChecked(p)) status = p.inPuzzle ? 'done' : p.t2 && p.t2.conf >= 0.35 ? 'placed' : 'shaped';
         else if (!d.border) status = 'checking'; // not a checked piece yet: the "scan closer" ring
-        if (p) byId.set(p.id, d);
+        if (p && d.merged) {
+          // A piece now touching another: the clump is not the piece (owner's
+          // screenshot IMG_3630: a match partner shaded as a two-piece clump).
+          // Its own outline from its read placement - else a small ring at its
+          // spot - stands in for it; the clump keeps no number.
+          let pts = null;
+          const E = [0, 1, 2, 3].map((k) => this.edgeInView(p, k, inv));
+          if (E.every(Boolean)) pts = E.map((e) => e[0]);
+          else if (p.pos && inv && p.island === this.island) {
+            const f = PH.simApply(inv, p.pos[0], p.pos[1]), rr = Math.sqrt((p.area || d.area / 2) * (this.pose ? 1 / PH.simScale(this.pose) ** 2 : 1)) * 0.45;
+            pts = Array.from({ length: 8 }, (_, i) => [f[0] + rr * Math.cos(i * Math.PI / 4), f[1] + rr * Math.sin(i * Math.PI / 4)]);
+          }
+          if (pts) {
+            const cx = pts.reduce((a, q) => a + q[0], 0) / pts.length, cy = pts.reduce((a, q) => a + q[1], 0) / pts.length;
+            const q = { id: p.id, status: 'inClump', close: false, cx, cy, r: Math.round(Math.sqrt((d.area || 1) / 2) / 2), pts: Int32Array.from(pts.flat().map(Math.round)), border: false };
+            inClump.push(q); byId.set(p.id, q);
+          }
+        } else if (p) byId.set(p.id, d);
         // `r` lets the page draw a marker without walking the outline at all.
         // The outline itself is simplified harder than it used to be: it is
         // only used for hit-testing a tap and for the optional outline view,
         // and every point costs a transform (a homography, with tilt on).
         const close = status === 'checking' && Math.sqrt(d.area || 1) / proc.scale / 1.1 >= PH.CLOSE_SIDE; // near enough to check it now
-        return { id: status === 'checking' ? null : d.id, status, close, cx: d.cx, cy: d.cy, r: Math.round(Math.sqrt(d.area || 1) / 2), pts: simplify(d.pts, this.opts.outlineEps || 2.5), border: d.border };
+        return { id: status === 'checking' || status === 'merged' ? null : d.id, status, close, cx: d.cx, cy: d.cy, r: Math.round(Math.sqrt(d.area || 1) / 2), pts: simplify(d.pts, this.opts.outlineEps || 2.5), border: d.border };
       });
+      outDets.push(...inClump);
       const hl = [];
       const locate = (id, role, extra) => {
         const d = byId.get(id);
-        if (d) return hl.push(Object.assign({ id, role, x: d.cx, y: d.cy, visible: true }, extra));
+        if (d) return hl.push(Object.assign({ id, role, x: d.cx, y: d.cy, visible: true }, d.status === 'inClump' ? { inClump: true } : null, extra));
         const p = this.pieces.get(id);
         if (p && p.pos && !p.gone && inv && p.island === this.island) { // (no arrow to a moved piece's old spot)
           const f = PH.simApply(inv, p.pos[0], p.pos[1]);
