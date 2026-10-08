@@ -1606,6 +1606,31 @@
       return Math.sqrt(PH.median(a.length ? a : dets.map((d) => d.area))) || 40;
     }
 
+    farShow(dets, inv, anchors, seen, unitF, unitT) {
+      const cand = dets.filter((d) => !d.id && !d.merged && !d.border && Math.sqrt(d.area) / this.frameCtx.scale / 1.1 < PH.CLOSE_SIDE);
+      if (!cand.length) return;
+      const W = this.frameCtx.procW, H = this.frameCtx.procH, spots = [];
+      for (const p of this.pieces.values()) {
+        if (!p.pos || p.gone || p.inPuzzle || p.island !== this.island || seen.has(p.id)) continue;
+        const f = PH.simApply(inv, p.pos[0], p.pos[1]);
+        if (f[0] < -unitF || f[1] < -unitF || f[0] > W + unitF || f[1] > H + unitF) continue;
+        const nb = anchors.filter((a) => Math.hypot(a.pos[0] - p.pos[0], a.pos[1] - p.pos[1]) < unitT * 3);
+        if (nb.length >= 2) { f[0] += PH.median(nb.map((a) => a.dx)); f[1] += PH.median(nb.map((a) => a.dy)); }
+        spots.push({ p, f });
+      }
+      if (!spots.length) return;
+      const R = unitF * 0.85;
+      const nearestSpot = (d) => { let b = null, bd = Infinity; for (const sp of spots) { const k = Math.hypot(sp.f[0] - d.cx, sp.f[1] - d.cy); if (k < bd) { bd = k; b = sp; } } return { sp: b, dist: bd }; };
+      const nearestDet = (sp) => { let b = null, bd = Infinity; for (const d of cand) { const k = Math.hypot(sp.f[0] - d.cx, sp.f[1] - d.cy); if (k < bd) { bd = k; b = d; } } return b; };
+      let n = 0;
+      for (const d of cand) {
+        const { sp, dist } = nearestSpot(d);
+        if (!sp || dist > R || nearestDet(sp) !== d) continue;
+        d.showId = sp.p.id; n++;
+      }
+      if (n) this.rejects.farShown = (this.rejects.farShown || 0) + n;
+    }
+
     startIsland(unitF) {
       const unitT = this.unitTable();
       const isl = this.nextIsland++;
@@ -1737,6 +1762,16 @@
         const f = PH.simApply(inv, q.pos[0], q.pos[1]);
         anchors.push({ pos: q.pos, dx: d.cx - f[0], dy: d.cy - f[1] });
       }
+      // Far views (owner, 2026-10-08: "drops pieces when zoomed out"): ~20 px
+      // pieces fail both links above (colours shift, sizes are noisy, the map
+      // can be half a piece off), so known pieces showed as "scan closer"
+      // rings - the oak report's last frame: 35 detections, 10 linked, 17
+      // rings. With the frame anchored (3+ linked pieces), a leftover far
+      // detection is SHOWN as the piece whose map spot (corrected by its
+      // neighbours' offsets in this frame) is its mutual nearest within 0.85
+      // of a piece. Display only (d.showId): no pose, position, colour or
+      // checking evidence comes from it.
+      if (PH.FAR_SHOW && anchors.length >= 3) this.farShow(dets, inv, anchors, seen, unitF, unitT);
       if (this.frameCtx.still) for (const p of [...this.pieces.values()]) {
         if (!p.pos || p.gone || p.island !== this.island || seen.has(p.id)) continue;
         const f = PH.simApply(inv, p.pos[0], p.pos[1]);
@@ -3621,7 +3656,8 @@
       const byId = new Map();
       const inClump = []; // pieces of this view that lie inside a clump (touching another piece)
       const outDets = dets.map((d) => {
-        const p = d.id ? this.pieces.get(d.id) : null;
+        const pid = d.id || d.showId || null; // (showId: a far detection shown as its piece - Engine.farShow)
+        const p = pid ? this.pieces.get(pid) : null;
         let status = 'unknown';
         if (d.merged) status = 'merged';
         else if (p && this.isChecked(p)) status = p.inPuzzle ? 'done' : p.t2 && p.t2.conf >= 0.35 ? 'placed' : 'shaped';
@@ -3649,7 +3685,7 @@
         // only used for hit-testing a tap and for the optional outline view,
         // and every point costs a transform (a homography, with tilt on).
         const close = status === 'checking' && Math.sqrt(d.area || 1) / proc.scale / 1.1 >= PH.CLOSE_SIDE; // near enough to check it now
-        return { id: status === 'checking' || status === 'merged' ? null : d.id, status, close, cx: d.cx, cy: d.cy, r: Math.round(Math.sqrt(d.area || 1) / 2), pts: simplify(d.pts, this.opts.outlineEps || 2.5), border: d.border };
+        return { id: status === 'checking' || status === 'merged' ? null : pid, far: !d.id && !!d.showId, status, close, cx: d.cx, cy: d.cy, r: Math.round(Math.sqrt(d.area || 1) / 2), pts: simplify(d.pts, this.opts.outlineEps || 2.5), border: d.border };
       });
       outDets.push(...inClump);
       const hl = [];
@@ -3836,6 +3872,7 @@
   PH.BEHIND_MS = 200;   // a frame's time (median of 8) over this: the camera outruns the engine (the phone's ~5 fps)
   PH.MOVE_PROOF = false; // a far re-find ("this checked piece was moved here") needs its old spot gone or seen bare (off: see PLAN-v0.23 "Not shipped - proof before a far re-find")
   PH.MOVE_CLAIM = false; // ... or the claim waits for a look at the piece's own spot (Engine.settleClaim; off: PLAN-v0.23)
+  PH.FAR_SHOW = false; // far detections shown as the piece on their map spot (Engine.farShow; off: rings 38.8 -> 38.0% on IMG_3593, 46.1 -> 45.3% IMG_3605, 90.9 -> 90.7% IMG_3636 - too little)
   PH.ASM_LOOSE_VETO = true; // a big blob over 2+ checked loose pieces is not an assembled part (Engine.findSpots)
   PH.ONE_READ_Q = 0.6; // a close read of this quality checks a piece alone (else two agreeing close reads)
   PH.DROP_READ_FAILS = 3; // an entry never read after this many failed reads (and 20 sightings) is not a piece

@@ -180,6 +180,54 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
     rows.push(`  ${j.file} ${j.where.padEnd(12)} ${P.t1.code}[${k}]=${eP.type} -> ${Q.t1.code}[${m}]=${eQ.type}  rank ${rank === Infinity ? 'none' : rank + 1}${iT >= 0 && list[iT].tie ? ' (tie)' : ''}  shape rank ${shapeRank === Infinity ? '-' : shapeRank + 1}  shape ${sh ? sh.shape.toFixed(3) : '-'}${sh ? ` strip ${sh.color.toFixed(1)} len ${(Math.log(eP.lenRel / eQ.lenRel) * 100).toFixed(1)}%` : ''}${iT >= 0 && process.env.SHOW > 1 ? ` | best: ${list.slice(0, 2).map((x) => `#${x.id} sh ${x.shape.toFixed(3)} strip ${x.color.toFixed(1)} sc ${x.score.toFixed(2)}`).join(', ')} | true sc ${list[iT].score.toFixed(2)}` : ''}  colour ${sh ? (sh.colDoubt ? 'untrusted: ' + sh.colDoubt : sh.colShare !== undefined ? (sh.colShare * 100).toFixed(0) + '% agree' : '-') : '-'}`);
   }
   if (process.env.SHOW) console.log(rows.join('\n'));
+  // GATE=1: the Matches list's own gate (Engine.scanPairs: both ways first,
+  // prob >= minProb both ways), with the "partner not scanned yet" odds of
+  // Engine.nullOdds for a puzzle of `total` pieces of which the pool is
+  // scanned: how many true joins it shows, and how many pairs in all
+  if (process.env.GATE) {
+    // one photo per physical piece (the app catalogues a piece once; the pool
+    // has the same pieces in several layouts): the joins' own pieces first
+    const kept = [];
+    for (const j of joins.filter((x) => !x.weak)) for (const o of [j.a, j.b]) if (!kept.includes(o)) kept.push(o);
+    for (const o of pool) if (!kept.includes(o) && !kept.some((k) => k.file !== o.file && PH.samePiece(k.t1, o.t1).ok)) kept.push(o);
+    console.log(`GATE pool: ${kept.length} of ${pool.length} pieces (one photo each)`);
+    const all = kept.map((o) => ({ id: o.id, t1: o.t1, t2: null }));
+    const pairKey = (a, ka, b, kb) => [a + ':' + ka, b + ':' + kb].sort().join('|');
+    const trueSet = new Set(joins.filter((j) => !j.weak).map((j) => pairKey(j.a.id, j.ka, j.b.id, j.kb)));
+    for (const total of [kept.length, 100, 300, 1000]) {
+      const cov = PH.clamp(kept.length / total, 0.02, 1), odds = PH.clamp(Math.max(0.2, (1 - cov) / cov), 0.05, 50);
+      const top = new Map();
+      for (const P of all) for (const r of PH.findMatches(P, all.filter((o) => o !== P), { topN: 3, nullOdds: () => odds })) top.set(P.id + ':' + r.edge, r.matches[0] || null);
+      if (total === kept.length) { // every pair that is first both ways, true or not, by the weaker side's prob
+        const tp = [], fp = [];
+        for (const [key, m] of top) {
+          if (!m) continue;
+          const back = top.get(m.id + ':' + m.edge);
+          if (!back || back.id + ':' + back.edge !== key || key > m.id + ':' + m.edge) continue;
+          const pr = Math.min(m.prob || 0, back.prob || 0);
+          (trueSet.has([key, m.id + ':' + m.edge].sort().join('|')) ? tp : fp).push(pr);
+        }
+        const hist = (a) => [0, 0.2, 0.4, 0.6, 0.8].map((lo) => a.filter((v) => v >= lo && v < lo + 0.2 + (lo === 0.8 ? 0.01 : 0)).length).join('/');
+        console.log(`GATE mutual-first pairs: true ${tp.length} (prob 0-.2/.2-.4/.4-.6/.6-.8/.8-1: ${hist(tp)}), others ${fp.length} (${hist(fp)})`);
+      }
+      for (const minProb of [0.8, 0.65, 0.5]) {
+        const shown = new Set();
+        for (const [key, m] of top) {
+          if (!m || (m.prob || 0) < minProb) continue;
+          const back = top.get(m.id + ':' + m.edge);
+          if (!back || back.id + ':' + back.edge !== key || (back.prob || 0) < minProb) continue;
+          shown.add([key, m.id + ':' + m.edge].sort().join('|'));
+        }
+        const hit = [...shown].filter((k) => trueSet.has(k)).length;
+        if (total === kept.length && minProb === 0.8) for (const j of joins.filter((x) => !x.weak)) { // why each true join is (not) shown
+          const ab = top.get(j.a.id + ':' + j.ka), ba = top.get(j.b.id + ':' + j.kb);
+          const w = (m, id, k) => (m ? `${m.id === id && m.edge === k ? 'FIRST' : 'other'} ${(m.prob || 0).toFixed(2)}${m.tie ? ' tie' : ''}` : 'none');
+          console.log(`GATE   ${j.file} ${j.where}: a->b ${w(ab, j.b.id, j.kb)} | b->a ${w(ba, j.a.id, j.ka)}`);
+        }
+        console.log(`GATE total ${String(total).padStart(4)} (odds ${odds.toFixed(2)}) minProb ${minProb}: ${hit} of ${trueSet.size} true joins shown; ${shown.size} pairs shown in all`);
+      }
+    }
+  }
   const N = joins.filter((j) => !j.weak).length * 2;
   if (weak.n) console.log(`known-weak photos (lamp, cream counter): ${weak.n} join sides, tab<->blank ${weak.type}, partner first ${weak.top1}, top 3 ${weak.top3}`);
   // v0.23.1: 20 of the 21 pieces in them (the joined pairs of IMG_3621/3622

@@ -8,6 +8,11 @@ const fs = require('fs');
 const S = require('./synth');
 
 globalThis.self = globalThis;
+// The deterministic step clock unless another is asked for: the live sweep
+// below runs on time budgets, and on the real clock a busy PC caught 89 of
+// 96 pieces against the 91 it needs (2026-10-08) - a test must not depend on
+// what else the machine is doing. Every check here passes on it (22/22).
+if (!process.env.CLOCK) process.env.CLOCK = 'step';
 require('./lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 PH.CLOSE_SIDE = 40; // synthetic pieces are small (the phone's close reads: 120+ px); these tests are about other things

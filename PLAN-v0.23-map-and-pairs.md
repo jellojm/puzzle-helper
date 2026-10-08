@@ -386,3 +386,57 @@ Direction review (fable subagent, 2026-10-08), next in order:
    near-ties. Measure the gate on real-joins before changing it.
 3. The oak table itself: 7 checked at 30 s (IMG_3636).
 
+## After 0.23.4 — measured, not shipped (2026-10-08)
+
+- **Far views shown as their pieces** (`PH.FAR_SHOW`, off): a far detection
+  left unlinked, whose map spot (neighbour-corrected) is its mutual nearest
+  within 0.85 piece, drawn as that piece (display only). Rings ("scan
+  closer") on still frames: IMG_3593 38.8 -> 38.0%, IMG_3605 46.1 -> 45.3%,
+  IMG_3636 90.9 -> 90.7% - most rings are not known pieces in reach. Too
+  little for the risk. (`real-50` now prints the ring share.)
+- **Few matches - the gate measured** (`GATE=1 node test/real-joins.js`,
+  one photo per physical piece, 65 pieces, 14 labelled joins): the Matches
+  list (mutual first both ways, prob >= 0.8 both ways) shows **1 of 14**
+  true joins; 10 of 14 ARE mutual first both ways, but at prob 0.2-0.6.
+  The puzzle-size prior (`nullOdds`, 1000 without a box) changes nothing
+  here. The probability doesn't separate them: among mutual-first pairs,
+  true 10 (prob 0-.2/.2-.4/.4-.6/.6-.8/.8-1: 0/5/3/1/1), others 37
+  (3/16/8/4/6) - some of the others may be unlabelled true joins. A lower
+  bar shows more true joins and more others with them: the owner's call
+  (e.g. a second "worth trying" list of mutual-first pairs).
+  **Caveat (direction review, 2026-10-08): this measured the raw softmax
+  (`findMatches` pSoft), not the app's calibrated prob (`calibrateMatches`:
+  logistic over `CALIB_PRIOR`, +2.83 for mutual, +2.28 for lead) - so "1 of
+  14" understates the phone's list; near-ties (17 of 28 sides) still can't
+  reach 0.8. And "others 37" includes the weak layouts' labelled joins
+  (IMG_3620-3627). Re-measure with the calibration and those joins before
+  deciding.**
+- **The oak table (IMG_3636)**: `real-50` used a default box picture of
+  another puzzle; its "palette" model made the grain stripes into blobs
+  (cases 3635/3636 now run without a box, as the owner's session did).
+  Without it: the colour model cuts pieces short wherever their print is
+  wood-coloured (dark/brown edges lost) - 7-9 checked at 30 s, rings
+  78-84%. The outline rescue can't work there: the grain closes into rings
+  (its fill was already rejected by the 30% guard). Board texture measured
+  per frame (`seg_boardEdge`: share of background pixels on lightness edges
+  - boards/counters p90 0.02-0.05, oak p50 0.40); above `PH.BOARD_TEXTURED`
+  0.15 the outline fill is skipped (no change in results; saves the work).
+  A textured board needs its own segmentation (e.g. outlines with the
+  grain's orientation suppressed, or taught wood colours) - a bigger job.
+
+## 0.23.5 — for the owner's phone test (2026-10-08 evening)
+
+Same engine as 0.23.4 plus: the outline fill is skipped on a textured board
+(`PH.BOARD_TEXTURED`; no change in results, saves work), `farShow` kept off;
+tests: `run-tests.js` on the deterministic step clock by default (its live
+sweep needed 91 of 96 and caught 89 once on a busy PC), real-50 cases
+3635/3636 without a stray box picture, `MAXT`/`SNAPAT`/`EDGESTAT`, real-joins
+`GATE=1`.
+
+Next (direction review 2): re-measure the Matches gate with the app's
+calibration, then a "worth trying" tier of mutual-first pairs; for the oak
+table first allow the `edges` / `colors` models when the board is textured
+(`bgCandidates` skips `edges` on "plainish" boards), then a grain-coherence
+board mask if needed; an IMG_3636 key before scoring segmentation work;
+rings measured on the last third of a video, by cause.
+

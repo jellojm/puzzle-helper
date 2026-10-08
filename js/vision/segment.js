@@ -450,6 +450,7 @@
   // Mass-weighted mode of log2(area), quarter-octave bins: the size that most
   // of the piece-like *area* belongs to. Optional weights (0-1) per area: how
   // sure it is one piece.
+  PH.BOARD_TEXTURED = 0.15; // board edge share above which the outline fill is skipped (wood grain)
   PH.UNIT_SURE = 0.15; // corner score from which a blob fully counts as one piece in the size vote
   PH.massMode = function (areas, weights) {
     const bins = new Map();
@@ -677,7 +678,20 @@
       cv.addWeighted(ax, 0.5, ay, 0.5, 0, mag);
       cv.threshold(mag, mag, opts.boundaryT || 10, 255, cv.THRESH_BINARY);
       if (validMat) cv.bitwise_and(mag, validMat, mag); // no edges in the filled-in corners
-      if (opts.boundary === 'fill') {
+      // How textured the board itself is: the share of colour-background
+      // pixels that are lightness edges (a plain board: little more than the
+      // pieces' own outlines; wood grain: its stripes)
+      // (first 60 s of each video: white board / counters p90 0.02-0.05, max
+      // 0.12; the owner's oak herringbone table p10 0.24, p50 0.40). On a
+      // textured board the outlines are the grain: closed and filled they made
+      // stripes of "piece" that swallowed the pieces (IMG_3636: 91% of
+      // detections "scan closer" rings) - colour alone there.
+      const nf = new cv.Mat(), eb = new cv.Mat(); cv.bitwise_not(mask, nf); cv.bitwise_and(mag, nf, eb);
+      const boardEdge = cv.countNonZero(eb) / Math.max(1, cv.countNonZero(nf)); nf.delete(); eb.delete();
+      if (T) T.boardEdge = +boardEdge.toFixed(4);
+      const textured = PH.BOARD_TEXTURED && boardEdge > PH.BOARD_TEXTURED;
+      if (textured) { if (T) T.boundaryTextured = 1; }
+      else if (opts.boundary === 'fill') {
         // Close the edge rings and keep only what they enclose: a ring that
         // doesn't close adds nothing (no stray edge fragments), a closed one
         // yields a solid piece. Enclosed = not reachable from the frame edge.

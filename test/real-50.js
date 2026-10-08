@@ -42,14 +42,15 @@ const CASES = {
   // owner, 2026-10-08 (v0.23.3; the phone's report from the same session
   // restarted the vision engine twice): white counter close-ups, and loose
   // pieces on an oak herringbone table, close-ups. No keys yet.
-  3635: { video: 'IMG_3635.MOV', n: 0, key: null },
-  3636: { video: 'IMG_3636.MOV', n: 0, key: null },
+  // (no box picture: the owner's session had none - report "expected": 0)
+  3635: { video: 'IMG_3635.MOV', n: 0, key: null, box: false },
+  3636: { video: 'IMG_3636.MOV', n: 0, key: null, box: false },
   3609: { video: 'IMG_3609.MOV', n: 300, key: null, box: 'puzzle-report-2026-10-07T01-09-35-box.jpg', grid: { pieces: 300, cols: 20, rows: 15 } },
 };
 const CASE = CASES[process.env.CASE || process.argv[2] || 3593]; // (node test/real-50.js 3605)
 const N = CASE.n;
 const VIDEO = process.env.VIDEO || path.join(ROOT, 'reports', CASE.video);
-const BOX = path.join(ROOT, 'reports', CASE.box || 'puzzle-report-2026-10-05T11-14-50-box.jpg');
+const BOX = CASE.box === false ? null : path.join(ROOT, 'reports', CASE.box || 'puzzle-report-2026-10-05T11-14-50-box.jpg');
 const KEY = CASE.key || path.join(__dirname, 'fixtures', 'none');
 const VARIANT = process.env.VARIANT || 'full';
 
@@ -70,13 +71,13 @@ const FLOOR = CASE.floor || {};
   // ENGINE='{"budgetMs":90}': engine options (experiments)
   const eng = new PH.Engine(Object.assign(process.env.EDGEBG === '0' ? { edgeBg: false } : {}, process.env.ENGINE ? JSON.parse(process.env.ENGINE) : {}));
   let dropped = 0;
-  if (fs.existsSync(BOX)) {
+  if (BOX && fs.existsSync(BOX)) {
     const bi = readImage(BOX);
     eng.setBox(PH.createBox(bi, [[0, 0], [bi.w, 0], [bi.w, bi.h], [0, bi.h]], CASE.grid || { pieces: 300, cols: 15, rows: 20 }));
   }
   const rnd = PH.mulberry32(7);
   const step = VARIANT === 'phone6' ? 6 : 5;
-  const to = VARIANT === 'overview' ? 3 : 1e9;
+  const to = VARIANT === 'overview' ? 3 : process.env.MAXT ? +process.env.MAXT : 1e9; // (MAXT=<s>: stop the video there)
   let n = 0, maxChecked = 0, maxAt = 0, firstAt = null, at30 = 0;
   const t0 = Date.now();
   const timeline = [];
@@ -85,6 +86,8 @@ const FLOOR = CASE.floor || {};
   // entry the engine gives it there is followed through merges to the end.
   const KEYF = fs.existsSync(KEY) ? JSON.parse(fs.readFileSync(KEY, 'utf8')) : null;
   const votes = new Map(); // key n -> Map(entry id -> count)
+  const farShown = []; // far detections shown as a piece in the key frames: { key n, entry id }
+  let ringN = 0, detN = 0, farN = 0; // rings ("scan closer") among the plain detections of still frames
   const readLog = new Map(); // READS=1: every shape read per entry, to see why one stays unchecked
   // READSTUDY=<file.json>: every close read (frame, entry, sharpness, code),
   // scored against the key at the end (which read was right)
@@ -111,6 +114,7 @@ const FLOOR = CASE.floor || {};
   if (process.env.READS) PH.DEBUG_Q = (...a) => { if (String(a[0]).includes('read')) { const id = a[1]; if (!readLog.has(id)) readLog.set(id, []); readLog.get(id).push(a.slice(2).join(' ')); } };
   const tilt = { pitch: 0, roll: 0 };
   let curT = 0;
+  process.on('exit', () => { const a = globalThis.__be; if (!a || !a.length) return; a.sort((x, y) => x - y); const q = (p) => a[Math.min(a.length - 1, Math.floor(a.length * p))].toFixed(3); console.log(`board edge share: n ${a.length}, p10 ${q(0.1)} p50 ${q(0.5)} p90 ${q(0.9)} max ${q(1)}`); });
   const stageT = {}; // (STAGES=1) per-stage time summed over the frames
   process.on('exit', () => { if (!process.env.STAGES) return; const tot = stageT.total || 1; console.log('stages (share of total):', Object.entries(stageT).filter(([k]) => k !== 'total' && k !== 't1' && k !== 't2').sort((a, b) => b[1] - a[1]).slice(0, 14).map(([k, v]) => `${k} ${(100 * v / tot).toFixed(1)}%`).join(', ')); });
   const posLog = new Map(); // (MISSDBG) entry id -> [[t, x, y]] whenever it moved
@@ -167,6 +171,12 @@ const FLOOR = CASE.floor || {};
         if (process.env.KEYDBG) console.log(`key t=${f.t.toFixed(2)} shift ${off.map((v) => (v / unit).toFixed(2))} pieces, ${bestN}/${KEYF.pieces.length} key spots on a detection`);
         if (bestN < KEYF.pieces.length * 0.5) off = null; // (this frame doesn't show the layout)
       }
+      // far detections shown as a piece (Engine.farShow): which key piece lies there
+      if (off && out) for (const od of out.dets.filter((x) => x.far && x.id)) {
+        let bk = null, bd = Infinity;
+        for (const k of KEYF.pieces) { const p = at(k), dd = Math.hypot(od.cx - p[0] - off[0], od.cy - p[1] - off[1]); if (dd < bd) { bd = dd; bk = k; } }
+        if (bk && bd < unit * 0.5) farShown.push({ n: bk.n, id: od.id });
+      }
       if (off) for (const k of KEYF.pieces) {
         const p = at(k);
         let best = null, bd = Infinity;
@@ -182,6 +192,14 @@ const FLOOR = CASE.floor || {};
     if (checked && firstAt === null) firstAt = f.t; // (owner: "pieces took a while to read")
     if (f.t <= 30) at30 = checked;
     if (process.env.MISSDBG && n % 10 === 0) for (const p of eng.pieces.values()) if (p.pos) { const L = posLog.get(p.id) || []; const q = L[L.length - 1]; if (!q || Math.hypot(q[1] - p.pos[0], q[2] - p.pos[1]) > 8) { L.push([+f.t.toFixed(0), p.pos[0], p.pos[1]]); posLog.set(p.id, L); } }
+    if (process.env.SNAPAT && out && !globalThis.__snapDone && f.t >= +process.env.SNAPAT && f.still) { // (SNAPAT=<s>: this frame and its detections -> SNAPOUT.png/.json)
+      globalThis.__snapDone = true;
+      const P = eng.lastProc;
+      if (P) { fs.writeFileSync(process.env.SNAPOUT + '.rgba', Buffer.from(P.data.buffer, P.data.byteOffset, P.data.length)); fs.writeFileSync(process.env.SNAPOUT + '.json', JSON.stringify({ w: P.w, h: P.h, t: f.t, dets: out.dets.map((d) => ({ status: d.status, far: d.far, border: d.border, pts: Array.from(d.pts || []) })), rejects: eng.rejects, bgModel: eng.bgModel, segOpts: (() => { const o = Object.assign({}, eng.liveSegOpts({ still: true }, {})); delete o.edgeVote; return o; })(), timings: out.timings })); }
+      if (process.env.SNAPEXIT) process.exit(0);
+    }
+    if (process.env.EDGESTAT && out && out.timings && out.timings.seg_boardEdge !== undefined) (globalThis.__be = globalThis.__be || []).push(out.timings.seg_boardEdge);
+    if (out && f.still) for (const od of out.dets) { if (od.border || od.status === 'merged' || od.status === 'inClump') continue; detN++; if (od.status === 'checking') ringN++; if (od.far) farN++; }
     if (process.env.STAGES && out && out.timings) for (const [k, v] of Object.entries(out.timings)) if (typeof v === 'number') stageT[k] = (stageT[k] || 0) + v;
     if (process.env.HEAPLOG && n % 25 === 0) console.log(`  heap t=${f.t.toFixed(0)}s f${n}: ${(cv.HEAP8.buffer.byteLength / 1048576).toFixed(1)} MB, entries ${eng.pieces.size}, frame ${(out && out.timings ? out.timings.total : 0).toFixed(0)} ms`);
     if (n % 25 === 0) { timeline.push(`${f.t.toFixed(0)}s:${checked}` + (process.env.BG ? `(${eng.bgModel ? eng.bgModel.kind : '-'},${out.dets.length}d,${c.entries})` : '')); }
@@ -223,7 +241,8 @@ const FLOOR = CASE.floor || {};
   }
   if (study) for (const r of study.reads) { const e = eng.pieces.get(eng.finalId(r.id)); r.fid = e ? e.id : null; r.state = e ? (e.state || 'checking') : 'gone'; r.fAgree = e ? e.closeAgree || 0 : null; }
   // the run's numbers, kept in test/results/history.jsonl (tools/trend.js)
-  const M = { dropped, checked, entries: c.entries, unchecked: c.unchecked, maxChecked, firstAt: firstAt === null ? null : +firstAt.toFixed(1), at30, border: c.border, corner: c.corner, islands: c.islands, frames: n,
+  console.log(`rings ("scan closer") on still frames: ${detN ? (100 * ringN / detN).toFixed(1) : '-'}% of ${detN} detections; shown far as a piece ${farN}`);
+  const M = { ringShare: detN ? +(ringN / detN).toFixed(3) : null, farN, dropped, checked, entries: c.entries, unchecked: c.unchecked, maxChecked, firstAt: firstAt === null ? null : +firstAt.toFixed(1), at30, border: c.border, corner: c.corner, islands: c.islands, frames: n,
     whyUnchecked: eng.whyUnchecked ? eng.whyUnchecked() : null, stretchAgree: eng.rejects.stretchAgree || 0,
     poseMoved: eng.rejects.poseMoved || 0, mapSolves: eng.mapSolves || 0, lastSolve: eng.lastSolve || null };
   if (study) study.entries = [...eng.pieces.values()].map((e) => ({ id: e.id, state: e.state || 'checking', pos: e.pos, island: e.island, gone: !!e.gone, closeAgree: e.closeAgree || 0, close: !!(e.t1 && PH.isCloseRead(e.t1)), code: e.t1 ? e.t1.code : null, sightings: e.sightings || 0 })), study.unit = eng.unitTable ? eng.unitTable() : null;
@@ -235,6 +254,11 @@ const FLOOR = CASE.floor || {};
     let lost = 0;
     for (const [n, v] of votes) { const id = [...v.entries()].sort((a, b) => b[1] - a[1])[0][0]; const e = eng.pieces.get(eng.finalId(id)); if (e) byIdentity.set(n, e); else { lost++; if (process.env.MISSDBG) console.log(`  identity lost: #${n} was entry ${id} (final ${eng.finalId(id)})`); } } // (an entry dropped outright: position decides)
     M.identity = byIdentity.size; M.readRetries = PH.readRetries || 0;
+    if (farShown.length) {
+      let right = 0; for (const s of farShown) { const e = byIdentity.get(s.n); if (e && eng.finalId(s.id) === e.id) right++; }
+      M.farShown = farShown.length; M.farRight = right;
+      console.log(`far detections shown as a piece (key frames): ${right} of ${farShown.length} the right piece`);
+    }
     { const gone = [...eng.pieces.values()].filter((p) => p.gone), own = new Set(byIdentity.values());
       const real = gone.filter((p) => own.has(p));
       M.goneReal = real.length; M.goneStray = gone.length - real.length;
