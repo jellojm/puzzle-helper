@@ -411,7 +411,23 @@
     t1.readScale = k;
     return t1;
   };
+  // A colour outline can be piece-sized yet cut along the print: a pale part
+  // that matches the board left out (IMG_3627's third piece: 0.83 of a piece,
+  // its grey hull missing, corners too poor to count - read "not a piece").
+  // Such a read is tried once more with the piece's own outline added; a
+  // read that already counts is never changed.
   PH.analyzePiece = function (crop, ctx) {
+    const t1 = readPiece(crop, ctx);
+    if (!PH.READ_RETRY || ctx.boundary === false || ctx.outlineFirst || (t1 && !t1.colourOnly) || (t1 && t1.cornerScore >= PH.MIN_CORNER_SCORE)) { if (t1) delete t1.colourOnly; return t1; }
+    if (!t1 && (!readPiece.colourFit || readPiece.seam)) return null; // (no colour outline fitted: the outline was tried already; a seam inside: a cut from an assembled part, refused on purpose)
+    PH.readRetries = (PH.readRetries || 0) + 1;
+    const t2 = readPiece(crop, Object.assign({}, ctx, { outlineFirst: true }));
+    const best = t2 && (!t1 || t2.cornerScore > t1.cornerScore) ? t2 : t1;
+    if (best) delete best.colourOnly;
+    return best;
+  };
+  function readPiece(crop, ctx) {
+    readPiece.colourFit = false; readPiece.seam = false;
     const cv = PH.cv;
     const w = crop.w, h = crop.h;
     // (PH.DEBUG_AP: time per stage, for profiling)
@@ -445,18 +461,21 @@
     // fills the blanks on that side). Only when colour gives a partial piece
     // (pale part lost) is the outline added to rescue it.
     let seg = null;
-    if (PH.SHADOW_PEEL && ctx.peel !== false) { // shadows peeled off first; kept only if a whole piece remains
+    if (ctx.outlineFirst) seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, true);
+    if (!seg && PH.SHADOW_PEEL && ctx.peel !== false) { // shadows peeled off first; kept only if a whole piece remains
       seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, false, true);
       if (!fits(seg)) { seg.filled.delete(); seg = null; }
       mk('segPeel');
     }
     if (!seg) { seg = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, false); mk('segPlain'); }
-    if (useOutline && !fits(seg)) {
+    let colourOnly = !ctx.outlineFirst;
+    if (useOutline && !ctx.outlineFirst && !fits(seg)) {
       const withOutline = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, true);
-      seg.filled.delete(); seg = withOutline;
+      seg.filled.delete(); seg = withOutline; colourOnly = false;
       mk('segOutline');
     }
     if (!fits(seg)) { seg.filled.delete(); return null; }
+    readPiece.colourFit = colourOnly;
 
     mk('segment');
     let P = PH.resampleClosed(seg.pts, N).pts;
@@ -575,6 +594,7 @@
     if (flats.some(Boolean) && ctx.seamCheck !== false && seamInside(lab, w, h, seg.filled, meanSide)) {
       seg.filled.delete();
       if (ctx.why) ctx.why.seam = true;
+      readPiece.seam = true;
       return null;
     }
 
@@ -633,9 +653,9 @@
     return {
       corners: corners.map((c) => [c[0] + ox, c[1] + oy]),
       edges, code, flats, meanSide, square, sharp, thumb, quality,
-      cornerScore: cr.score, white, lf,
+      cornerScore: cr.score, white, lf, colourOnly,
     };
-  };
+  }
 
   /** Same physical piece? Best mean signature distance over the 4 rotations
    *  whose edge-type codes agree (Infinity if none agree). ~0.01-0.03 for the
@@ -817,6 +837,7 @@
     [L3, ls, fs].forEach((m) => m.delete());
     return r;
   }
+  PH.READ_RETRY = false; // a colour-only read about to fail is tried once more with the outline (PH.analyzePiece; off: PLAN-v0.23)
   PH.MIN_CORNER_SCORE = 0.03; // real pieces ~0.05-0.3, fragments ~0.01-0.02 // below this an outline isn't a jigsaw piece
   PH.SAME_SHAPE = 0.05;
   /** A close read: the piece at least this many camera pixels across (corner

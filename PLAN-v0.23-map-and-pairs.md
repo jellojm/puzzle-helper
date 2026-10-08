@@ -24,6 +24,14 @@ pace (`CLOCK=model`), not yet fixed: run-tests "live sweep" catalogues 87/96,
 table-view "every read piece has a placement" fails - read pieces may lack a
 Map picture on the phone.
 
+Since v0.23.3 (2026-10-08): judge changes at phone pace (`CLOCK=model`,
+several phone speeds: `model:0.65/0.8/1/1.25`, plus a `cpu` run) and sum
+them - single runs of IMG_3605 swing by 5-8 matched. Three experiments
+are in the code, off, each with its numbers below: `PH.MOVE_PROOF`,
+`PH.MOVE_CLAIM` (far re-finds), `PH.READ_RETRY`. The most promising open
+lead: far re-finds are right about half the time - something that tells a
+drift correction from a look-alike would fix both videos' map jumps.
+
 ## Milestones
 
 | Version | Milestone | State |
@@ -35,7 +43,8 @@ Map picture on the phone.
 | - | Close-up reads that failed only the quality floor count as agreement | dropped: they agree 1 in 10 (IMG_3605, model clock; accepted reads 65-88%) |
 | - | Live reads at a capped resolution | not shipped: helps the phone model, costs edge codes (see below) |
 | - | Proof before a far re-find (`PH.MOVE_PROOF`), or a claim settled at the old spot (`PH.MOVE_CLAIM`) | not shipped: fix IMG_3593's jump, trade IMG_3605's jumps for extras (see below) |
-| later | far re-finds that tell a drift correction from a look-alike; false "assembled part" on IMG_3593 at PC pace; seam cut on live frames; seam edge read round the tab; Map placements at phone pace; shadow outlines (IMG_3627); glass table (IMG_3609) | |
+| - | A failing colour-only read retried with the outline (`PH.READ_RETRY`) | not shipped: IMG_3605 worse (see below) |
+| later | IMG_3627's third piece: `photoFit` picks a segmentation without it; far re-finds that tell a drift correction from a look-alike; false "assembled part" on IMG_3593 at PC pace; seam cut on live frames; seam edge read round the tab; Map placements at phone pace; shadow outlines (IMG_3627); glass table (IMG_3609) | |
 
 ## 0.23.0 — the map stays true
 
@@ -291,4 +300,23 @@ on the counter. What would: getting the old spot looked at (a "look here"
 hint is a phone-side change the owner would have to try), or a way to tell
 a drift correction from a look-alike by the map itself (does the claimant's
 neighbourhood match the claimed piece's?).
+
+## Not shipped — a failing read retried with the outline (IMG_3627)
+
+IMG_3627's third piece is not lost to its shadow (as the v0.22 notes
+guessed): its **colour outline cuts along the print** - the pale grey hull
+matches the cream counter - and still passes as piece-sized (0.83), so the
+outline rescue never runs; the corner score (0.028 < 0.03) then calls it
+"not a piece". `PH.READ_RETRY` (kept, off): such a read is tried once more
+with the outline channel - the piece then reads whole (corner score 0.27).
+
+Two findings:
+- In the photo it still doesn't count: `photoFit` judges segmentations by
+  their blobs' shape scores; with that piece's blob cut short (score 0.03)
+  it picks another background model, where the piece isn't a blob of its
+  own. Next: let `photoFit` count read pieces, not blob scores.
+- On the videos the retry hurts IMG_3605 (5 settings: matched 133 -> 122,
+  pieces > 1 off 39 -> 48; IMG_3593 unchanged): there the outline channel
+  takes in the lamp shadows, and the extra reads are poor. A retry would
+  need the shadow peel on the outline too.
 

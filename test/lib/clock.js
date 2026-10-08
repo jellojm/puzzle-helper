@@ -68,7 +68,13 @@ exports.hook = function (PH) {
   const seg = PH.segment;
   PH.segment = function (proc, o) { exports.charge(PHONE.segPerPx * proc.w * proc.h); return seg.apply(this, arguments); };
   const read = PH.analyzePiece;
-  PH.analyzePiece = function (crop) { exports.charge(PHONE.readPerPx * crop.w * crop.h); return read.apply(this, arguments); };
+  PH.analyzePiece = function (crop) {
+    const r0 = PH.readRetries || 0;
+    exports.charge(PHONE.readPerPx * crop.w * crop.h);
+    const out = read.apply(this, arguments);
+    if ((PH.readRetries || 0) > r0) exports.charge(PHONE.readPerPx * crop.w * crop.h); // (a retried read is a second read)
+    return out;
+  };
   const pf = PH.Engine.prototype.processFrame;
   PH.Engine.prototype.processFrame = function () { if (!this.__clockFrame) exports.frameAt(); this.__clockFrame = false; return pf.apply(this, arguments); };
   // a test that knows the frame's time calls frameAt(t) itself, then marks it

@@ -223,7 +223,7 @@ const FLOOR = CASE.floor || {};
     const byIdentity = new Map();
     let lost = 0;
     for (const [n, v] of votes) { const id = [...v.entries()].sort((a, b) => b[1] - a[1])[0][0]; const e = eng.pieces.get(eng.finalId(id)); if (e) byIdentity.set(n, e); else { lost++; if (process.env.MISSDBG) console.log(`  identity lost: #${n} was entry ${id} (final ${eng.finalId(id)})`); } } // (an entry dropped outright: position decides)
-    M.identity = byIdentity.size;
+    M.identity = byIdentity.size; M.readRetries = PH.readRetries || 0;
     { const gone = [...eng.pieces.values()].filter((p) => p.gone), own = new Set(byIdentity.values());
       const real = gone.filter((p) => own.has(p));
       M.goneReal = real.length; M.goneStray = gone.length - real.length;
