@@ -34,7 +34,7 @@ Map picture on the phone.
 | 0.23.3 | Cheaper reads at the phone's pace (same results); real pieces no longer dropped after one failed read | published |
 | - | Close-up reads that failed only the quality floor count as agreement | dropped: they agree 1 in 10 (IMG_3605, model clock; accepted reads 65-88%) |
 | - | Live reads at a capped resolution | not shipped: helps the phone model, costs edge codes (see below) |
-| - | Proof before a far re-find (`PH.MOVE_PROOF`) | not shipped: as many duplicates as jumps saved (see below) |
+| - | Proof before a far re-find (`PH.MOVE_PROOF`), or a claim settled at the old spot (`PH.MOVE_CLAIM`) | not shipped: fix IMG_3593's jump, trade IMG_3605's jumps for extras (see below) |
 | later | far re-finds that tell a drift correction from a look-alike; false "assembled part" on IMG_3593 at PC pace; seam cut on live frames; seam edge read round the tab; Map placements at phone pace; shadow outlines (IMG_3627); glass table (IMG_3609) | |
 
 ## 0.23.0 — the map stays true
@@ -269,4 +269,26 @@ Also from this work:
   (10 filled of 49 cells). A "seams joined" share didn't separate them: the
   blob mask closes the gaps (real parts 0.92-1.00, these >= 0.9 too). A
   test of the board colour along the seams is the next idea.
+
+Tried next, `PH.MOVE_CLAIM` (kept, off): an unproven far match becomes a
+**claim** on the checked piece; the claimed piece's spot is re-read
+(priority) and settles it - bare, or a clearly different piece there: moved
+(the claimant merges in, same number); the same piece there: the claimant
+is a look-alike and may never claim it again (`Engine.settleClaim`). Five
+settings per video (phone pace x0.65 / x0.8 / x1 / x1.25, PC pace), summed:
+
+| | off | on |
+|---|---|---|
+| IMG_3593 sum of worst offsets | 54.2 | 4.8 |
+| IMG_3593 matched / doubles | 240 / 2 | 240 / 8 |
+| IMG_3605 pieces > 1 off | 40 | 31 |
+| IMG_3605 matched / extra / doubles | 128 / 25 / 7 | 129 / 41 / 0 |
+
+Few claims settle (13-15 a run, 1 refused): the claimed piece's own spot is
+seldom read close again, so the claimant lives on as a second entry - the
+same trade as above. Both rules fix the board video; neither is a clear gain
+on the counter. What would: getting the old spot looked at (a "look here"
+hint is a phone-side change the owner would have to try), or a way to tell
+a drift correction from a look-alike by the map itself (does the claimant's
+neighbourhood match the claimed piece's?).
 

@@ -1755,6 +1755,7 @@
         // detection near the spot may well be this piece - no proof then)
         const nearDet = dets.some((d) => !d.border && Math.hypot(d.cx - f[0], d.cy - f[1]) < sideF * 1.0);
         if (readable && !nearDet && nb.length >= PH.GONE_NB && !this.frameCtx.offLight && this.bareBoard(f, sideF * 0.4) >= 0.85) { // (no neighbours seen: the spot can't be placed well enough to prove anything)
+          if (p.claim && this.settleClaim(p, true)) continue; // claimed elsewhere and its spot is bare: it was moved
           if (this.fNo - (p.goneF === undefined ? -1e9 : p.goneF) >= 6) { p.goneVotes = (p.goneVotes || 0) + 1; p.goneF = this.fNo; }
           if (p.goneVotes >= PH.GONE_VOTES) {
             p.goneVotes = 0;
@@ -1849,12 +1850,12 @@
      *  and print, any orientation, with every checked piece not in `skip`
      *  (the ones seen elsewhere in this frame). One clear answer or none: a
      *  runner-up nearly as close means look-alikes, and the read waits. */
-    identifyChecked(t1, skip, at) {
+    identifyChecked(t1, skip, at, refused) {
       if (!PH.isCloseRead(t1)) return null;
       const unitT = this.unitTable() || 1;
       let best = null, second = Infinity, nearBest = null;
       for (const q of this.pieces.values()) {
-        if (!this.isChecked(q) || !q.t1 || !PH.isCloseRead(q.t1) || (skip && skip.has(q.id))) continue;
+        if (!this.isChecked(q) || !q.t1 || !PH.isCloseRead(q.t1) || (skip && skip.has(q.id)) || (refused && refused.has(q.id))) continue;
         const m = PH.samePiece(t1, q.t1, PH.ANCHOR_SHAPE);
         if (!m.ok) continue;
         // nearby: almost always the same piece, a little off on the map (owner's video)
@@ -1878,7 +1879,27 @@
       // in that video correct a drifted entry; without them it stays behind
       // and the piece gets a second entry - as many extras as jumps saved.)
       if (PH.MOVE_PROOF && best.p.pos && !best.p.gone && !this.spotBare(best.p)) return null;
+      // Without that proof the claim waits (PH.MOVE_CLAIM): settled by the
+      // next look at the piece's own spot (Engine.settleClaim).
+      if (PH.MOVE_CLAIM && best.p.pos && !best.p.gone && !this.spotBare(best.p)) best.pending = true;
       return best;
+    }
+    /** Settle another entry's claim on checked piece Q (PH.MOVE_CLAIM):
+     *  moved = its spot seen bare or holding a clearly different piece -> Q
+     *  takes the claimant's place (same number); else the claimant is a
+     *  look-alike and may not claim Q again. True when Q was moved. */
+    settleClaim(Q, moved) {
+      const C = Q.claim && this.pieces.get(this.finalId(Q.claim.by));
+      Q.claim = null;
+      if (!C || C === Q) return false;
+      if (!moved) { (C.refused || (C.refused = new Set())).add(Q.id); this.logEvt('claimNo', Q.id, C.id); return false; }
+      const here = C.pos, isl = C.island;
+      this.mergeEntries(Q, C);
+      if (here) { this.markMoved(Q); Q.pos = here; Q.island = isl; }
+      Q.missing = false; Q.miss = 0;
+      this.rejects.refound = (this.rejects.refound || 0) + 1; this.logEvt('refound', Q.id, null);
+      this.touch(Q); this.version++; this.matchCache.clear();
+      return true;
     }
     /** Is piece p's spot in the current view and bare board (proof it left)? */
     spotBare(p) {
@@ -2108,7 +2129,7 @@
               // was moved) gets a read first, so the Map draws it where and
               // how it lies now.
               const needPlace = !p.rd || p.rd.stale;
-              if (confirmed && !needPlace && sidePx < p.t1.meanSide * 1.4) continue;
+              if (confirmed && !needPlace && !p.claim && sidePx < p.t1.meanSide * 1.4) continue; // (a claimed piece: its spot is re-read to settle the claim)
               if (!confirmed && !needPlace && this.fNo - (p.t1Frame || 0) < 8) continue;
               pri = needPlace ? 0.8 : confirmed ? 2 : 1;
             }
@@ -2159,8 +2180,13 @@
           // piece that was moved here? Then it is that piece - same number,
           // its matches and answers kept (owner, 2026-10-05).
           if (nc && !this.isChecked(j.p) && !F.offLight) {
-            const idn = this.identifyChecked(t1, inFrame(), j.p.pos);
-            if (idn) {
+            const idn = this.identifyChecked(t1, inFrame(), j.p.pos, j.p.refused);
+            if (idn && idn.pending) {
+              // a far match without proof the piece left: claim it, and look
+              // at its own spot before moving it (the read goes on as a new piece)
+              const Q = idn.p;
+              if (!Q.claim || Q.claim.by !== j.p.id) { Q.claim = { by: j.p.id, f: this.fNo }; this.logEvt('claim', Q.id, j.p.id); }
+            } else if (idn) {
               const Q = idn.p, here = j.p.pos, isl = j.p.island;
               this.mergeEntries(Q, j.p);
               if (here) { if (Q.pos && Math.hypot(Q.pos[0] - here[0], Q.pos[1] - here[1]) > (this.unitTable() || 1) * 0.5) this.markMoved(Q); Q.pos = here; Q.island = isl; }
@@ -2181,6 +2207,10 @@
             j.p.verifyF = this.fNo;
             if (F.offLight) { n1++; continue; } // (a read in odd light proves nothing either way)
             const m = PH.samePiece(t1, j.p.t1, PH.ANCHOR_SHAPE);
+            if (j.p.claim) { // its own spot read while another entry claims it
+              if (m.ok) this.settleClaim(j.p, false);
+              else if (PH.clearlyDifferent(t1, j.p.t1)) { this.settleClaim(j.p, true); j.d.id = null; n1++; continue; } // (what lies here is some other piece)
+            }
             if (m.ok || !PH.clearlyDifferent(t1, j.p.t1)) {
               j.p.notHere = 0;
               if (!m.ok) { // a doubtful read: neither agreement nor proof; the stored shape stays, the Map may use this view's picture
@@ -3785,6 +3815,7 @@
   PH.SHARP_HIST = 100; // ... of the session's usual (75th percentile) over this many close reads
   PH.BEHIND_MS = 200;   // a frame's time (median of 8) over this: the camera outruns the engine (the phone's ~5 fps)
   PH.MOVE_PROOF = false; // a far re-find ("this checked piece was moved here") needs its old spot gone or seen bare (off: see PLAN-v0.23 "Not shipped - proof before a far re-find")
+  PH.MOVE_CLAIM = false; // ... or the claim waits for a look at the piece's own spot (Engine.settleClaim; off: PLAN-v0.23)
   PH.DROP_READ_FAILS = 3; // an entry never read after this many failed reads (and 20 sightings) is not a piece
   PH.MAP_SOLVE = true;   // re-solve the map from the kept views (Engine.solveMap) ...
   PH.MAP_VIEWS = 300;    // ... the last this many views ...
