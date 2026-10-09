@@ -466,3 +466,22 @@ Not shipped. Next lever for matches: what separates a true join from a
 look-alike (the 17 of 28 near-ties) - e.g. both edges' full outline incl.
 the corners' angles, colour along the seam at higher resolution, or the
 pocket/loop evidence (v0.21.3) once the owner joins pieces.
+
+## 0.23.6 / 0.23.7 — flashlight, box photo memory (2026-10-09)
+
+- **0.23.6 Flashlight wouldn't turn off** (owner). The worker reads frames
+  from its own copy of the camera track; a copy keeps the torch setting it
+  was made with. After any flashlight change the worker gets a fresh copy;
+  it now stops old copies (they were only cancelled: every camera reopen
+  left one running). Needs the phone to confirm.
+- **0.23.7 Engine restart while setting the box** (report 01-21-54:
+  "vision restart (heap) in boxCorners: 660.9 MB"). `boxCorners` and `box`
+  copied the full 12 MP photo (~49 MB) into vision memory, which never
+  shrinks. Now the photo goes in at 1280 px for the corner guess and at
+  max(2048 px, 48 px a piece) for the box picture (24 px a piece); srcPx is
+  still reported at the photo's own resolution.
+- Measured on the way (not shipped): the outline model on the oak table -
+  already offered there (no colour dominates the grain) and it scores 0-2
+  good pieces; `CLOCK=model` runs are repeatable only when run one at a
+  time (the engine still reads `Date.now()` in ~11 places: two runs at
+  once gave 0 vs 7 checked at 30 s on IMG_3636).

@@ -374,6 +374,8 @@ async function saveSettings() {
   if (db) await tx('meta', 'readwrite', (s) => s.put({ minDE: engine.opts.minDE, taught: engine.taught }, 'settings'));
 }
 
+const BOX_IN_PX = 2048; // box photo's long side for making the box picture
+
 const handlers = {
   init,
   camTrack(msg) {
@@ -420,8 +422,20 @@ const handlers = {
   },
   async box(msg) {
     post({ type: 'status', text: 'Preparing box image…' });
-    const src = bitmapSource(msg.bitmap);
-    const box = PH.createBox(src.rgba(), msg.corners, { pieces: msg.pieces, cols: msg.cols, rows: msg.rows });
+    // The photo at most BOX_IN_PX on its long side (corners scaled with it):
+    // a 12 MP photo went into the vision memory whole (~49 MB), which never
+    // shrinks again - with the session's own use it passed the 640 MB limit
+    // and restarted the engine (owner's report 2026-10-09 01:21). The box
+    // picture made from it is ~24 px a piece, far below this.
+    // (never below 2 box cells - 48 px - a piece: the box picture is 24 px a
+    // piece and more than twice that adds nothing)
+    const src = bitmapSource(msg.bitmap), C = msg.corners, dd = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+    const g = msg.cols && msg.rows ? { cols: msg.cols, rows: msg.rows } : PH.chooseGrid(msg.pieces || 1000, (dd(C[0], C[1]) + dd(C[3], C[2])) / (dd(C[0], C[3]) + dd(C[1], C[2])));
+    const perPiece = Math.min((dd(C[0], C[1]) + dd(C[3], C[2])) / 2 / g.cols, (dd(C[0], C[3]) + dd(C[1], C[2])) / 2 / g.rows);
+    const long = Math.max(src.w, src.h), want = Math.min(long, Math.max(BOX_IN_PX, long * 2 * PH.SQ / Math.max(1, perPiece)));
+    const img = src.getProc(want), k = img.scale;
+    const box = PH.createBox(img, C.map(([x, y]) => [x * k, y * k]), { pieces: msg.pieces, cols: msg.cols, rows: msg.rows });
+    box.srcPx = Math.round(box.srcPx / k); // the photo's own detail (the page warns under ~48)
     // Real piece side (mm) from the finished size; else Engine.pieceMM() uses a typical one.
     if (msg.sizeCm) box.pieceMM = Math.sqrt((msg.sizeCm[0] * 10 * msg.sizeCm[1] * 10) / (box.cols * box.rows));
     msg.bitmap.close();
@@ -431,8 +445,9 @@ const handlers = {
     scheduleSave();
   },
   boxCorners(msg) {
-    const src = bitmapSource(msg.bitmap);
-    const corners = PH.detectBoxCorners(src.rgba());
+    // (it looks at 640 px anyway: shrink before it goes into vision memory)
+    const src = bitmapSource(msg.bitmap), img = src.getProc(1280), k = img.scale;
+    const c0 = PH.detectBoxCorners(img), corners = c0 && c0.map(([x, y]) => [x / k, y / k]);
     msg.bitmap.close();
     post({ type: 'boxCorners', corners });
   },
