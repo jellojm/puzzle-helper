@@ -71,8 +71,9 @@ function bitmapSource(bmp) {
 // camera track, this keeps only the newest VideoFrame, and a 'frame' message
 // without a bitmap analyses that one - no createImageBitmap + transfer on the
 // page's main thread. The page falls back to bitmaps if this stalls.
-let camReader = null, camLatest = null, camFrames = 0, camError = null, camBlank = 0;
+let camReader = null, camLatest = null, camFrames = 0, camError = null, camBlank = 0, camTrackObj = null;
 async function camPump(track) {
+  camTrackObj = track;
   try {
     const proc = new MediaStreamTrackProcessor({ track });
     const reader = proc.readable.getReader();
@@ -88,6 +89,10 @@ async function camPump(track) {
 function camStop() {
   if (camReader) { try { camReader.cancel(); } catch (_) { /* gone */ } camReader = null; }
   if (camLatest) { camLatest.close(); camLatest = null; }
+  // Stop our copy of the camera track too: a live copy keeps asking for what
+  // it was made with - the flashlight stayed on after it was switched off
+  // (owner, 2026-10-08), and every camera reopen left one more copy running.
+  if (camTrackObj) { try { camTrackObj.stop(); } catch (_) { /* gone */ } camTrackObj = null; }
 }
 // iPhone camera frames read here arrive in the sensor's landscape
 // orientation while the page shows a portrait video (owner's reports:

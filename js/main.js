@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.23.5';
+const APP_VERSION = '0.23.6';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -270,6 +270,10 @@ async function applyTorch() {
   const t = S.track;
   if (!t || t.readyState !== 'live' || !t.applyConstraints) return false;
   await t.applyConstraints(Object.assign({}, CAMERA, camFps(S.fpsWanted || 24), { advanced: [{ torch: !!S.torch }] }));
+  // The worker reads frames from its own copy of the track, which keeps the
+  // flashlight setting it was made with (owner, 2026-10-08: "flashlight won't
+  // turn off once on"): give it a fresh copy made after the change.
+  if (S.workerCam) { W.post({ type: 'camTrackOff' }); S.workerCam = false; startWorkerCam(); }
   return true;
 }
 async function openCamera() {
