@@ -440,3 +440,29 @@ table first allow the `edges` / `colors` models when the board is textured
 board mask if needed; an IMG_3636 key before scoring segmentation work;
 rings measured on the last third of a video, by cause.
 
+
+## The Matches gate re-measured with the app's calibration (2026-10-08, late)
+
+`GATE=cal node test/real-joins.js`: an engine holding the 65-piece pool as
+checked pieces, its own calibrated probabilities (`matchesFor` ->
+`calibrateMatches`) and the Matches list's own gate (`Engine.scanPairs`),
+with the known-weak photos' labelled joins counted as true (27 joins, 14
+from the main photos). Puzzle size 65 / 300 / 1000 gives the same picture:
+
+| minProb | true joins shown (of 27) | others shown | precision |
+|---|---|---|---|
+| 0.8 (now) | 0 | 2 | 0.00 |
+| 0.65 | 2 | 6 | 0.25 |
+| 0.5 | 7 | 19 | 0.27 |
+| 0.35 | 10-11 | 31 | 0.24-0.26 |
+
+Mutual-first pairs: true 13 (calibrated prob 0-.2/.2-.4/.4-.6/.6-.8/.8-1:
+1/2/7/3/0), others 36-39 (4/2-6/22/6/2). The calibration does not separate
+them either - the gate is not the problem, discrimination is. A "worth
+trying" tier at any bar shows ~3 wrong pairs per right one. (Photos are
+single reads: the `confirmed` feature is off for all; on the phone shapes
+are confirmed and probabilities a little higher, the overlap the same.)
+Not shipped. Next lever for matches: what separates a true join from a
+look-alike (the 17 of 28 near-ties) - e.g. both edges' full outline incl.
+the corners' angles, colour along the seam at higher resolution, or the
+pocket/loop evidence (v0.21.3) once the owner joins pieces.

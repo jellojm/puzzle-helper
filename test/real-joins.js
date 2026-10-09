@@ -228,6 +228,35 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
       }
     }
   }
+  // GATE=cal: the same question through the app itself - an engine holding
+  // the pool as checked pieces, its calibrated probabilities (matchesFor ->
+  // calibrateMatches) and the Matches list's own gate (Engine.scanPairs).
+  // True joins include the known-weak photos' labelled ones (direction
+  // review 2026-10-08: "others" counted them as false).
+  if (process.env.GATE === 'cal') {
+    const kept = [];
+    for (const j of joins) for (const o of [j.a, j.b]) if (!kept.includes(o) && !kept.some((k) => k.file !== o.file && PH.samePiece(k.t1, o.t1).ok)) kept.push(o);
+    for (const o of pool) if (!kept.includes(o) && !kept.some((k) => k.file !== o.file && PH.samePiece(k.t1, o.t1).ok)) kept.push(o);
+    const keptIds = new Set(kept.map((o) => o.id));
+    const tj = joins.filter((j) => keptIds.has(j.a.id) && keptIds.has(j.b.id));
+    const trueSet = new Set(tj.map((j) => [j.a.id + ':' + j.ka, j.b.id + ':' + j.kb].sort().join('|')));
+    const trueStrong = new Set(tj.filter((j) => !j.weak).map((j) => [j.a.id + ':' + j.ka, j.b.id + ':' + j.kb].sort().join('|')));
+    console.log(`GATEcal pool ${kept.length} pieces, ${trueSet.size} labelled true joins (${trueStrong.size} from the main photos)`);
+    const eng = new PH.Engine({ checkedOnly: false });
+    for (const o of kept) eng.pieces.set(o.id, { id: o.id, t1: o.t1, t2: null, wrong: [], joined: [false, false, false, false], island: 1 });
+    const keyOf = (q) => [q.a + ':' + q.edgeA, q.b + ':' + q.edgeB].sort().join('|');
+    for (const total of [kept.length, 300, 1000]) {
+      eng.opts.totalPieces = total; eng.version++; eng.matchCache.clear();
+      const all = eng.scanPairs({ minProb: 1e-9, budgetMs: 1e9 }).pairs; // every mutual-first pair
+      const tp = all.filter((q) => trueSet.has(keyOf(q))), fp = all.filter((q) => !trueSet.has(keyOf(q)));
+      const hist = (a) => [0, 0.2, 0.4, 0.6, 0.8].map((lo) => a.filter((q) => q.prob >= lo && q.prob < lo + 0.2 + (lo === 0.8 ? 0.01 : 0)).length).join('/');
+      console.log(`GATEcal total ${total}: mutual-first pairs true ${tp.length} (calibrated prob 0-.2/.2-.4/.4-.6/.6-.8/.8-1: ${hist(tp)}), others ${fp.length} (${hist(fp)})`);
+      for (const minProb of [0.8, 0.65, 0.5, 0.35]) {
+        const shown = all.filter((q) => q.prob >= minProb), hit = shown.filter((q) => trueSet.has(keyOf(q))).length;
+        console.log(`GATEcal   minProb ${minProb}: ${hit} of ${trueSet.size} true joins shown, ${shown.length - hit} others (precision ${shown.length ? (hit / shown.length).toFixed(2) : '-'})`);
+      }
+    }
+  }
   const N = joins.filter((j) => !j.weak).length * 2;
   if (weak.n) console.log(`known-weak photos (lamp, cream counter): ${weak.n} join sides, tab<->blank ${weak.type}, partner first ${weak.top1}, top 3 ${weak.top3}`);
   // v0.23.1: 20 of the 21 pieces in them (the joined pairs of IMG_3621/3622
