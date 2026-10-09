@@ -40,6 +40,52 @@
   // stabilization crops a little, so default slightly narrower.
   PH.DEFAULT_FOV = 66;
 
+  /**
+   * Lens angle from a "tilt the phone" run (More -> Measure lens angle).
+   * `series`: samples {t (ms), sx, sy (picture shift so far, video px),
+   * ab, ag (phone turn so far about the screen's x and y axes, degrees, from
+   * the gyro), seg (tracker segment: a reset starts a new one)}; `L` = the
+   * video's long side (px). The turn and the shift are compared over windows
+   * of ~0.25 s - single tracker steps are a pixel or two of the 96 px
+   * thumbnail (~20 video px each) against an instant gyro rate, and their
+   * median read the angle far too wide (owner's run: 98.9 deg). Per window
+   * the axis turning clearly more counts: up/down shift with the x-axis turn,
+   * sideways with the y-axis turn. The focal length is the least-squares
+   * slope (through 0, signed) of shift on tan(turn), over all windows of
+   * both axes (each axis' own sign). Returns {fov, f, n, r2} or null.
+   */
+  PH.fovFromSeries = function (series, L, win) {
+    win = win || 250;
+    const pts = { x: [], y: [] };
+    let i0 = 0;
+    for (let i = 1; i < series.length; i++) {
+      const a = series[i0], b = series[i];
+      if (b.seg !== a.seg) { i0 = i; continue; }
+      if (b.t - a.t < win) continue;
+      const tb = b.ab - a.ab, tg = b.ag - a.ag;
+      if (Math.abs(tb) > 2 * Math.abs(tg) && Math.abs(tb) >= 1) pts.y.push([Math.tan((tb * Math.PI) / 180), b.sy - a.sy]);
+      else if (Math.abs(tg) > 2 * Math.abs(tb) && Math.abs(tg) >= 1) pts.x.push([Math.tan((tg * Math.PI) / 180), b.sx - a.sx]);
+      i0 = i;
+    }
+    // each axis' slope sign (the gyro's and the picture's directions) from its own data
+    let num = 0, den = 0, n = 0;
+    const fits = [];
+    for (const P of [pts.x, pts.y]) {
+      if (P.length < 3) continue;
+      let sxy = 0, sxx = 0;
+      for (const [x, y] of P) { sxy += x * y; sxx += x * x; }
+      const sg = Math.sign(sxy) || 1;
+      for (const [x, y] of P) { num += x * y * sg; den += x * x; n++; fits.push([x, y * sg]); }
+    }
+    if (n < 6 || den <= 0) return null;
+    const f = num / den;
+    if (!(f > 0)) return null;
+    let ss = 0, st = 0;
+    const my = fits.reduce((s, q) => s + q[1], 0) / fits.length;
+    for (const [x, y] of fits) { ss += (y - f * x) ** 2; st += (y - my) ** 2; }
+    return { fov: (2 * Math.atan(L / 2 / f) * 180) / Math.PI, f, n, r2: st > 0 ? 1 - ss / st : 0 };
+  };
+
   // Tilt in degrees from straight down.
   PH.tiltDeg = (down) => (Math.acos(PH.clamp(down[2] / Math.hypot(down[0], down[1], down[2]), -1, 1)) * 180) / Math.PI;
 

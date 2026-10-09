@@ -485,3 +485,14 @@ pocket/loop evidence (v0.21.3) once the owner joins pieces.
   good pieces; `CLOCK=model` runs are repeatable only when run one at a
   time (the engine still reads `Date.now()` in ~11 places: two runs at
   once gave 0 vs 7 checked at 30 s on IMG_3636).
+- **0.23.8 Lens angle** (owner: "the angle in the settings seems
+  incorrect"; the latest report had it at 60 deg, the one measurement in
+  the reports read 98.9 deg from 4 readings). An XR's 1x camera is ~67 deg
+  across the long side (4.25 mm on a ~5.65 mm-wide sensor; 26 mm equiv.),
+  so the 66 deg default is right. The measurement took the median of single
+  tracker steps (a pixel or two of the 96 px thumbnail over one instant gyro
+  rate). Now `PH.fovFromSeries`: gyro turn added up event by event, compared
+  with the picture's shift over ~0.25 s windows, least-squares focal length
+  over all windows (`test/fov-measure.js`, simulated runs: median error
+  2.7 -> 1.3 deg, worst 7.8 -> 2.8). The simulation does not reproduce
+  98.9 deg, so the run's raw samples now go into the report (fovMeasure.series).

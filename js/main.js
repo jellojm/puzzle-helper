@@ -4,7 +4,7 @@ import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.23.7';
+const APP_VERSION = '0.23.8';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -505,7 +505,11 @@ async function requestMotion() {
       S.gravity = S.gravity ? S.gravity.map((x, i) => x * (1 - k) + v[i] * k) : v;
     }
     const r = e.rotationRate || {}, a = e.acceleration || {};
-    S.rate = { beta: r.beta || 0, gamma: r.gamma || 0, t: performance.now() };
+    const tNow = performance.now();
+    // measuring the lens angle: the phone's turn so far (degrees), added up
+    // event by event (not one instant rate per tracker step)
+    if (S.fovRun && S.rate) { const dt = Math.min(0.1, (tNow - S.rate.t) / 1000); S.fovRun.ab += (r.beta || 0) * dt; S.fovRun.ag += (r.gamma || 0) * dt; }
+    S.rate = { beta: r.beta || 0, gamma: r.gamma || 0, t: tNow };
     const rot = Math.hypot(r.alpha || 0, r.beta || 0, r.gamma || 0);
     const acc = Math.hypot(a.x || 0, a.y || 0, a.z || 0);
     S.motion.rot = S.motion.rot * 0.7 + rot * 0.3;
@@ -815,26 +819,23 @@ function showDebug(m) {
 // video's long side. Sliding the phone would also move the picture, so only
 // steps clearly dominated by one turning axis count.
 function fovSample(F, t) {
-  const prev = F.fovPrev; F.fovPrev = { t, tot: F.T.total.slice() };
-  if (!prev || !S.rate || performance.now() - S.rate.t > 200) return;
-  const dt = (t - prev.t) / 1000, dx = (F.T.total[0] - prev.tot[0]) * F.scale, dy = (F.T.total[1] - prev.tot[1]) * F.scale;
-  const b = Math.abs(S.rate.beta), g = Math.abs(S.rate.gamma);
-  // portrait: beta (about the screen's x axis) moves the picture up/down, gamma sideways
-  const [w, d] = b > 2 * g ? [b, Math.abs(dy)] : g > 2 * b ? [g, Math.abs(dx)] : [0, 0];
-  const ang = (w * dt * Math.PI) / 180;
-  if (w < 15 || d < 2 || ang <= 0 || dt <= 0 || dt > 0.2) return;
-  S.fovRun.f.push(d / Math.tan(ang));
+  // the picture's shift so far (video px) and the phone's turn so far, for
+  // PH.fovFromSeries (a tracker restart starts a new segment)
+  const R = S.fovRun;
+  R.series.push({ t, sx: F.T.total[0] * F.scale, sy: F.T.total[1] * F.scale, ab: R.ab, ag: R.ag, seg: (F.resumes || 0) + ':' + (F.T.resets || 0) });
 }
 function measureFov() {
   $('menu').hidden = true; noteActivity(); applyPower();
-  S.fovRun = { f: [], t0: performance.now() };
+  S.fovRun = { series: [], ab: 0, ag: 0, t0: performance.now() };
   toast('Hold the phone over the table and TILT it slowly forward and back, then side to side, for 6 seconds — keep it in one place.', 6500);
   setTimeout(() => {
     const R = S.fovRun; S.fovRun = null;
-    const f = R.f.slice().sort((a, b) => a - b), n = f.length, L = Math.max(video.videoWidth, video.videoHeight);
-    const fov = n ? (2 * Math.atan(L / 2 / f[n >> 1]) * 180) / Math.PI : null;
-    S.fovResult = { n, fov: fov && +fov.toFixed(1), at: Date.now() };
-    if (n < 12 || !(fov >= 45 && fov <= 85)) { toast(`Couldn't measure it this time (${n} usable readings) — try again, tilting a little more and without sliding.`, 6000); return; }
+    const L = Math.max(video.videoWidth, video.videoHeight);
+    const est = PH.fovFromSeries(R.series, L), n = est ? est.n : 0, fov = est ? est.fov : null;
+    S.fovResult = { n, fov: fov && +fov.toFixed(1), r2: est ? +est.r2.toFixed(2) : null, samples: R.series.length, at: Date.now(), L,
+      // the raw run, for the report (a misreading can then be traced)
+      series: R.series.slice(0, 300).map((q) => [Math.round(q.t - R.t0), Math.round(q.sx), Math.round(q.sy), +q.ab.toFixed(2), +q.ag.toFixed(2), q.seg]) };
+    if (n < 8 || !(fov >= 45 && fov <= 85) || est.r2 < 0.6) { toast(`Couldn't measure it this time (${n} usable readings) — try again, tilting a little more and without sliding.`, 6000); return; }
     if (confirm(`Measured lens angle: about ${Math.round(fov)}° (${n} readings; the setting is ${S.fov}°). Use it?`)) {
       $('fovRange').value = Math.round(fov); $('fovRange').dispatchEvent(new Event('input'));
       toast(`Lens angle set to ${Math.round(fov)}°.`);
