@@ -475,3 +475,111 @@ export function drawThumb(canvas, piece, edge, color) {
     ctx.stroke();
   }
 }
+
+// ---------- piece view (a tapped piece: owner, 2026-10-10) ----------
+// The piece's outline rebuilt from its read: the 4 corners plus each edge's
+// shape signature (x along the corner-to-corner line, y outward, in edge
+// lengths; it may leave the corners off). Points in source pixels.
+function edgeCurve(a, b, sig) {
+  const out = [a];
+  if (sig) {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    for (let i = 0; i < sig.length; i += 2) out.push([a[0] + sig[i] * dx + sig[i + 1] * dy, a[1] + sig[i] * dy - sig[i + 1] * dx]);
+  }
+  out.push(b);
+  return out;
+}
+function hiDpi(canvas) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.round(canvas.clientWidth * dpr) || 400, h = Math.round(canvas.clientHeight * dpr) || 400;
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  return { ctx, W: w, H: h, dpr };
+}
+/** The piece as photographed, its whole outline traced over it (each edge in
+ *  its colour, corners as dots). */
+export function drawPiecePhoto(canvas, piece) {
+  const { ctx, W, H, dpr } = hiDpi(canvas);
+  ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
+  if (!piece || !piece.thumb || !piece.thumb.data) return;
+  const th = piece.thumb;
+  const tmp = new OffscreenCanvas(th.w, th.h);
+  tmp.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(th.data), th.w, th.h), 0, 0);
+  const s = Math.min(W / th.w, H / th.h) * 0.94, ox = (W - th.w * s) / 2, oy = (H - th.h * s) / 2;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(tmp, ox, oy, th.w * s, th.h * s);
+  if (!piece.corners || !th.s) return;
+  const P = piece.corners.map(([x, y]) => [ox + (x - th.ox) * th.s * s, oy + (y - th.oy) * th.s * s]);
+  ctx.lineCap = ctx.lineJoin = 'round';
+  for (let k = 0; k < 4; k++) {
+    const c = edgeCurve(P[k], P[(k + 1) % 4], piece.sigs && piece.sigs[k]);
+    for (const [w, col] of [[7 * dpr, 'rgba(0,0,0,0.6)'], [3.5 * dpr, EDGE_COLORS[k]]]) {
+      ctx.lineWidth = w; ctx.strokeStyle = col;
+      ctx.beginPath(); c.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke();
+    }
+  }
+  for (const [x, y] of P) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, 5 * dpr, 0, Math.PI * 2); ctx.fill(); }
+}
+/** The outline alone: corner angles (a piece is close to a square, so ~90
+ *  deg each; the four add up to 360) and, per edge, tab / blank / flat and
+ *  its length (relative to the piece's mean side, and in mm when the
+ *  puzzle's piece size is known). */
+export function drawPieceShape(canvas, piece, opts) {
+  opts = opts || {};
+  const { ctx, W, H, dpr } = hiDpi(canvas);
+  ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
+  if (!piece || !piece.corners) {
+    ctx.fillStyle = '#aaa'; ctx.font = `${14 * dpr}px system-ui`; ctx.textAlign = 'center';
+    ctx.fillText('Shape not read yet', W / 2, H / 2); return;
+  }
+  const C = piece.corners;
+  // the whole outline, to fit it in the view (tabs reach past the corners)
+  const curves = [0, 1, 2, 3].map((k) => edgeCurve(C[k], C[(k + 1) % 4], piece.sigs && piece.sigs[k]));
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const c of curves) for (const [x, y] of c) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  const s = (Math.min(W, H) * 0.62) / Math.max(1, x1 - x0, y1 - y0);
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const T = ([x, y]) => [W / 2 + (x - cx) * s, H / 2 + (y - cy) * s];
+  const P = C.map(T), mid = [(P[0][0] + P[1][0] + P[2][0] + P[3][0]) / 4, (P[0][1] + P[1][1] + P[2][1] + P[3][1]) / 4];
+  // faint corner-to-corner square under it
+  ctx.setLineDash([6 * dpr, 6 * dpr]); ctx.lineWidth = 1.5 * dpr; ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath(); P.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); ctx.stroke();
+  ctx.setLineDash([]);
+  // the outline, edge by edge
+  ctx.lineCap = ctx.lineJoin = 'round';
+  curves.forEach((c, k) => {
+    ctx.lineWidth = 4 * dpr; ctx.strokeStyle = EDGE_COLORS[k];
+    ctx.beginPath(); c.map(T).forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke();
+  });
+  const label = (txt, x, y, col, size) => {
+    ctx.font = `600 ${(size || 13) * dpr}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const w = ctx.measureText(txt).width + 10 * dpr, h = (size || 13) * dpr * 1.5;
+    x = Math.max(w / 2 + 4 * dpr, Math.min(W - w / 2 - 4 * dpr, x)); y = Math.max(h / 2 + 4 * dpr, Math.min(H - h / 2 - 4 * dpr, y)); // (inside the drawing)
+    ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(x - w / 2, y - h / 2, w, h);
+    ctx.fillStyle = col; ctx.fillText(txt, x, y);
+  };
+  // corner angles (between the lines to the two neighbouring corners)
+  let sum = 0;
+  for (let k = 0; k < 4; k++) {
+    const a = C[(k + 3) % 4], b = C[k], c = C[(k + 1) % 4];
+    const u = [a[0] - b[0], a[1] - b[1]], v = [c[0] - b[0], c[1] - b[1]];
+    const ang = (Math.acos(Math.max(-1, Math.min(1, (u[0] * v[0] + u[1] * v[1]) / (Math.hypot(...u) * Math.hypot(...v) || 1)))) * 180) / Math.PI;
+    sum += ang;
+    const [px, py] = P[k], dx = mid[0] - px, dy = mid[1] - py, d = Math.hypot(dx, dy) || 1;
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(px, py, 5 * dpr, 0, Math.PI * 2); ctx.fill();
+    label(`${ang.toFixed(0)}°`, px + (dx / d) * 30 * dpr, py + (dy / d) * 30 * dpr, '#fff', 12);
+  }
+  // edge labels, outside each edge
+  const WORD = { T: 'tab', B: 'blank', F: 'flat', J: 'joined' };
+  const code = piece.code || '????';
+  for (let k = 0; k < 4; k++) {
+    const a = P[k], b = P[(k + 1) % 4], mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    const dx = mx - mid[0], dy = my - mid[1], d = Math.hypot(dx, dy) || 1;
+    const L = piece.lens ? piece.lens[k] : null;
+    const len = L ? (opts.pieceMM ? `${(L * opts.pieceMM).toFixed(0)} mm` : `${L.toFixed(2)}×`) : '';
+    const unc = piece.unc && piece.unc[k] ? '?' : '';
+    label(`${WORD[code[k]] || code[k]}${unc}${len ? ' · ' + len : ''}`, mx + (dx / d) * (Math.min(W, H) * 0.22), my + (dy / d) * (Math.min(W, H) * 0.22), EDGE_COLORS[k], 13);
+  }
+  label(`corners add up to ${sum.toFixed(0)}°`, W / 2, H - 14 * dpr, 'rgba(255,255,255,0.7)', 11);
+}

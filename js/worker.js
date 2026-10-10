@@ -455,6 +455,10 @@ const handlers = {
     const aspect = msg.aspect;
     post({ type: 'boxGrid', grid: PH.chooseGrid(msg.pieces, aspect) });
   },
+  // the piece view (a tapped piece): its description, without selecting it
+  pieceInfo(msg) {
+    post({ type: 'pieceInfo', id: msg.id, desc: engine.pieces.has(msg.id) ? engine.describe(msg.id) : null });
+  },
   select(msg) {
     post({ type: 'selected', desc: msg.id ? engine.select(msg.id) : (engine.select(null), null) });
   },

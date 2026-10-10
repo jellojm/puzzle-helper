@@ -252,6 +252,21 @@
     </div>
   </section>
 
+  <!-- A tapped piece: its picture and its outline geometry. The camera is off
+       while this is open (owner, 2026-10-10). -->
+  <section id="pieceModal" class="screen" hidden>
+    <div class="box-head">
+      <button id="pieceClose" class="link">Close</button>
+      <strong id="pieceTitle">Piece</strong>
+      <button id="pieceMatches" class="link strong">Matches</button>
+    </div>
+    <div id="pieceBody">
+      <canvas id="piecePhoto" aria-label="The piece as photographed, with its outline"></canvas>
+      <canvas id="pieceShape" aria-label="The piece's outline: corners, angles and edges"></canvas>
+      <div id="pieceFacts" class="small"></div>
+    </div>
+  </section>
+
   <script src="js/vision/flow.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>

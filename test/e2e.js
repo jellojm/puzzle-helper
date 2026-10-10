@@ -149,7 +149,23 @@ function writePng(file, mat) {
       const p = await page.waitForFunction(() => window.__phPick && window.__phPick(), null, { timeout: 30000, polling: 250 }).then((h) => h.jsonValue()).catch(() => null);
       if (!p) break;
       await page.mouse.click(p[0], p[1]);
-      if (await page.waitForSelector('#findPanel:not([hidden])', { timeout: 5000 }).then(() => true).catch(() => false)) pt = p;
+      if (await page.waitForSelector('#pieceModal:not([hidden])', { timeout: 5000 }).then(() => true).catch(() => false)) pt = p;
+    }
+    if (pt) {
+      // The piece view (owner, 2026-10-10): the piece and its outline
+      // geometry on its own screen, camera off until it is closed; Matches
+      // goes on to the Find panel as a tap did before.
+      await until(() => /Read \d+ time/.test(document.getElementById('pieceFacts').textContent), null, 15000);
+      const pv = await page.evaluate(() => {
+        const ink = (id) => { const c = document.getElementById(id), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4 * 37) if (d[i] + d[i + 1] + d[i + 2] > 120) n++; return n; };
+        return { title: document.getElementById('pieceTitle').textContent, facts: document.getElementById('pieceFacts').textContent, photo: ink('piecePhoto'), shape: ink('pieceShape'), video: document.querySelector('video').paused || !document.querySelector('video').srcObject };
+      });
+      await page.screenshot({ path: path.join(OUT, 'e2e-piece.png') });
+      check('tapping a piece opens its own screen: picture and outline drawn', /^Piece #\d+/.test(pv.title) && pv.photo > 50 && pv.shape > 50, `${pv.title}; ink ${pv.photo} / ${pv.shape}; ${pv.facts.slice(0, 80)}`);
+      check('the camera is off while the piece screen is open', pv.video, `video paused/off ${pv.video}`);
+      await page.click('#pieceMatches');
+      const fp = await page.waitForSelector('#findPanel:not([hidden])', { timeout: 10000 }).then(() => true).catch(() => false);
+      check('Matches on the piece screen opens the Find panel', fp && await page.evaluate(() => document.getElementById('pieceModal').hidden));
     }
     if (pt) {
       // (candidates, verdicts and the box-spot line fill in after the panel opens)
@@ -364,9 +380,16 @@ function writePng(file, mat) {
     // look found none whenever the view held only edge pieces.
     const pt2 = await page.waitForFunction(() => window.__phPick && window.__phPick(), null, { timeout: 30000, polling: 250 }).then((h) => h.jsonValue()).catch(() => null);
     if (pt2) {
-      await page.mouse.click(pt2[0], pt2[1]);
-      const opened = await page.waitForSelector('#findPanel:not([hidden])', { timeout: 8000 }).then(() => true).catch(() => false);
-      check('tapping a piece works with tilt correction', opened, opened ? await page.textContent('#selTitle') : 'panel did not open');
+      // (a tap that misses - the picture moved - is aimed again, as above)
+      let opened = false;
+      for (let a = 0; a < 6 && !opened; a++) {
+        const q = a ? await page.waitForFunction(() => window.__phPick && window.__phPick(), null, { timeout: 15000, polling: 250 }).then((h) => h.jsonValue()).catch(() => null) : pt2;
+        if (!q) break;
+        await page.mouse.click(q[0], q[1]);
+        opened = await page.waitForSelector('#pieceModal:not([hidden])', { timeout: 4000 }).then(() => true).catch(() => false);
+      }
+      check('tapping a piece works with tilt correction', opened, opened ? await page.textContent('#pieceTitle') : 'piece screen did not open');
+      if (opened) await page.click('#pieceClose'); // (and the camera comes back for the checks after)
     } else check('tapping a piece works with tilt correction', false, 'no shaped piece visible');
 
     // Table view (Map mode): camera off, pieces drawn from above, same tools.

@@ -1,10 +1,10 @@
 // Page controller: camera, frame pump to the vision worker, overlay, UI.
-import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COLORS, ZONE_COLORS, STATUS, ROLE, drawCheckingMark } from './overlay.js';
+import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COLORS, ZONE_COLORS, STATUS, ROLE, drawCheckingMark, drawPiecePhoto, drawPieceShape } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 
-const APP_VERSION = '0.23.8';
+const APP_VERSION = '0.23.9';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -186,6 +186,7 @@ function onWorkerMessage(e) {
       else if (!m.cleared) toast(m.why || 'Could not mark the border. Try again with the whole border in view.', 6000);
       break;
     case 'selected': showFind(m.desc); mapShowSelection(m.desc); break;
+    case 'pieceInfo': if (S.pieceView === m.id) showPieceView(m.desc); break;
     case 'mapData': tableView.setData(m.data); mapApplyFilter(); break;
     case 'camTrackFailed': stopWorkerCam(m.why); break;
     case 'library': showLibrary(m); if (m.counts) updateStats(m.counts); if (m.saved) toast(`Saved "${m.saved.name}" (${m.saved.pieces} pieces).`); break;
@@ -371,7 +372,7 @@ function tuneFrameRate() {
 // is released outright (not just paused) so the recording indicator goes out.
 function scanningWanted() {
   return S.running && !document.hidden && !S.pickerOpen && !S.idle && !S.reporting && S.mode !== 'map' &&
-    $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden && $('start').hidden;
+    $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden && $('pieceModal').hidden && $('start').hidden;
 }
 // Last real camera view, kept when the camera is switched off (menu, idle)
 // so "Send report" can still include what the camera saw.
@@ -392,7 +393,7 @@ function releaseCamera() {
 }
 function applyPower() {
   const want = scanningWanted();
-  $('resume').hidden = !(S.idle && S.running && !document.hidden && $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden);
+  $('resume').hidden = !(S.idle && S.running && !document.hidden && $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden && $('pieceModal').hidden);
   if (want === S.active) return;
   S.active = want;
   if (want) {
@@ -944,12 +945,59 @@ overlay.addEventListener('pointerup', (e) => {
   const ring = !hit && S.last.dets.find((d) => d.status === 'checking' && pointInPoly(fx, fy, d.pts));
   if (ring) { toast(ring.close ? 'Checking this piece — hold steady a moment.' : 'Not checked yet — bring the phone closer (about two pieces across the screen) and hold steady.', 3500); return; }
   if (hit) {
-    if (S.mode !== 'find') setMode('find');
-    W.post({ type: 'select', id: hit.id });
+    // its own screen: the piece and its outline geometry (owner, 2026-10-10);
+    // Matches there does what a tap did before
+    openPieceView(hit.id);
   } else if (S.mode === 'find') {
     W.post({ type: 'select', id: null });
   }
 });
+// ---------- piece view ----------
+// A tapped piece on its own screen: its picture with the outline traced, and
+// the outline's geometry (corner angles, tab / blank / flat and length per
+// edge). The camera is off while it is open (scanningWanted).
+function openPieceView(id) {
+  S.pieceView = id;
+  $('pieceTitle').textContent = `Piece #${id}`;
+  $('pieceFacts').textContent = 'Loading…';
+  $('pieceModal').hidden = false;
+  applyPower();
+  W.post({ type: 'pieceInfo', id });
+}
+function showPieceView(desc) {
+  const p = desc && desc.piece;
+  if (!p) { $('pieceFacts').textContent = 'This piece is no longer in the catalog.'; return; }
+  $('pieceTitle').textContent = `Piece #${p.id}`;
+  drawPiecePhoto($('piecePhoto'), p);
+  drawPieceShape($('pieceShape'), p, { pieceMM: desc.pieceMM });
+  const words = { T: 'tab', B: 'blank', F: 'flat', J: 'joined' }, sides = ['red', 'cyan', 'yellow', 'purple'];
+  const edges = p.code ? [...p.code].map((c, k) => `<span style="color:${EDGE_COLORS[k]}">●</span> ${sides[k]}: ${words[c] || c}${p.unc && p.unc[k] ? ' (unsure)' : ''}`).join(' · ') : 'not read yet';
+  const flats = p.code ? [...p.code].filter((c) => c === 'F').length : 0;
+  const kind = flats >= 2 ? 'corner piece' : flats === 1 ? 'edge piece' : 'inside piece';
+  const c = p.t2 && p.t2.cands && p.t2.cands[0];
+  const facts = [
+    `<b>${p.code ? kind : 'shape not read yet'}</b>${p.code ? ' — ' + edges : ''}`,
+    `Read ${p.views || 0} time${p.views === 1 ? '' : 's'}${p.quality != null ? `, read quality ${Math.round(p.quality * 100)}%` : ''}${p.confirmed ? ', shape confirmed' : ''}.`,
+    c && p.t2.conf >= 0.35 ? `On the box picture: column ${c.col + 1}, row ${c.row + 1}.` : 'Not placed on the box picture yet.',
+    p.inPuzzle ? 'Marked as in the puzzle.' : p.gone ? 'Not where it was last seen.' : '',
+    `Angles are measured between the corners (dashed square); a piece cut square has four of about 90°. Lengths are ${desc.pieceMM ? "in mm, from the puzzle's piece size" : "relative to the piece's average side"}.`,
+  ].filter(Boolean);
+  $('pieceFacts').innerHTML = facts.map((f) => `<p>${f}</p>`).join('');
+}
+function closePieceView() {
+  $('pieceModal').hidden = true;
+  S.pieceView = null;
+  applyPower();
+}
+$('pieceClose').onclick = closePieceView;
+$('pieceMatches').onclick = () => {
+  const id = S.pieceView;
+  closePieceView();
+  if (!id) return;
+  if (S.mode !== 'find') setMode('find');
+  W.post({ type: 'select', id });
+};
+
 // A tapped open spot: with its box cell known, the "fill this spot" list
 // (gold on the table); otherwise what shape the missing piece needs.
 function openSpot(s) {
