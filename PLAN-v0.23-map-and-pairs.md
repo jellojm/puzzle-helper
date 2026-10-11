@@ -594,3 +594,11 @@ these tables, judged with Test mode reports.
   Added to the score at any weight the true partner is first less often
   (27 -> 19-25 of 41 sides). Not used for matching; the profile is kept and
   exported (pieces.json `profile`) for offline methods.
+
+## 0.26.2 - outline cut for piece reads (light boards, pale print)
+Each read also cuts the piece by its outline (Canny 15/45 on the read crop, gaps
+closed, enclosed regions filled) and keeps whichever cut is more jigsaw-like
+(PH.pieceScore, margin 0.05). Report 03-26-06 (white board): colour cut lost
+pale print on 3 of 4 pieces; outline cut traced all 4. Labelled joins: partner
+first 19 -> 21 of 28; known-weak lamp photos slightly worse (tab/blank 26 -> 22).
+real-50 (3593) unchanged. Off switch: PH.READ_EDGE_ALT.

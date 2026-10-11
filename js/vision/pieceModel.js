@@ -205,6 +205,72 @@
     cv.bitwise_not(m, m); PH.dilateDisc(m, r); cv.bitwise_not(m, m);
   };
 
+  /**
+   * A piece cut out of its close-up by its sharp outline, not its colour
+   * (owner, 2026-10-11: "puzzle piece edges are way off" - on the glass table
+   * the colour cut took in a piece's shadow on the floor below (IMG_3663) and
+   * lost tabs whose pale print matched the board). The piece is in focus; the
+   * floor, its shadows and reflections are not. Canny edges at the read's own
+   * resolution; every outline-free region reaching the crop's border is
+   * board; what is left (the piece with its print inside) is filled and the
+   * part at the crop's middle kept. Returns {pts, area, filled} or null.
+   */
+  function segmentCropEdges(crop, w, h, hint) {
+    const cv = PH.cv;
+    const src = new cv.Mat(h, w, cv.CV_8UC4); src.data.set(crop.data);
+    const g = new cv.Mat(), e = new cv.Mat();
+    cv.cvtColor(src, g, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(g, g, new cv.Size(3, 3), 0);
+    cv.Canny(g, e, PH.READ_EDGE_T[0], PH.READ_EDGE_T[1]);
+    const k3 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+    // close small gaps in the outline (a pale tab tip, a soft spot): wider
+    // for bigger crops; trimmed back after the fill
+    const gr = Math.max(1, Math.round(Math.max(w, h) * PH.READ_EDGE_CLOSE));
+    const kc = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * gr + 1, 2 * gr + 1));
+    cv.dilate(e, e, kc);
+    // board = outline-free regions connected to the crop's border
+    const free = new cv.Mat(); cv.bitwise_not(e, free);
+    const ff = cv.Mat.zeros(h + 2, w + 2, cv.CV_8UC1);
+    const fd = free.data;
+    for (let x = 0; x < w; x++) for (const y of [0, h - 1]) if (fd[y * w + x]) cv.floodFill(free, ff, new cv.Point(x, y), new cv.Scalar(0), new cv.Rect(), new cv.Scalar(0), new cv.Scalar(0), 4);
+    for (let y = 0; y < h; y++) for (const x of [0, w - 1]) if (fd[y * w + x]) cv.floodFill(free, ff, new cv.Point(x, y), new cv.Scalar(0), new cv.Rect(), new cv.Scalar(0), new cv.Scalar(0), 4);
+    // piece = edges + enclosed regions; thin strokes on the board opened away, the dilation trimmed
+    const mask = new cv.Mat(); cv.bitwise_or(e, free, mask);
+    const k5 = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+    cv.morphologyEx(mask, mask, cv.MORPH_OPEN, k5);
+    cv.erode(mask, mask, kc);
+    if (hint && hint.length >= 6) { // a piece split from a clump: stay near its part
+      const hm = cv.Mat.zeros(h, w, cv.CV_8UC1), pm = cv.matFromArray(hint.length / 2, 1, cv.CV_32SC2, Array.from(hint, Math.round)), mv = new cv.MatVector(); mv.push_back(pm);
+      cv.fillPoly(hm, mv, new cv.Scalar(255));
+      PH.dilateDisc(hm, Math.max(3, Math.round(Math.max(w, h) * 0.03)));
+      cv.bitwise_and(mask, hm, mask);
+      [hm, pm, mv].forEach((m) => m.delete());
+    }
+    const contours = new cv.MatVector(), hier = new cv.Mat();
+    cv.findContours(mask, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
+    let best = -1, bestScore = 0;
+    for (let c = 0; c < contours.size(); c++) {
+      const cnt = contours.get(c), a = cv.contourArea(cnt);
+      const sc = a * (cv.pointPolygonTest(cnt, new cv.Point(w / 2, h / 2), false) >= 0 ? 4 : 1);
+      if (sc > bestScore) { bestScore = sc; best = c; }
+      cnt.delete();
+    }
+    let out = null;
+    if (best >= 0) {
+      const cnt = contours.get(best), filled = cv.Mat.zeros(h, w, cv.CV_8UC1);
+      cv.drawContours(filled, contours, best, new cv.Scalar(255), -1);
+      out = { pts: new Int32Array(cnt.data32S), area: cv.contourArea(cnt), filled, edges: true };
+      cnt.delete();
+    }
+    [src, g, e, k3, kc, free, ff, mask, k5, contours, hier].forEach((m) => m.delete());
+    return out;
+  }
+  PH.READ_MARGIN = 0.18; // read crop margin around a detection's box (of its long side)
+  PH.READ_EDGE_ALT = true; // also cut each read by its outline; keep the more piece-like cut
+  PH.READ_EDGE_T = [15, 45]; // low: the owner's white board, pale print (2026-10-11 report: traces every piece)
+  PH.READ_EDGE_CLOSE = 0.004; // gap closing radius (of the crop's long side)
+  PH.READ_EDGE_MARGIN = 0.05; // how much more piece-like (PH.pieceScore) the outline cut must be
+
   function segmentCrop(lab, w, h, bg, threshDE, lightW, lut, hint, boundary, peel) {
     const cv = PH.cv;
     const dist = new cv.Mat(h, w, cv.CV_8UC1);
@@ -473,6 +539,17 @@
       const withOutline = segmentCrop(lab, w, h, ctx.bg, ctx.threshDE, lightW, ctx.lut, ctx.hint, true);
       seg.filled.delete(); seg = withOutline; colourOnly = false;
       mk('segOutline');
+    }
+    // The outline cut as a second opinion: taken when clearly more
+    // piece-like (4 sharp corners, sides of a piece) than the colour cut.
+    if (PH.READ_EDGE_ALT && ctx.edgeAlt !== false) {
+      const alt = segmentCropEdges(crop, w, h, ctx.hint);
+      if (PH.DEBUG_EDGEALT) PH.DEBUG_EDGEALT({ w, h, U, alt: alt && { area: Math.round(alt.area), fits: fits(alt), score: alt.pts ? +PH.pieceScore(alt.pts, alt.area).toFixed(3) : null }, colour: { area: Math.round(seg.area), fits: fits(seg), score: seg.pts ? +PH.pieceScore(seg.pts, seg.area).toFixed(3) : null }, crop, altPts: alt && alt.pts, colPts: seg.pts });
+      if (alt && fits(alt)) {
+        const sa = PH.pieceScore(alt.pts, alt.area), sc = fits(seg) ? PH.pieceScore(seg.pts, seg.area) : -1;
+        if (sa > sc + PH.READ_EDGE_MARGIN) { seg.filled.delete(); seg = alt; colourOnly = false; } else alt.filled.delete();
+      } else if (alt) alt.filled.delete();
+      mk('segEdges');
     }
     if (!fits(seg)) { seg.filled.delete(); return null; }
     readPiece.colourFit = colourOnly;

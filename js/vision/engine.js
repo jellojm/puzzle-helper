@@ -2063,7 +2063,9 @@
       if (!F || !F.still || d.border || d.merged) return null;
       const scale = F.scale, source = F.source;
       const [bx, by, bw, bh] = d.bbox;
-      const m = Math.max(bw, bh) * 0.18;
+      // (margin: the detection can have lost pale tabs - then the crop cut
+      // them off and no read could get them back; glass table 2026-10-11)
+      const m = Math.max(bw, bh) * PH.READ_MARGIN;
       const x0 = Math.max(0, Math.floor((bx - m) / scale)), y0 = Math.max(0, Math.floor((by - m) / scale));
       const x1 = Math.min(source.w, Math.ceil((bx + bw + m) / scale)), y1 = Math.min(source.h, Math.ceil((by + bh + m) / scale));
       // A big piece (a close-up at the owner's usual height: ~350 px across

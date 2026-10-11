@@ -15,6 +15,7 @@ const files = process.argv.slice(2).filter((a, i, A) => !a.startsWith('--') && !
   let cv = require('@techstark/opencv-js');
   if (cv instanceof Promise) cv = await cv; else if (!cv.Mat) await new Promise((r) => (cv.onRuntimeInitialized = r));
   PH.cv = cv;
+  if (arg('--ph')) Object.assign(PH, JSON.parse(arg('--ph')));
   const base = new PH.Engine({ checkedOnly: false });
   if (arg('--box')) { const bi = readImage(arg('--box')); const [c, r] = (arg('--grid') || '').split('x').map(Number); base.setBox(PH.createBox(bi, [[0, 0], [bi.w, 0], [bi.w, bi.h], [0, bi.h]], c && r ? { cols: c, rows: r } : { pieces: 1000 })); }
   const div = +(arg('--div') || 2), all = [];
