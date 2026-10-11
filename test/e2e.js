@@ -228,16 +228,7 @@ function writePng(file, mat) {
       await page.screenshot({ path: path.join(OUT, 'e2e-section.png') });
       check('tapping an open spot of the assembled block lists pieces for it', ok, await page.textContent('#selSub'));
     } else check('tapping an open spot of the assembled block lists pieces for it', false, 'no open spot with a box cell in view');
-    // Teach background: tap a bare spot, expect it to be learned, then clear.
     await page.click('#closeFind').catch(() => {});
-    await page.click('#menuBtn');
-    await page.click('#teachBtn');
-    await page.mouse.click(12, 400);
-    await page.waitForFunction(() => /1 spot/.test(document.getElementById('teachCount').textContent), null, { timeout: 5000 }).catch(() => {});
-    const taught = await page.textContent('#teachCount');
-    await page.click('#teachClear');
-    await page.click('#teachDone');
-    check('teach background learns a tapped color', /1 spot/.test(taught), taught);
     // Flashlight (owner, 2026-10-06: "tapping it does nothing"): the switch is
     // in the menu, where the camera is off - the light must be asked for when
     // the camera comes back, and survive the frame-rate changes.
@@ -385,7 +376,10 @@ function writePng(file, mat) {
     // the camera stays off once the report's snapshot is taken (owner,
     // 2026-10-08: running behind the share sheet it made the app lag)
     const paused = await page.evaluate(() => !document.getElementById('resume').hidden);
-    check('after a report the camera is off until Resume', paused, paused ? 'paused, Resume shown' : 'still running');
+    // ... really off: the page's camera AND the worker's copy of it (owner,
+    // 2026-10-11: "something got left on" - the worker's copy kept running)
+    const cam = await page.evaluate(() => window.__phCamLive());
+    check('after a report the camera is off until Resume', paused && !cam.page && !cam.worker, `${paused ? 'paused, Resume shown' : 'still running'}; live tracks: page ${cam.page}, worker ${cam.worker}`);
     await page.click('#resume').catch(() => {});
     await until(() => document.getElementById('resume').hidden, null, 15000);
     const want = ['mainThread', 'stats', 'settings', 'device', 'flow'], wantW = ['engine', 'catalog', 'session'];

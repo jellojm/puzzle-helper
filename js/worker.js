@@ -351,10 +351,9 @@ async function init(msg) {
     if (st.pframe && engine.box && st.pframe.cols === engine.box.cols && st.pframe.rows === engine.box.rows) {
       try { engine.pframe = PH.PuzzleFrame.fromJSON(st.pframe); } catch (_) { /* old format: mark again */ }
     }
-    if (st.settings) {
-      if (st.settings.minDE) engine.opts.minDE = st.settings.minDE;
-      engine.taught = st.settings.taught || [];
-    }
+    // (a sensitivity or taught table colours saved by an older version are
+    // not used: the background is chosen automatically - v0.27)
+    if (st.settings && (st.settings.taught && st.settings.taught.length || st.settings.minDE !== 8)) saveSettings().catch(() => {});
   } catch (e) {
     post({ type: 'error', message: 'Storage unavailable; the catalog will not be saved (' + e.message + ')' });
   }
@@ -455,6 +454,7 @@ const handlers = {
     camPump(msg.track); // runs on its own, outside the message chain
   },
   camTrackOff() { camStop(); },
+  camQuery() { post({ type: 'camState', live: !!(camTrackObj && camTrackObj.readyState === 'live') }); },
   camRot(msg) { camRot = msg.rot; },
   // test hook (e2e): a WebAssembly trap like the one in the owner's screenshots
   __trap() { throw new WebAssembly.RuntimeError('Out of bounds memory access (test)'); },

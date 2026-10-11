@@ -37,14 +37,6 @@
         <button id="frameShot" class="strong">Capture</button>
       </div>
     </div>
-    <div id="teachBar" hidden>
-      <span id="teachText">Tap bare table in a few spots — every different surface (cloth, wood, tile, glass, shadow).</span>
-      <div class="teach-actions">
-        <button id="teachUndo">Undo</button>
-        <button id="teachClear">Clear</button>
-        <button id="teachDone" class="strong">Done</button>
-      </div>
-    </div>
     <div id="toast" hidden></div>
     <div id="coach" hidden role="status">
       <span id="coachText"></span>
@@ -120,15 +112,6 @@
       </div>
       <p class="muted small">Once the border is assembled, mark it from high enough that the whole border is in view: then a selected piece's real spot inside it is shown on the camera view.</p>
       <label class="row"><input id="idleToggle" type="checkbox" checked> Pause the camera when the phone is left still</label>
-      <label class="row">Background sensitivity
-        <input id="sens" type="range" min="4" max="24" step="1" value="8">
-        <span id="sensVal">8</span>
-      </label>
-      <p class="muted small">Lower finds faint pieces; raise it if shadows or cloth texture show up as pieces.</p>
-      <div class="menu-actions">
-        <button id="teachBtn">Teach background (<span id="teachCount">auto</span>)</button>
-      </div>
-      <p class="muted small">If the table isn't one plain color, tap its surfaces once so pieces are separated from it reliably.</p>
       <label class="row">Scan detail
         <input id="detail" type="range" min="480" max="1120" step="80" value="640">
         <span id="detailVal">640</span>

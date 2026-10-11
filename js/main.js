@@ -5,7 +5,7 @@ import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 import { drawGroup } from './buildView.js';
 
-const APP_VERSION = '0.26.3';
+const APP_VERSION = '0.27.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -93,7 +93,7 @@ function onWorkerMessage(e) {
       $('modeHint').textContent = modeHint(S.mode);
       setBox(m.box);
       S.border = !!m.border; $('frameForget').hidden = !S.border; // a border marked in an earlier session
-      if (m.settings) { $('sens').value = m.settings.minDE; $('sensVal').textContent = m.settings.minDE; showTaught(m.settings.taught); }
+      if (m.settings) showTaught(m.settings.taught);
       W.post({ type: 'settings', settings: { procW: S.procW } }); // kept on the page, not in the worker's store
       updateStats(m.counts);
       break;
@@ -169,6 +169,7 @@ function onWorkerMessage(e) {
       if (S.debug) showDebug(m);
       break;
     }
+    case 'camState': if (S.camQuery) { S.camQuery(m.live); S.camQuery = null; } break;
     case 'shotDone': {
       S.snapping = false;
       const r = m.result || {};
@@ -397,6 +398,10 @@ function keepLastFrame() {
 function releaseCamera() {
   bump('cameraReleases');
   keepLastFrame();
+  // The worker's copy of the track too: stopping only the page's left the
+  // camera running behind Send report and the menu (owner, 2026-10-11:
+  // "something got left on") until the camera was opened again.
+  if (S.workerCam) { W.post({ type: 'camTrackOff' }); S.workerCam = false; }
   const st = video.srcObject;
   if (st) for (const t of st.getTracks()) t.stop();
   video.srcObject = null;
@@ -721,7 +726,7 @@ function loop() {
 }
 
 // ---------- UI ----------
-function endTeaching() { S.teaching = false; $('teachBar').hidden = true; }
+function endTeaching() { S.teaching = false; }
 function setMode(mode) {
   endTeaching();
   S.mode = mode;
@@ -912,29 +917,9 @@ function showAccuracy(st) {
   el.hidden = false;
   el.textContent = `Match answers: ${st.fits} fit, ${st.no} didn't — ${Math.round(st.accuracy * 100)}% of judged suggestions were right. Send report to share them.`;
 }
-function showTaught(n) {
-  S.taughtN = n || 0;
-  $('teachCount').textContent = n ? `${n} spot${n > 1 ? 's' : ''}` : 'auto';
-  if (S.teaching) $('teachText').textContent = n ? `${n} spot${n > 1 ? 's' : ''} learned. Keep tapping any surface that still shows outlines; tap Done when pieces stand out.` : 'Tap bare table in a few spots — every different surface (cloth, wood, tile, glass, shadow).';
-}
-// Average color of a small patch of the camera image under a screen point.
-function sampleVideo(clientX, clientY) {
-  if (!S.map || !S.last) return null;
-  const r = overlay.getBoundingClientRect();
-  const [fx, fy] = S.map.toVideo(clientX - r.left, clientY - r.top);
-  const vx = Math.round(fx), vy = Math.round(fy);
-  const c = S.sampler || (S.sampler = document.createElement('canvas'));
-  c.width = c.height = 9;
-  const g = c.getContext('2d', { willReadFrequently: true });
-  g.drawImage(video, vx - 4, vy - 4, 9, 9, 0, 0, 9, 9);
-  const d = g.getImageData(0, 0, 9, 9).data;
-  const med = (k) => { const v = []; for (let i = k; i < d.length; i += 4) v.push(d[i]); v.sort((a, b) => a - b); return v[v.length >> 1]; };
-  return [med(0), med(1), med(2)];
-}
-$('teachBtn').onclick = () => { S.teaching = true; $('menu').hidden = true; $('teachBar').hidden = false; showTaught(+($('teachCount').textContent.match(/\d+/) || [0])[0]); };
-$('teachDone').onclick = endTeaching;
-$('teachUndo').onclick = () => W.post({ type: 'undoBg' });
-$('teachClear').onclick = () => W.post({ type: 'clearBg' });
+// (the background is the app's own job: no Teach background or sensitivity
+// controls since v0.27 - owner, 2026-10-11 "remove manual modes")
+function showTaught(n) { S.taughtN = n || 0; }
 
 // Tap on the overlay: select the piece under the finger.
 let tapStart = null;
@@ -943,11 +928,6 @@ overlay.addEventListener('pointerup', (e) => {
   if (!tapStart || Math.hypot(e.clientX - tapStart[0], e.clientY - tapStart[1]) > 12) return;
   tapStart = null;
   if (!S.last || !S.map) return;
-  if (S.teaching) {
-    const rgb = sampleVideo(e.clientX, e.clientY);
-    if (rgb) W.post({ type: 'teachBg', rgb });
-    return;
-  }
   const r = overlay.getBoundingClientRect();
   const [fx, fy] = S.map.toFrame(e.clientX - r.left, e.clientY - r.top);
   // An open spot of the assembled part: the loose pieces that fit it.
@@ -1053,6 +1033,13 @@ async function readShot(why) {
   return posted;
 }
 window.__phShot = () => readShot('test'); // test hook
+// test hook: is any camera track still live - the page's or the worker's copy?
+window.__phCamLive = () => new Promise((res) => {
+  const page = !!(video.srcObject && video.srcObject.getTracks().some((t) => t.readyState === 'live'));
+  S.camQuery = (w) => res({ page, worker: w });
+  W.post({ type: 'camQuery' });
+  setTimeout(() => res({ page, worker: null }), 2000);
+});
 window.__phShots = () => ({ n: S.shots || 0, last: S.lastShotResult || null, busy: !!S.snapping }); // test hook
 
 // ---------- test mode ----------
@@ -1742,11 +1729,6 @@ $('frameShot').onclick = async () => {
   frameSetup.open(bmp, currentTilt());
 };
 $('frameForget').onclick = () => { $('menu').hidden = true; W.post({ type: 'frameClear' }); toast('Border mark forgotten.'); applyPower(); };
-$('sens').oninput = (e) => {
-  const v = parseInt(e.target.value, 10);
-  $('sensVal').textContent = v;
-  W.post({ type: 'settings', settings: { minDE: v } });
-};
 // Flashlight: iOS Safari 17.5+ accepts the torch constraint even when
 // getCapabilities() doesn't advertise it, so just try it.
 // The switch sits in the More menu, and the camera is off while the menu is
@@ -2002,7 +1984,7 @@ async function finishReport1(workerData, analyzed, boxImg) {
     mainThread: rafSummary(),
     stats: Object.assign({}, STATS, { drawMs: +STATS.drawMs.toFixed(2), drawMax: +STATS.drawMax.toFixed(1) }),
     settings: { procW: S.procW, outlines: S.outlines, follow: S.follow, idleOn: S.idleOn, tiltOn: S.tiltOn, fov: S.fov, mapHidden: S.mapHidden,
-      debug: S.debug, sens: +$('sens').value, taught: S.taughtN || 0 },
+      debug: S.debug, taught: S.taughtN || 0 },
     device: await deviceInfo(),
     ui: { filter: S.filter, mapHidden: S.mapHidden, pairs: S.pairs.length, pairsDone: !!S.pairsDone },
     orientation: (screen.orientation && screen.orientation.angle) || window.orientation || 0,
