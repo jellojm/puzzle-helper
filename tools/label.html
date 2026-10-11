@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piece Labels</title>
+<!--
+  Labelling page (idea 4): load a report's piece sheets (…-piecesN.jpg) and
+  …-pieces.json, mark each piece's outline (right / wrong / not a piece),
+  correct its edge codes, trace its true outline, and mark true joins and
+  pairs that don't join. "Save labels" writes …-labels.json: an answer key
+  for tests (outline accuracy, edge-code accuracy, join ranking).
+  Files are read in the browser only; nothing is uploaded.
+  Open: node tools/serve.js, then /tools/label.html (or open the file).
+-->
+<style>
+  :root { --bg:#14171b; --card:#1e2329; --line:#323a43; --fg:#e8ecef; --dim:#9aa5b1; --acc:#4fa3ff;
+          --tab:#ff9f43; --blank:#4fa3ff; --flat:#9aa5b1; --ok:#3ecf74; --bad:#ff5a5a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line);
+           padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  button, label.btn { background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 6px;
+           padding: 6px 10px; font: inherit; cursor: pointer; }
+  button.on { border-color: var(--acc); background: #1d3550; }
+  button:disabled { opacity: .45; cursor: default; }
+  .seg { display: inline-flex; } .seg button { border-radius: 0; } .seg button:first-child { border-radius: 6px 0 0 6px; }
+  .seg button:last-child { border-radius: 0 6px 6px 0; }
+  #stats { color: var(--dim); margin-left: auto; }
+  main { padding: 12px 16px 80px; }
+  #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 40px 16px; text-align: center; color: var(--dim); }
+  #drop.over { border-color: var(--acc); color: var(--fg); }
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  .card.done { border-color: #2d6b45; }
+  .card h3 { margin: 0 0 6px; font-size: 14px; display: flex; gap: 6px; align-items: baseline; }
+  .card h3 small { color: var(--dim); font-weight: 400; }
+  .card canvas { width: 100%; aspect-ratio: 1; display: block; background: #0d0f12; border-radius: 4px; cursor: crosshair; }
+  .row { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+  .row button { padding: 3px 7px; font-size: 12px; }
+  .ok.on { border-color: var(--ok); background: #183a26; } .bad.on { border-color: var(--bad); background: #3d1c1c; }
+  #side { margin-top: 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  #side section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  #side h2 { font-size: 14px; margin: 0 0 8px; }
+  #side li { margin: 2px 0; } #side li button { padding: 0 6px; margin-left: 6px; font-size: 12px; }
+  .hint { color: var(--dim); font-size: 13px; }
+  #zoom { position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 10; display: none; flex-direction: column;
+          align-items: center; justify-content: center; gap: 8px; padding: 16px; }
+  #zoom.open { display: flex; }
+  #zoom canvas { max-width: 100%; max-height: calc(100vh - 110px); background: #0d0f12; cursor: crosshair; }
+  @media (max-width: 600px) { #grid { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Piece Labels</h1>
+  <label class="btn">Load files…<input id="files" type="file" multiple accept=".json,.jpg,.jpeg" hidden></label>
+  <span class="seg" title="What a click on an edge does">
+    <button id="mType" class="on">Edge type</button><button id="mJoin">Join</button><button id="mNot">Not a join</button>
+  </span>
+  <button id="showOutline" class="on" title="Draw the app's outline">App outline</button>
+  <button id="save" disabled>Save labels</button>
+  <span id="stats"></span>
+</header>
+<main>
+  <div id="drop">Drop a report's <b>…-pieces.json</b> and <b>…-piecesN.jpg</b> sheets here (and an earlier <b>…-labels.json</b> to continue).<br>
+    <span class="hint">Click an edge to cycle its type T → B → F. In Join mode click an edge of one piece, then the edge of the piece it joins.</span></div>
+  <div id="grid"></div>
+  <div id="side" hidden>
+    <section><h2>True joins <span class="hint" id="nJ"></span></h2><ul id="joins"></ul>
+      <button id="takeApp">Add the app's confirmed joins (Fits)</button></section>
+    <section><h2>Not joins <span class="hint" id="nN"></span></h2><ul id="nots"></ul>
+      <button id="takeRej">Add the app's rejected pairs (No)</button></section>
+    <section><h2>How to label</h2><div class="hint">
+      <b>Outline</b>: right = the app's outline follows the piece; wrong = it cuts in or spills out; not a piece = a clump, half piece or background.<br>
+      <b>Edge codes</b>: click an edge to cycle T (tab) → B (blank) → F (flat); then "Codes right". A red ring marks a code you changed.<br>
+      <b>Trace</b> and <b>True corners</b> (optional, in the big view): the true outline, and the 4 real corners clockwise from the one nearest the app's corner 0; saved in the read's pixels, like the app's outline. Mark edge codes by the app's edge numbers (shown small).<br>
+      Labels are kept in this browser per report until you load another; "Save labels" writes the answer key file.</div></section>
+  </div>
+</main>
+<div id="zoom">
+  <div class="row"><b id="zTitle"></b>
+    <button id="zTrace">Trace</button><button id="zCorners">True corners</button><button id="zUndo">Undo point</button><button id="zClear">Clear</button>
+    <button id="zClose">Close (Esc)</button></div>
+  <canvas id="zc"></canvas>
+  <div class="hint" id="zHint">Click an edge as on the card. Trace: click points around the true outline. True corners: click the 4 real corners, starting nearest the app's corner 0 (the start of edge 0) and going clockwise.</div>
+</div>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const COL = { T: getComputedStyle(document.documentElement).getPropertyValue('--tab').trim(), B: '#4fa3ff', F: '#9aa5b1' };
+const NEXT = { T: 'B', B: 'F', F: 'T' };
+let R = null;           // the report: { stamp, geo, sheets: Map(n -> ImageBitmap) }
+let L = null;           // labels
+let mode = 'type', pick = null, showOutline = true, zoomId = null, tracing = false, cornering = false;
+const cards = new Map(); // id -> { canvas, el }
+
+// ---------- files ----------
+$('files').onchange = (e) => loadFiles([...e.target.files]);
+const drop = $('drop');
+['dragover', 'dragenter'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+document.addEventListener('drop', (e) => loadFiles([...e.dataTransfer.files]));
+
+async function loadFiles(files) {
+  const geoF = files.find((f) => /-pieces\.json$/i.test(f.name));
+  const labF = files.find((f) => /labels.*\.json$/i.test(f.name));
+  const sheetF = files.filter((f) => /-pieces(\d+)\.jpe?g$/i.test(f.name));
+  if (geoF) {
+    const geo = JSON.parse(await geoF.text());
+    const stamp = geoF.name.replace(/^puzzle-report-/, '').replace(/-pieces\.json$/i, '');
+    R = { stamp, geo, sheets: new Map(), byId: new Map(geo.pieces.map((p) => [p.id, p])) };
+    L = loadStored(stamp) || blankLabels(stamp);
+  }
+  if (!R) { alert('Load the report\'s …-pieces.json too.'); return; }
+  for (const f of sheetF) R.sheets.set(+f.name.match(/-pieces(\d+)\.jpe?g$/i)[1], await createImageBitmap(f));
+  if (labF) {
+    const got = JSON.parse(await labF.text());
+    if (got.report && got.report !== R.stamp && !confirm(`These labels are for ${got.report}, not ${R.stamp}. Use them anyway?`)) return;
+    L = Object.assign(blankLabels(R.stamp), got, { report: R.stamp });
+  }
+  drop.hidden = true; $('side').hidden = false; $('save').disabled = false;
+  build();
+}
+function blankLabels(stamp) { return { kind: 'puzzle-helper-labels', version: 1, report: stamp, pieces: {}, joins: [], notJoins: [] }; }
+function loadStored(stamp) { try { return JSON.parse(localStorage.getItem('ph-labels:' + stamp)); } catch (_) { return null; } }
+function store() { try { localStorage.setItem('ph-labels:' + L.report, JSON.stringify(L)); } catch (_) {} stats(); }
+function lab(id) {
+  const p = R.byId.get(id);
+  return L.pieces[id] || (L.pieces[id] = { outline: null, code: p.code || '????', appCode: p.code || null, codeOk: false, trace: null, corners: null, note: '' });
+}
+
+// ---------- geometry: read px -> sheet px -> canvas px ----------
+function readPts(p) { // corners and outline in the read's pixels, with the transform of the picture shown
+  const im = p.image, d = p.detail;
+  const corners = (im && im.source === 'detail' && d && d.corners) ? d.corners : p.corners;
+  const ol = d && d.outline && im && im.source === 'detail' ? d.outline : null;
+  return { corners, outline: ol };
+}
+function view(p, size) { // canvas transform for a piece: canvas = (read - o) * f + off
+  const im = p.image, pad = 0.06 * size;
+  const f = Math.min((size - 2 * pad) / im.w, (size - 2 * pad) / im.h);
+  const toC = ([X, Y]) => [pad + (size - 2 * pad - im.w * f) / 2 + (X - im.ox) * im.s * im.k * f,
+                           pad + (size - 2 * pad - im.h * f) / 2 + (Y - im.oy) * im.s * im.k * f];
+  const fromC = ([x, y]) => [(x - pad - (size - 2 * pad - im.w * f) / 2) / f / (im.s * im.k) + im.ox,
+                             (y - pad - (size - 2 * pad - im.h * f) / 2) / f / (im.s * im.k) + im.oy];
+  return { f, pad, toC, fromC, ox: pad + (size - 2 * pad - im.w * f) / 2, oy: pad + (size - 2 * pad - im.h * f) / 2 };
+}
+function edgeAt(p, V, x, y) { // nearest edge to a canvas point (corner k -> k+1)
+  const C = readPts(p).corners.map(V.toC); let best = -1, bd = Infinity;
+  for (let k = 0; k < 4; k++) {
+    const [ax, ay] = C[k], [bx, by] = C[(k + 1) % 4], dx = bx - ax, dy = by - ay;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1)));
+    const d = Math.hypot(ax + t * dx - x, ay + t * dy - y);
+    if (d < bd) { bd = d; best = k; }
+  }
+  return best;
+}
+
+// ---------- drawing ----------
+function draw(canvas, p, size) {
+  canvas.width = size; canvas.height = size;
+  const g = canvas.getContext('2d'), im = p.image, V = view(p, size), lb = lab(p.id);
+  g.fillStyle = '#0d0f12'; g.fillRect(0, 0, size, size);
+  const sh = im && R.sheets.get(im.sheet);
+  if (sh) g.drawImage(sh, im.x, im.y, im.w, im.h, V.ox, V.oy, im.w * V.f, im.h * V.f);
+  else { g.fillStyle = '#9aa5b1'; g.font = '13px system-ui'; g.fillText(im ? `load …-pieces${im.sheet}.jpg` : 'no picture', 10, 20); }
+  if (!im) return V;
+  const { corners, outline } = readPts(p);
+  if (showOutline && outline) {
+    g.beginPath();
+    for (let i = 0; i < outline.length; i += 2) { const [x, y] = V.toC([outline[i], outline[i + 1]]); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+    g.closePath(); g.lineWidth = 1.5; g.strokeStyle = 'rgba(255,255,255,0.75)'; g.stroke();
+  }
+  if (lb.trace && lb.trace.length >= 4) {
+    g.beginPath();
+    for (let i = 0; i < lb.trace.length; i += 2) { const [x, y] = V.toC([lb.trace[i], lb.trace[i + 1]]); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+    if (!(tracing && zoomId === p.id)) g.closePath();
+    g.lineWidth = 2; g.strokeStyle = '#3ecf74'; g.stroke();
+  }
+  if (lb.corners) lb.corners.forEach((q, i) => {
+    const [x, y] = V.toC(q); g.beginPath(); g.arc(x, y, 5, 0, 2 * Math.PI); g.fillStyle = '#3ecf74'; g.fill();
+    g.fillStyle = '#fff'; g.font = '600 12px system-ui'; g.textAlign = 'left'; g.textBaseline = 'bottom'; g.fillText(i, x + 6, y - 2);
+  });
+  const C = corners.map(V.toC), mx = C.reduce((s, c) => s + c[0], 0) / 4, my = C.reduce((s, c) => s + c[1], 0) / 4;
+  const fs = Math.max(12, size / 20);
+  for (let k = 0; k < 4; k++) {
+    const [ax, ay] = C[k], [bx, by] = C[(k + 1) % 4], t = lb.code[k];
+    const sel = pick && pick.id === p.id && pick.k === k;
+    g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by);
+    g.lineWidth = sel ? 5 : 2.5; g.strokeStyle = sel ? '#fff' : (COL[t] || '#fff'); g.globalAlpha = 0.85; g.stroke(); g.globalAlpha = 1;
+    // label just outside the edge's midpoint
+    let lx = (ax + bx) / 2, ly = (ay + by) / 2; const d = Math.hypot(lx - mx, ly - my) || 1;
+    lx += (lx - mx) / d * fs * 0.9; ly += (ly - my) / d * fs * 0.9;
+    g.beginPath(); g.arc(lx, ly, fs * 0.72, 0, 2 * Math.PI); g.fillStyle = 'rgba(0,0,0,0.75)'; g.fill();
+    if (lb.appCode && t !== lb.appCode[k]) { g.lineWidth = 2; g.strokeStyle = '#ff5a5a'; g.stroke(); }
+    g.fillStyle = COL[t] || '#fff'; g.font = `700 ${fs}px system-ui`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(`${t}`, lx, ly);
+    g.fillStyle = '#9aa5b1'; g.font = `${fs * 0.55}px system-ui`; g.fillText(k, lx + fs * 0.75, ly - fs * 0.6);
+  }
+  // joins drawn as small marks on the joined edges
+  for (const [list, col] of [[L.joins, '#3ecf74'], [L.notJoins, '#ff5a5a']]) for (const j of list) {
+    for (const [id, k, oid, ok] of [[j.a, j.ka, j.b, j.kb], [j.b, j.kb, j.a, j.ka]]) {
+      if (id !== p.id) continue;
+      const [ax, ay] = C[k], [bx, by] = C[(k + 1) % 4];
+      g.fillStyle = col; g.font = `600 ${fs * 0.6}px system-ui`; g.textAlign = 'center';
+      g.fillText(`#${oid}·${ok}`, (ax + bx) / 2 + (mx - (ax + bx) / 2) * 0.25, (ay + by) / 2 + (my - (ay + by) / 2) * 0.25);
+    }
+  }
+  return V;
+}
+function redraw(id) {
+  const c = cards.get(id); if (!c) return;
+  const p = R.byId.get(id), lb = lab(id);
+  draw(c.canvas, p, 400);
+  c.el.classList.toggle('done', !!lb.outline && lb.codeOk);
+  c.el.querySelectorAll('[data-o]').forEach((b) => b.classList.toggle('on', lb.outline === b.dataset.o));
+  c.el.querySelector('[data-c]').classList.toggle('on', lb.codeOk);
+  if (zoomId === id) drawZoom();
+}
+
+// ---------- cards ----------
+function build() {
+  const grid = $('grid'); grid.innerHTML = ''; cards.clear();
+  for (const p of R.geo.pieces) {
+    const lb = lab(p.id), el = document.createElement('div');
+    el.className = 'card';
+    el.innerHTML = `<h3>#${p.id} <small>app ${p.code || '?'} · q ${p.quality ?? '?'} · ${p.views} view${p.views === 1 ? '' : 's'} · ${p.state}</small></h3>
+      <canvas></canvas>
+      <div class="row"><button class="ok" data-o="ok">Outline right</button><button class="bad" data-o="wrong">Wrong</button><button class="bad" data-o="notPiece">Not a piece</button></div>
+      <div class="row"><button class="ok" data-c>Codes right</button><button data-z>Big view</button><input data-n placeholder="note" style="flex:1;min-width:60px;background:#0d0f12;color:inherit;border:1px solid #323a43;border-radius:6px;padding:3px 6px"></div>`;
+    const canvas = el.querySelector('canvas');
+    canvas.onclick = (e) => clickEdge(p, canvas, e, 400);
+    el.querySelectorAll('[data-o]').forEach((b) => (b.onclick = () => { lb.outline = lb.outline === b.dataset.o ? null : b.dataset.o; store(); redraw(p.id); }));
+    el.querySelector('[data-c]').onclick = () => { lb.codeOk = !lb.codeOk; store(); redraw(p.id); };
+    el.querySelector('[data-z]').onclick = () => openZoom(p.id);
+    const note = el.querySelector('[data-n]'); note.value = lb.note || ''; note.oninput = () => { lb.note = note.value; store(); };
+    grid.appendChild(el); cards.set(p.id, { canvas, el });
+    redraw(p.id);
+  }
+  lists(); stats();
+}
+function clickEdge(p, canvas, e, size) {
+  if (!p.image) return;
+  const r = canvas.getBoundingClientRect(), x = (e.clientX - r.left) * size / r.width, y = (e.clientY - r.top) * size / r.height;
+  const V = view(p, size);
+  if (cornering && zoomId === p.id) { const lb = lab(p.id), q = V.fromC([x, y]); lb.corners = (lb.corners && lb.corners.length < 4 ? lb.corners : []).concat([[+q[0].toFixed(1), +q[1].toFixed(1)]]); store(); redraw(p.id); return; }
+  if (tracing && zoomId === p.id) { const lb = lab(p.id), q = V.fromC([x, y]); (lb.trace = lb.trace || []).push(+q[0].toFixed(1), +q[1].toFixed(1)); store(); redraw(p.id); return; }
+  const k = edgeAt(p, V, x, y), lb = lab(p.id);
+  if (mode === 'type') {
+    const c = lb.code.split(''); c[k] = NEXT[c[k]] || 'T'; lb.code = c.join(''); store(); redraw(p.id); return;
+  }
+  if (!pick) { pick = { id: p.id, k }; redraw(p.id); return; }
+  const a = pick; pick = null; redraw(a.id);
+  if (a.id === p.id) { redraw(p.id); return; }
+  const list = mode === 'join' ? L.joins : L.notJoins, same = (j) => (j.a === a.id && j.b === p.id) || (j.a === p.id && j.b === a.id);
+  const i = list.findIndex((j) => same(j) && ((j.a === a.id && j.ka === a.k && j.kb === k) || (j.b === a.id && j.kb === a.k && j.ka === k)));
+  if (i >= 0) list.splice(i, 1); else list.push({ a: a.id, ka: a.k, b: p.id, kb: k });
+  store(); lists(); redraw(a.id); redraw(p.id);
+}
+function lists() {
+  for (const [ul, list, n] of [[$('joins'), L.joins, $('nJ')], [$('nots'), L.notJoins, $('nN')]]) {
+    ul.innerHTML = ''; n.textContent = `(${list.length})`;
+    list.forEach((j, i) => {
+      const li = document.createElement('li');
+      li.textContent = `#${j.a} edge ${j.ka} ↔ #${j.b} edge ${j.kb}${j.from ? ' (' + j.from + ')' : ''}`;
+      const b = document.createElement('button'); b.textContent = '×';
+      b.onclick = () => { list.splice(i, 1); store(); lists(); redraw(j.a); redraw(j.b); };
+      li.appendChild(b); ul.appendChild(li);
+    });
+  }
+}
+function takeApp(src, list, from) {
+  let n = 0;
+  for (const j of src || []) {
+    if (!R.byId.has(j.a) || !R.byId.has(j.b)) continue;
+    if (list.some((x) => (x.a === j.a && x.ka === j.ka && x.b === j.b && x.kb === j.kb) || (x.a === j.b && x.ka === j.kb && x.b === j.a && x.kb === j.ka))) continue;
+    list.push({ a: j.a, ka: j.ka, b: j.b, kb: j.kb, from }); n++;
+  }
+  store(); lists(); R.geo.pieces.forEach((p) => redraw(p.id));
+  if (!n) alert('Nothing new to add.');
+}
+$('takeApp').onclick = () => takeApp(R.geo.joined, L.joins, 'app Fits');
+$('takeRej').onclick = () => takeApp(R.geo.rejected, L.notJoins, 'app No');
+
+// ---------- modes, stats, save ----------
+const modeBtns = { type: $('mType'), join: $('mJoin'), not: $('mNot') };
+for (const [m, b] of Object.entries(modeBtns)) b.onclick = () => { mode = m; const was = pick; pick = null; if (was) redraw(was.id); for (const [k, x] of Object.entries(modeBtns)) x.classList.toggle('on', k === m); };
+$('showOutline').onclick = () => { showOutline = !showOutline; $('showOutline').classList.toggle('on', showOutline); R && R.geo.pieces.forEach((p) => redraw(p.id)); };
+function stats() {
+  if (!R) return;
+  const P = R.geo.pieces.map((p) => lab(p.id));
+  const right = P.filter((l) => l.outline === 'ok').length, wrong = P.filter((l) => l.outline === 'wrong').length, notP = P.filter((l) => l.outline === 'notPiece').length;
+  const coded = P.filter((l) => l.codeOk), edgesWrong = coded.reduce((s, l) => s + [...l.code].filter((t, k) => l.appCode && t !== l.appCode[k]).length, 0);
+  $('stats').textContent = `${R.stamp} · ${P.length} pieces · outline ${right} right, ${wrong} wrong, ${notP} not pieces · codes checked ${coded.length} (${edgesWrong} edges corrected) · ${L.joins.length} joins`;
+}
+$('save').onclick = () => {
+  const out = Object.assign({}, L, { savedAt: new Date().toISOString(),
+    note: 'pieces[id]: outline ok|wrong|notPiece|null; code = true edge types clockwise from corner k to k+1 (stored-shape order, as pieces.json), appCode = the app\'s; codeOk = checked by eye; trace = true outline [x,y,...] and corners = the 4 true corners [[x,y]] clockwise from the one nearest the app\'s corner 0, in the read\'s pixels (as detail.outline). joins/notJoins: {a,ka,b,kb} in the same edge numbering.' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' }));
+  a.download = `puzzle-report-${L.report}-labels.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
+
+// ---------- big view ----------
+function openZoom(id) { zoomId = id; tracing = cornering = false; $('zTrace').classList.remove('on'); $('zCorners').classList.remove('on'); $('zoom').classList.add('open'); drawZoom(); }
+function drawZoom() {
+  const p = R.byId.get(zoomId), size = Math.min(900, innerWidth - 32, innerHeight - 110);
+  $('zTitle').textContent = `#${p.id}  app ${p.code}  → ${lab(p.id).code}`;
+  draw($('zc'), p, Math.max(200, size));
+}
+$('zc').onclick = (e) => { const c = $('zc'); clickEdge(R.byId.get(zoomId), c, e, c.width); };
+$('zTrace').onclick = () => { tracing = !tracing; cornering = false; $('zTrace').classList.toggle('on', tracing); $('zCorners').classList.remove('on'); redraw(zoomId); };
+$('zCorners').onclick = () => { cornering = !cornering; tracing = false; $('zCorners').classList.toggle('on', cornering); $('zTrace').classList.remove('on'); redraw(zoomId); };
+$('zUndo').onclick = () => { const lb = lab(zoomId); if (cornering && lb.corners) { lb.corners.pop(); if (!lb.corners.length) lb.corners = null; store(); redraw(zoomId); return; } if (lb.trace) { lb.trace.splice(-2); if (!lb.trace.length) lb.trace = null; store(); redraw(zoomId); } };
+$('zClear').onclick = () => { if (cornering) lab(zoomId).corners = null; else lab(zoomId).trace = null; store(); redraw(zoomId); };
+const closeZoom = () => { const id = zoomId; tracing = cornering = false; zoomId = null; $('zoom').classList.remove('open'); if (id) redraw(id); };
+$('zClose').onclick = closeZoom;
+addEventListener('keydown', (e) => { if (e.key === 'Escape') closeZoom(); });
+addEventListener('resize', () => zoomId && drawZoom());
+</script>
+</body>
+</html>

@@ -602,3 +602,13 @@ closed, enclosed regions filled) and keeps whichever cut is more jigsaw-like
 pale print on 3 of 4 pieces; outline cut traced all 4. Labelled joins: partner
 first 19 -> 21 of 28; known-weak lamp photos slightly worse (tab/blank 26 -> 22).
 real-50 (3593) unchanged. Off switch: PH.READ_EDGE_ALT.
+
+## Labelling page (idea 4)
+tools/label.html: load a report's -pieces.json and -piecesN.jpg sheets (in the
+browser only; nothing uploaded). Per piece: outline right / wrong / not a piece,
+click edges to set the true T/B/F code, "Codes right"; big view to trace the true
+outline and click the 4 true corners; Join / Not-a-join modes click an edge on
+each piece. Can take the app's Fits / No answers. Saves -labels.json (kept in
+the browser per report meanwhile). tools/label-score.js scores a pieces.json
+(or two builds' pieces.json) against the labels: edge codes right, corner
+error in piece sides, outline IoU vs trace.
