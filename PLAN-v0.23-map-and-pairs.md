@@ -496,3 +496,29 @@ pocket/loop evidence (v0.21.3) once the owner joins pieces.
   over all windows (`test/fov-measure.js`, simulated runs: median error
   2.7 -> 1.3 deg, worst 7.8 -> 2.8). The simulation does not reproduce
   98.9 deg, so the run's raw samples now go into the report (fovMeasure.series).
+
+## 0.23.10 — phone time: glass mode and the background check (2026-10-10)
+
+Owner: "what is taking the processing time on the phone?" Glass-table
+reports: ~150-200 ms a frame; glass mode's outline search 20-28%, the
+camera fetch 15-30%, assembled-part search ~15%, splitting 12%, background
+re-checks 6-12% with single frames of 0.7-3.6 s.
+- **The stalls** were single background-check candidates, not all-at-once
+  checks: the two outline-model candidates each fetched the 2x image and
+  traced it - ~5x a colour candidate (PC 160-196 vs 40 ms; ~1-2 s on the
+  phone). Now the 2x image is fetched once per frame and shared (PC 69-85
+  ms), and an outline model that lost badly (under half the best colour
+  model's score; the owner's white counter: 1-2 vs 27 good) sits out the
+  next 3 re-checks (`PH.EDGE_BACKOFF`).
+- **Glass mode active**: one camera fetch at the 2x size, the processing
+  image shrunk from it in memory (`PH.EDGE_SHARE_FETCH`, `PH.shrinkProc`);
+  detections unchanged (IMG_3609 forced: 5.84 vs 5.85 good a frame; tilted
+  run CPU -6% in node, more on the phone where a fetch is a canvas read).
+- The all-at-once background choice runs only on the very first frame
+  (`bgFirstDone`; it never re-ran on the test videos - a guard).
+- Measured, not useful: reusing the outline mask on unchanged views
+  (`PH.EDGE_REUSE_MAX` 2, kept: it fired 3 of 154 frames on IMG_3609 - the
+  view changes more than its 2.5-level limit between analysed frames);
+  a smaller outline image (1.5x: good detections 5.87 -> 4.92).
+- Checks: IMG_3609 auto background 10.10 -> 10.25 good a frame; IMG_3593
+  and IMG_3605 identical (phone pace, ab.js); npm test, e2e pass.

@@ -294,12 +294,17 @@
   // Mixed-table classification: 0 where the pixel's colour bin is background, else 255.
   // PH.edgeForeground for this view at about twice the processing size,
   // kept for the last view (the background re-check scores it repeatedly).
-  let edgeCache = null;
-  function edgeMask(source, w, h, lab, edgeT) {
+  let edgeCache = null, hpCache = null;
+  function edgeMask(source, w, h, lab, edgeT, reuse) {
     const T = edgeT || PH.EDGE_T[0], key = [w, h, T, PH.EDGE_DIL, PH.EDGE_DOWN_T, PH.EDGE_TRIM, PH.EDGE_POCKET, PH.EDGE_POCKET_DE].join(':');
-    if (edgeCache && edgeCache.source === source && edgeCache.key === key) return edgeCache.mask;
-    const long = Math.max(source.w, source.h), want = Math.max(w, h) * PH.EDGE_SCALE;
-    const hp = source.getProc(Math.min(long, want));
+    if (edgeCache && edgeCache.key === key && (edgeCache.source === source || reuse)) return edgeCache.mask;
+    const long = Math.max(source.w, source.h), want = Math.min(long, Math.max(w, h) * PH.EDGE_SCALE);
+    // the larger view once per frame: both outline levels (the background
+    // check scores two) share it - each fetching it made a candidate ~5x a
+    // colour one, ~1-2 s on the phone (the stalls in the 2026-10-08/09 reports)
+    let hp;
+    if (hpCache && hpCache.source === source && hpCache.want === want) hp = hpCache.hp;
+    else { hp = source.getProc(want); hpCache = { source, want, hp }; }
     // (another view's source: wrong shape -> no outline model this time)
     if (Math.abs(hp.w / hp.h - w / h) > 0.02) return null;
     const mask = PH.edgeForeground(hp, w, h, lab, T);
@@ -307,6 +312,39 @@
     return mask;
   }
   PH.EDGE_SCALE = 2;
+  PH.EDGE_SHARE_FETCH = true;
+  PH.EDGE_BACKOFF = 3; // background re-checks the outline model sits out after losing badly
+  /** A processing image (getProc result) shrunk to maxW on its long side, in
+   *  memory (area averaging; alpha too, so out-of-image corners stay marked). */
+  PH.shrinkProc = function (img, maxW) {
+    const cv = PH.cv, k = Math.min(1, maxW / Math.max(img.w, img.h));
+    if (k >= 1) return img;
+    const w = Math.round(img.w * k), h = Math.round(img.h * k);
+    const a = new cv.Mat(img.h, img.w, cv.CV_8UC4), b = new cv.Mat();
+    a.data.set(img.data);
+    cv.resize(a, b, new cv.Size(w, h), 0, 0, cv.INTER_AREA);
+    const data = new Uint8ClampedArray(b.data);
+    if (img.invalid) for (let i = 3; i < data.length; i += 4) data[i] = data[i] < 255 ? 0 : 255; // (a pixel touching the outside is outside)
+    a.delete(); b.delete();
+    return { w, h, data, scale: img.scale * k, invalid: img.invalid };
+  };
+  // Reusing the outline mask on a steady, unchanged view (Engine.processFrame)
+  PH.EDGE_REUSE_MAX = 2; // frames in a row
+  PH.EDGE_REUSE_DIFF = 2.5; // mean change of a 16x12 grey thumbnail (0-255)
+  /** A 16x12 grey thumbnail of an RGBA image (block means of a sparse sample). */
+  PH.tinySig = function (img) {
+    const GX = 16, GY = 12, out = new Float32Array(GX * GY), n = new Uint16Array(GX * GY), d = img.data, w = img.w, h = img.h;
+    for (let y = 0; y < h; y += 4) {
+      const gy = Math.min(GY - 1, ((y * GY) / h) | 0);
+      for (let x = 0; x < w; x += 4) {
+        const i = 4 * (y * w + x), g = (gy * GX) + Math.min(GX - 1, ((x * GX) / w) | 0);
+        out[g] += d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11; n[g]++;
+      }
+    }
+    for (let g = 0; g < out.length; g++) out[g] /= Math.max(1, n[g]);
+    return out;
+  };
+  PH.sigDiff = function (a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; };
 
   /**
    * Outline masks voted over the last few live views. A handheld sweep
@@ -657,7 +695,7 @@
     cv.threshold(dist, mask, thresh, 255, cv.THRESH_BINARY);
     // See-through table: the floor is told apart by focus, not colour
     // (PH.edgeForeground). `opts.edgeSource()` = this view's image source.
-    let edgeFg = model && model.kind === 'edges' && opts.edgeSource ? edgeMask(opts.edgeSource(), w, h, lab, model.edgeT) : null;
+    let edgeFg = model && model.kind === 'edges' && opts.edgeSource ? edgeMask(opts.edgeSource(), w, h, lab, model.edgeT, opts.edgeReuse) : null;
     // live frames: the last few views vote (PH.EdgeVoter)
     if (edgeFg && opts.edgeVote) edgeFg = opts.edgeVote.vote(edgeFg, img, opts.edgeVotePeek);
     if (edgeFg) mask.data.set(edgeFg);

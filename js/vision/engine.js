@@ -706,10 +706,25 @@
       const t0 = now();
       const st = this.straighten(source, info);
       source = st.source;
-      this.curSource = source; // (the 'edges' background model reads it larger)
       const tp = now();
       PH.procT = {};
-      const proc = source.getProc(this.opts.procW);
+      // Outline model: one camera fetch at its larger size, the processing
+      // image shrunk from it in memory (~2 ms) - instead of a second fetch
+      // (and tilt straightening) of the same view every frame; on the phone
+      // the fetch is ~15-30% of a frame. The larger image is handed to the
+      // outline search from here (PH.EDGE_SHARE_FETCH).
+      let proc;
+      if (PH.EDGE_SHARE_FETCH && this.bgModel && this.bgModel.kind === 'edges') {
+        const big = source.getProc(Math.round(this.opts.procW * PH.EDGE_SCALE));
+        proc = PH.shrinkProc(big, this.opts.procW);
+        const base = source, bigLong = Math.max(big.w, big.h);
+        source = Object.create(base);
+        source.getProc = (maxW) => {
+          const k = Math.min(1, maxW / Math.max(base.w, base.h));
+          return Math.abs(Math.round(Math.max(base.w, base.h) * k) - bigLong) <= 1 ? big : base.getProc(maxW);
+        };
+      } else proc = source.getProc(this.opts.procW);
+      this.curSource = source; // (the 'edges' background model reads it larger)
       // Per-stage segmentation timings ride along in out.timings (as flat
       // seg_* numbers) so a phone report shows where the time actually goes.
       // seg_proc = straightening + the processing-size image; seg_bgChoice =
@@ -732,14 +747,26 @@
         const tb = now();
         if (this.bgEval || due) {
           if (!this.bgEval) { this.bgModelAt = this.fNo; this.poorStreak = 0; }
-          // First frame with no model at all: decide right away; later
-          // re-checks run one candidate per frame in the background.
-          if (!this.bgModel && !this.bgEval) { const b = this.chooseBackground(proc); this.bgModel = b ? b.c : null; }
+          // The very first frame: decide right away; every later re-check runs
+          // one candidate per frame in the background - also after one that
+          // found no usable model (that ran all candidates at once again, a
+          // 1-1.8 s frame on the phone; reports 2026-10-08/09).
+          if (!this.bgModel && !this.bgEval && !this.bgFirstDone) { const b = this.chooseBackground(proc); this.bgModel = b ? b.c : null; }
           else this.stepBgChoice(proc);
+          this.bgFirstDone = true;
           segT.bgChoice = now() - tb;
         }
       }
-      const seg = PH.segment(proc, this.liveSegOpts(info, { timings: segT }));
+      // Outline model: a steady view that has hardly changed reuses the last
+      // outline mask (its search is ~20-28% of a frame on the phone on the
+      // glass table), at most PH.EDGE_REUSE_MAX frames in a row.
+      let edgeReuse = false;
+      if (this.bgModel && this.bgModel.kind === 'edges' && PH.EDGE_REUSE_MAX > 0) {
+        const sig = PH.tinySig(proc), R = this.edgeRef;
+        edgeReuse = info.still !== false && !!R && R.w === proc.w && R.h === proc.h && R.age < PH.EDGE_REUSE_MAX && PH.sigDiff(sig, R.sig) < PH.EDGE_REUSE_DIFF;
+        if (edgeReuse) R.age++; else this.edgeRef = { sig, w: proc.w, h: proc.h, age: 0 };
+      } else this.edgeRef = null;
+      const seg = PH.segment(proc, this.liveSegOpts(info, { timings: segT, edgeReuse }));
       this.bg = seg.bg; this.thresh = seg.thresh;
       // the board as this frame shows it (seg.bg is the chosen model's colour,
       // which stays put when the light changes)
@@ -1173,7 +1200,9 @@
       // colour covers ~10-13% of the view; a board 30%+): on a plain board
       // the tuned colour path stays, even where outlines score a little more.
       const plainish = modes.length && modes[0].frac >= 0.3;
-      if (this.curSource && this.opts.edgeBg !== false && !plainish) for (const edgeT of PH.EDGE_T) cands.push({ kind: 'edges', edgeT });
+      // (and not while backing off after it lost badly: Engine.pickBg)
+      if (this.curSource && this.opts.edgeBg !== false && !plainish && !(this.edgeBackoff > 0)) for (const edgeT of PH.EDGE_T) cands.push({ kind: 'edges', edgeT });
+      else if (this.edgeBackoff > 0) this.edgeBackoff--;
       return cands;
     }
     // How many piece-shaped blobs does this background model produce here?
@@ -1248,6 +1277,11 @@
         if (!best || t.score > best.score) best = t;
         if (t.c.kind !== 'edges' && (!bestColour || t.score > bestColour.score)) bestColour = t;
       }
+      // The outline model is the costliest to score (a larger image): when it
+      // lost badly - under half the best colour model's pieces (owner's white
+      // counter: 1-2 vs 27) - it sits out the next PH.EDGE_BACKOFF re-checks.
+      const bestEdge = tried.filter((t) => t.c.kind === 'edges').reduce((m, t) => Math.max(m, t.score), -1);
+      if (bestEdge >= 0 && bestColour && bestEdge < bestColour.score * 0.5) this.edgeBackoff = PH.EDGE_BACKOFF;
       // The outline model (see-through tables) costs a second, larger image
       // per frame on the phone, and the colour models are the tuned path on a
       // plain board (where outlines win by only ~10%): it must clearly win.
