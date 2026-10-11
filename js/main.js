@@ -5,7 +5,7 @@ import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 import { drawGroup } from './buildView.js';
 
-const APP_VERSION = '0.25.1';
+const APP_VERSION = '0.25.2';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -216,7 +216,7 @@ function onWorkerMessage(e) {
       showMatches();
       break;
     case 'feedbackStats': showAccuracy(m.stats); break;
-    case 'report': finishReport(m.data, m.analyzed, m.boxImg); break;
+    case 'report': S.reportPieces = { sheets: m.pieceSheets || [], geo: m.piecesGeo || null }; finishReport(m.data, m.analyzed, m.boxImg); break;
     case 'error':
       S.busy = false; S.snapping = false;
       logError(`worker(${m.where}): ${m.message}${m.heapMB ? ` [heap ${m.heapMB} MB]` : ''}${m.stack ? ' | ' + m.stack : ''}`);
@@ -1412,7 +1412,18 @@ const judgePair = (kind) => {
   const p = S.pairs[S.pairIdx];
   if (!p) return;
   W.post({ type: 'feedback', kind, a: p.a, ka: p.edgeA, b: p.b, kb: p.edgeB, source: 'pairs' });
-  if (kind === 'wrong') { S.pairs.splice(S.pairIdx, 1); showMatches(); } else stepMatch(1);
+  // judged either way: off the list, on to the next one; none left -> close
+  // (owner, 2026-10-11: "clicking yes ... accept and move to next match or
+  // close if no more available")
+  S.pairs.splice(S.pairIdx, 1);
+  if (!S.pairs.length) {
+    closeMatches();
+    if (kind === 'joined') toast('Joined — that was the last match to check. See them built under More → Joined pieces.', 4000);
+    else toast('That was the last match to check.', 3000);
+    return;
+  }
+  if (S.pairIdx >= S.pairs.length) S.pairIdx = 0;
+  showMatches();
 };
 $('matchFits').onclick = () => judgePair('joined');
 $('matchNo').onclick = () => { const q = S.pairs && S.pairs[S.pairIdx || 0]; judgePair('wrong'); if (q) toastNo(q.a, q.b); };
@@ -1859,6 +1870,11 @@ async function finishReport1(workerData, analyzed, boxImg) {
   if (analyzed) files.push(new File([analyzed], `puzzle-report-${stamp}-analyzed.jpg`, { type: 'image/jpeg' }));
   if (boxImg) files.push(new File([boxImg], `puzzle-report-${stamp}-box.jpg`, { type: 'image/jpeg' }));
   if (S.lastSnapFile) files.push(new File([S.lastSnapFile], `puzzle-report-${stamp}-snap.jpg`, { type: S.lastSnapFile.type || 'image/jpeg' }));
+  // Every piece: clean pictures in sheets of 36, and the geometry (worker pieceExport)
+  if (S.reportPieces) {
+    S.reportPieces.sheets.forEach((b, i) => files.push(new File([b], `puzzle-report-${stamp}-pieces${i + 1}.jpg`, { type: 'image/jpeg' })));
+    if (S.reportPieces.geo) files.push(new File([JSON.stringify(S.reportPieces.geo)], `puzzle-report-${stamp}-pieces.json`, { type: 'application/json' }));
+  }
   // Test mode's pictures (results are in the data: worker.testMode)
   (S.testImages || []).forEach((t, i) => files.push(new File([t.blob], `puzzle-report-${stamp}-test${i + 1}.jpg`, { type: 'image/jpeg' })));
   bump('reports');

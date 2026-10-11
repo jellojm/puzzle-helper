@@ -396,6 +396,55 @@ async function compressDetails() {
 }
 setInterval(compressDetails, 800); // Test mode (PH.testVariants, js/vision/testmode.js)
 
+// The report's piece export: sheets of 36 clean pictures (each piece's
+// detail picture, else its thumbnail) and every piece's geometry, with where
+// its picture sits in which sheet (sheet px = rect origin + (source px -
+// image origin) * image scale * k).
+async function pieceExport() {
+  const CELL = 300, COLS = 6, BAND = 22, PER = 36;
+  const list = [...engine.pieces.values()].filter((p) => p.t1).sort((a, b) => a.id - b.id);
+  const sheets = [], geo = [], r1 = (v) => Math.round(v * 10) / 10, r3 = (v) => Math.round(v * 1000) / 1000;
+  if (typeof OffscreenCanvas === 'undefined') return { pieceSheets: [], piecesGeo: null };
+  for (let i = 0; i < list.length; i += PER) {
+    const batch = list.slice(i, i + PER), rows = Math.ceil(batch.length / COLS);
+    const c = new OffscreenCanvas(COLS * CELL, rows * (CELL + BAND)), g = c.getContext('2d');
+    g.fillStyle = '#202020'; g.fillRect(0, 0, c.width, c.height);
+    for (let j = 0; j < batch.length; j++) {
+      const p = batch[j], t1 = p.t1, d = t1.detail;
+      let img = null, src = null;
+      try {
+        if (d && typeof Blob !== 'undefined' && d.jpeg instanceof Blob) { img = await createImageBitmap(d.jpeg); src = d; }
+        else if (d && d.data) { const o = new OffscreenCanvas(d.w, d.h); o.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(d.data), d.w, d.h), 0, 0); img = o; src = d; }
+        else if (t1.thumb && t1.thumb.data) { const th = t1.thumb, o = new OffscreenCanvas(th.w, th.h); o.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(th.data), th.w, th.h), 0, 0); img = o; src = th; }
+      } catch (_) { img = null; }
+      const cx = (j % COLS) * CELL, cy = Math.floor(j / COLS) * (CELL + BAND);
+      let rect = null;
+      if (img) {
+        const k = Math.min(src === d ? 1 : 4, CELL / src.w, CELL / src.h), dw = Math.round(src.w * k), dh = Math.round(src.h * k);
+        const x = cx + Math.round((CELL - dw) / 2), y = cy + Math.round((CELL - dh) / 2);
+        g.imageSmoothingQuality = 'high';
+        g.drawImage(img, x, y, dw, dh);
+        rect = { x, y, w: dw, h: dh, k: r3(k), imageW: src.w, imageH: src.h, ox: src.ox || 0, oy: src.oy || 0, s: r3(src.s) };
+      }
+      g.fillStyle = '#ddd'; g.font = '14px sans-serif'; g.textBaseline = 'middle';
+      g.fillText(`#${p.id} ${t1.code || ''}${src === d ? '' : ' (thumbnail)'}`, cx + 6, cy + CELL + BAND / 2);
+      geo.push({
+        id: p.id, state: p.state || 'checking', code: t1.code, quality: t1.quality ? t1.quality.q : null, views: t1.nObs || 1, cornerScore: t1.cornerScore, meanSide: r1(t1.meanSide || 0),
+        corners: t1.corners.map((q) => q.map(r1)),
+        edges: t1.edges.map((e) => ({ type: e.type, unc: !!e.unc, len: r1(e.len || 0), lenRel: r3(e.lenRel || 1), amp: e.amp !== undefined ? r3(e.amp) : null, gtrim: e.gtrim || 0,
+          sig: e.sig ? Array.from(e.sig, r3) : null, colour: e.pcol ? Array.from(e.pcol, (v) => Math.round(v)) : null, colourXY: e.pxy ? Array.from(e.pxy, r3) : null, colourDoubt: e.cdoubt || null })),
+        detail: d ? { q: d.q, w: d.w, h: d.h, ox: d.ox, oy: d.oy, s: r3(d.s), corners: d.corners ? d.corners.map((q) => q.map(r1)) : null, outline: d.outline ? Array.from(d.outline, r1) : null } : null,
+        image: rect ? Object.assign({ sheet: sheets.length + 1, source: src === d ? 'detail' : 'thumbnail' }, rect) : null,
+        pos: p.pos ? p.pos.map(Math.round) : null, island: p.island, joined: p.joined, wrong: p.wrong, gone: !!p.gone, inPuzzle: !!p.inPuzzle,
+      });
+    }
+    sheets.push(await c.convertToBlob({ type: 'image/jpeg', quality: 0.92 }));
+  }
+  // the owner's answers: pairs rejected ("No") and joined ("Fits", seams in photos), oldest first
+  const answers = (kind) => (engine.fbLog || []).filter((e) => e.kind === kind).map((e) => ({ a: engine.finalId(e.a), ka: e.ka, b: engine.finalId(e.b), kb: e.kb, source: e.source || 'panel', at: e.t ? new Date(e.t).toISOString() : null, appProb: e.prob, appRank: e.rank, verdict: e.verdict || null }));
+  return { pieceSheets: sheets, piecesGeo: { rejected: answers('wrong'), joined: answers('joined'), note: 'image rect: sheet px = (x, y) + (source px - (ox, oy)) * s * k; corners/outline in source px of the read (detail: its own read); edges in stored-shape order, clockwise from corner k to k+1', pieces: geo } };
+}
+
 const BOX_IN_PX = 2048; // box photo's long side for making the box picture
 
 const handlers = {
@@ -628,7 +677,12 @@ const handlers = {
       perIsland: all.reduce((m, p) => { m[p.island] = (m[p.island] || 0) + 1; return m; }, {}),
       placedConfHist: all.filter((p) => p.t2 && p.t2.cands.length).reduce((h, p) => { const b = Math.min(9, Math.floor(p.t2.conf * 10)); h[b] = (h[b] || 0) + 1; return h; }, {}),
     };
-    post({ type: 'report', analyzed, boxImg, data: {
+    // Every read piece's picture (clean: no lines drawn on it) and geometry
+    // (owner, 2026-10-11: "have report send piece geometry and image for each
+    // piece ... without the linework so another method can run on it").
+    let pieceSheets = [], piecesGeo = null;
+    try { ({ pieceSheets, piecesGeo } = await pieceExport()); } catch (e) { post({ type: 'error', message: 'Piece export failed: ' + e.message }); }
+    post({ type: 'report', analyzed, boxImg, pieceSheets, piecesGeo, data: {
       opts: engine.opts, taught: engine.taught, counts: engine.counts(), bg: engine.bg, thresh: engine.thresh,
       box: engine.box ? { cols: engine.box.cols, rows: engine.box.rows, white: engine.box.white } : null,
       island: engine.island, tracking: !!engine.pose, engine: engineState, catalog, session: sessionSummary(), pieces,

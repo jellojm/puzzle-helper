@@ -3,6 +3,11 @@
  * Run: node test/e2e.js   (needs network for the OpenCV.js CDN)
  * Writes screenshots to test/out/. */
 'use strict';
+// --quick (or E2E_QUICK=1): the core path only - camera catalogue, box, photo,
+// piece screen, Find, Matches + Fits, Build view, report, Map; the slower
+// sections already proven are skipped (owner, 2026-10-11: "e2e is taking too
+// long"). The full run stays the release check.
+const QUICK = process.argv.includes('--quick') || !!process.env.E2E_QUICK;
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFileSync } = require('child_process');
@@ -197,6 +202,7 @@ function writePng(file, mat) {
     } else {
       check('tapping a piece opens its matches', false, 'no shaped piece on screen to tap');
     }
+    if (!QUICK) { // (assembled block, teach background, flashlight, Border button, Zones, fill this spot; skipped with --quick)
     // The assembled block (js/vision/assembly.js): built up, found on the box
     // and shaded on the box picture; tapping one of its open spots lists the
     // loose pieces for it. (The fake camera is a looping video: wait for the
@@ -280,6 +286,8 @@ function writePng(file, mat) {
       await page.click('#closeFind').catch(() => {});
     } else check('Fill this spot: tapping a spot lists pieces for it', false, 'box picture not visible');
 
+    }
+    await page.click('#closeFind').catch(() => {}); // (the skipped sections closed the Find panel in --quick)
     // Matches: step through pairs; the pair is shaded and joined by an arc.
     await page.click('#pairsBtn');
     const mOpen = await page.waitForFunction(() => !document.getElementById('matchBar').hidden, null, { timeout: 15000 }).then(() => true).catch(() => false);
@@ -301,6 +309,7 @@ function writePng(file, mat) {
     check('Build view: the confirmed pair built as a group, joins logged, camera off', !mOpen || (bv.groups >= 1 && bv.joins >= 1 && bv.cam), `${bv.groups} group(s), ${bv.joins} join(s); ${bv.sum.slice(0, 60)}`);
     await page.click('#buildClose');
 
+    if (!QUICK) { // (marking the border; skipped with --quick)
     // Mark the finished border: aim, capture, Use (the default corners are
     // fine here: what matters is that the view is learned and found again).
     await page.click('#menuBtn');
@@ -334,6 +343,8 @@ function writePng(file, mat) {
     await page.click('#frameForget');
     check('Mark border: can be forgotten', forgetShown);
 
+    }
+    if (!QUICK) { // (Test mode on a photo; skipped with --quick)
     // Test mode (owner, 2026-10-11): a photo read every way, results in
     // Settings and in the report (data + the picture).
     await page.click('#menuBtn');
@@ -343,20 +354,26 @@ function writePng(file, mat) {
     const tstat = await page.textContent('#testStatus');
     check('Test mode: a photo read every way, results listed', tested && /app as is: \d+ found/.test(tstat), tstat.replace(/\s+/g, ' ').slice(0, 160));
     await page.click('#closeMenu').catch(() => {});
+    }
     // Send report: in a desktop browser the files are downloaded.
     await page.click('#menuBtn');
     const dls = [];
-    let reportJson = null;
+    let reportJson = null, piecesJson = null;
     page.on('download', async (d) => {
       dls.push(d.suggestedFilename());
-      if (d.suggestedFilename().endsWith('.json')) { try { reportJson = JSON.parse(fs.readFileSync(await d.path(), 'utf8')); } catch (_) { /* checked below */ } }
+      if (/-pieces1\.jpg$/.test(d.suggestedFilename())) await d.saveAs(path.join(OUT, 'e2e-pieces1.jpg')).catch(() => {}); // (to look at)
+      if (d.suggestedFilename().endsWith('-pieces.json')) { try { piecesJson = JSON.parse(fs.readFileSync(await d.path(), 'utf8')); } catch (_) { /* checked below */ } }
+      else if (d.suggestedFilename().endsWith('.json')) { try { reportJson = JSON.parse(fs.readFileSync(await d.path(), 'utf8')); } catch (_) { /* checked below */ } }
     });
     await page.click('#reportBtn');
     // (wait for the files, not a fixed time: under load the report took > 4 s)
     for (let t = 0; t < 60 && !(reportJson && dls.some((n) => n.endsWith('analyzed.jpg'))); t++) await page.waitForTimeout(500);
     check('send report produces frame + analyzed view + data files', dls.some((n) => n.endsWith('.json')) && dls.some((n) => n.endsWith('frame.jpg')) && dls.some((n) => n.endsWith('analyzed.jpg')), dls.join(', '));
+    const pg = piecesJson && piecesJson.pieces;
+    const okPieces = !!pg && pg.length > 10 && pg.every((q) => q.corners && q.edges.length === 4 && q.image) && pg.some((q) => q.detail && q.detail.outline && q.detail.outline.length > 40) && dls.some((n) => /-pieces1\.jpg$/.test(n));
+    check('the report carries every piece: clean pictures in sheets and geometry', okPieces, pg ? `${pg.length} pieces, ${pg.filter((q) => q.image && q.image.source === 'detail').length} with detail pictures; sheets ${dls.filter((n) => /-pieces\d+\.jpg$/.test(n)).length}` : 'no pieces.json');
     const tm = reportJson && reportJson.worker && reportJson.worker.testMode;
-    check('the report carries Test mode results and the tested picture', !!tm && tm.results.length === 1 && tm.results[0].variants.length === tm.variants.length && dls.some((n) => /test1\.jpg$/.test(n)), tm ? `${tm.results.length} picture(s), ${tm.variants.length} variants; files ${dls.filter((n) => /test/.test(n)).join(', ')}` : 'no testMode');
+    if (!QUICK) check('the report carries Test mode results and the tested picture', !!tm && tm.results.length === 1 && tm.results[0].variants.length === tm.variants.length && dls.some((n) => /test1\.jpg$/.test(n)), tm ? `${tm.results.length} picture(s), ${tm.variants.length} variants; files ${dls.filter((n) => /test/.test(n)).join(', ')}` : 'no testMode');
     // the camera stays off once the report's snapshot is taken (owner,
     // 2026-10-08: running behind the share sheet it made the app lag)
     const paused = await page.evaluate(() => !document.getElementById('resume').hidden);
@@ -369,6 +386,7 @@ function writePng(file, mat) {
     check('vision runs on our SIMD OpenCV build (CDN build as fallback)', w.cvBuild === 'simd', `${w.cvBuild} (simd supported: ${w.simd})${w.cvError ? ' error: ' + w.cvError : ''}`);
     check('report carries the diagnostic blocks', !missing.length,
       missing.length ? 'missing ' + missing.join(', ') : `session ${JSON.stringify(reportJson.worker.session).slice(0, 120)}… | wasm ${reportJson.worker.engine.wasmHeapMB} MB | lag in history: ${reportJson.history.some((r) => r.lag != null)}`);
+    if (!QUICK) { // (crash restart, tilt correction; skipped with --quick)
     // The vision library "crashes" (a WebAssembly trap, as in the owner's
     // screenshots 2026-10-04): the worker saves, the page starts a fresh one,
     // and the catalog comes back.
@@ -418,6 +436,7 @@ function writePng(file, mat) {
       if (opened) await page.click('#pieceClose'); // (and the camera comes back for the checks after)
     } else check('tapping a piece works with tilt correction', false, 'no shaped piece visible');
 
+    }
     // Table view (Map mode): camera off, pieces drawn from above, same tools.
     await page.click('#closeFind').catch(() => {});
     await page.click('#toolbar [data-mode="map"]');

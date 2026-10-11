@@ -79,3 +79,8 @@ in piece sides; robust fit), one-to-one, doubles, codes.
 The key fit (`test/keymatch.js`) starts from the pieces followed by identity
 when there are 6+: by position alone it could turn the near-symmetric 5x10
 grid half round and score two whole rows "missing" (2026-10-07).
+
+`node test/e2e.js --quick` (~90 s): the core path only - camera catalogue,
+box, photo, piece screen, Find, Matches + Fits, Build view, report, Map. The
+default check for normal changes (owner, 2026-10-11); the full run (several
+minutes) for major or risky changes.
