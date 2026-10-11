@@ -483,6 +483,16 @@ const handlers = {
     }
     return frameFrom(bitmapSource(msg.bitmap), msg, msg.bitmap);
   },
+  // a high-resolution shot of the live view (main.js readShot): read through
+  // the photo path - every piece in it read at full resolution, linked to
+  // the map by shape
+  shot(msg) {
+    const src = bitmapSource(msg.bitmap);
+    let res = null;
+    try { res = engine.processSnap(src, { tilt: msg.tilt }); } finally { msg.bitmap.close(); }
+    post({ type: 'shotDone', w: src.w, h: src.h, result: res && { found: res.found, added: res.added, shaped: res.shaped, ms: res.ms, counts: res.counts } });
+    scheduleSave();
+  },
   snap(msg) {
     post({ type: 'status', text: 'Cataloging photo…' });
     const src = bitmapSource(msg.bitmap);

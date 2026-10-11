@@ -5,7 +5,7 @@ import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 import { drawGroup } from './buildView.js';
 
-const APP_VERSION = '0.25.2';
+const APP_VERSION = '0.26.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -165,7 +165,16 @@ function onWorkerMessage(e) {
       showDistanceHint(m.view);
       showBlurHint(m.coach);
       coachFrame(m.coach);
+      maybeShot(m);
       if (S.debug) showDebug(m);
+      break;
+    }
+    case 'shotDone': {
+      S.snapping = false;
+      const r = m.result || {};
+      S.shots = (S.shots || 0) + 1; S.lastShotResult = { found: r.found, added: r.added, shaped: r.shaped, ms: Math.round(r.ms || 0), w: m.w, h: m.h, at: new Date().toISOString() };
+      if (r.counts) updateStats(r.counts);
+      if ($('modeHint').textContent.startsWith('Reading in high resolution')) $('modeHint').textContent = modeHint(S.mode);
       break;
     }
     case 'snap': {
@@ -955,6 +964,88 @@ overlay.addEventListener('pointerup', (e) => {
     W.post({ type: 'select', id: null });
   }
 });
+// ---------- high-resolution reads (owner, 2026-10-11) ----------
+// Video frames at 1920x1440 are for finding pieces and following the map;
+// the camera gives 4032x3024 (its reports). When the phone is steady over
+// pieces that still need a close read, the camera switches to full
+// resolution for a moment, the sharpest of 3 frames is read through the
+// photo path (pieces linked to the map by their shapes), and the camera
+// goes back. At most every SHOT_GAP ms; Settings can turn it off.
+const CAMERA_HI = { facingMode: { ideal: 'environment' }, width: { ideal: 4032 }, height: { ideal: 3024 }, aspectRatio: { ideal: 4 / 3 } };
+const SHOT_GAP = 4000;
+S.hiRes = true;
+$('hiResToggle').onchange = (e) => { S.hiRes = e.target.checked; saveLocal(); };
+function maybeShot(m) {
+  if (!S.hiRes || S.snapping || S.mode !== 'scan' || !S.usingCamera || !S.track || !S.lastStill) return;
+  if (performance.now() - (S.lastShot || 0) < SHOT_GAP) return;
+  // Only when it is worth it (owner, 2026-10-11: "trigger it when there is an
+  // object that needs to be read and is in a good position ... reduce
+  // repetitive shots"): a piece still to be checked, close enough, whole in
+  // the view and near its middle (the edges show the pieces' side walls and
+  // more lens distortion) ...
+  const W = m.procW || 640, H = m.procH || 480;
+  const good = (m.dets || []).filter((d) => d.status === 'checking' && d.close && !d.border && d.cx > W * 0.2 && d.cx < W * 0.8 && d.cy > H * 0.2 && d.cy < H * 0.8);
+  if (!good.length) return;
+  // ... and not the view the last shot already read: the camera moved a
+  // quarter of the view since (the motion tracker's shift)
+  if (S.shotView && S.flow) {
+    const dx = S.flow.T.total[0] - S.shotView[0], dy = S.flow.T.total[1] - S.shotView[1];
+    if (Math.hypot(dx, dy) < S.flow.w * 0.25) return;
+  }
+  readShot('auto').catch((e) => logError('hi-res shot: ' + e.message));
+}
+// sharpness of a frame: Laplacian spread of a small grey copy
+function frameSharpness(bmp) {
+  const W = 160, H = Math.round(160 * bmp.height / bmp.width);
+  const c = S.sharpCanvas || (S.sharpCanvas = document.createElement('canvas'));
+  c.width = W; c.height = H;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(bmp, 0, 0, W, H);
+  const d = g.getImageData(0, 0, W, H).data, L = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) L[i] = d[4 * i] * 0.3 + d[4 * i + 1] * 0.59 + d[4 * i + 2] * 0.11;
+  let s = 0, ss = 0, n = 0;
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) { const p = y * W + x, v = 4 * L[p] - L[p - 1] - L[p + 1] - L[p - W] - L[p + W]; s += v; ss += v * v; n++; }
+  return n ? ss / n - (s / n) ** 2 : 0;
+}
+async function readShot(why) {
+  if (S.snapping) return false;
+  S.snapping = true; S.lastShot = performance.now();
+  S.shotView = S.flow ? S.flow.T.total.slice() : null; // (the view this shot reads)
+  const t = S.track, w0 = video.videoWidth * video.videoHeight;
+  $('modeHint').textContent = 'Reading in high resolution — hold still…';
+  let posted = false;
+  try {
+    let hi = false;
+    if (t && t.applyConstraints) {
+      try { await t.applyConstraints(Object.assign({}, CAMERA_HI, camFps(15), torchC())); hi = true; } catch (e) { logError('hi-res constraints: ' + e.message); }
+    }
+    // the bigger frames arrive after a moment (or never: then this frame size)
+    const t0 = performance.now();
+    while (hi && video.videoWidth * video.videoHeight <= w0 && performance.now() - t0 < 1500) await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 250));
+    let best = null, bestS = -1;
+    for (let i = 0; i < 3; i++) {
+      const b = await createImageBitmap(video);
+      const s = frameSharpness(b);
+      if (s > bestS) { if (best) best.close(); best = b; bestS = s; } else b.close();
+      if (i < 2) await new Promise((r) => setTimeout(r, 90));
+    }
+    bump('hiResShots');
+    W.post({ type: 'shot', bitmap: best, tilt: currentTilt(), why }, [best]);
+    posted = true;
+  } finally {
+    if (t && t.applyConstraints && t.readyState === 'live') {
+      await t.applyConstraints(Object.assign({}, CAMERA, camFps(S.fpsWanted || 24), torchC())).catch((e) => logError('camera back: ' + e.message));
+      // (the worker's copy of the track: a fresh one with the normal settings)
+      if (S.workerCam) { W.post({ type: 'camTrackOff' }); S.workerCam = false; startWorkerCam(); }
+    }
+    if (!posted) S.snapping = false;
+  }
+  return posted;
+}
+window.__phShot = () => readShot('test'); // test hook
+window.__phShots = () => ({ n: S.shots || 0, last: S.lastShotResult || null, busy: !!S.snapping }); // test hook
+
 // ---------- test mode ----------
 // (owner, 2026-10-11) Each tested picture - the camera view or photos - is
 // read several ways at once in the worker (TEST_VARIANTS), on throwaway
@@ -1674,7 +1765,7 @@ $('tiltToggle').onchange = (e) => { S.tiltOn = e.target.checked; saveLocal(); };
 $('fovRange').oninput = (e) => { S.fov = +e.target.value; $('fovVal').textContent = S.fov + '°'; saveLocal(); };
 function saveLocal() {
   try {
-    localStorage.setItem('ph-view', JSON.stringify({ tiltOn: S.tiltOn, fov: S.fov, mapHidden: S.mapHidden, idleOn: S.idleOn, procW: S.procW, outlines: S.outlines, follow: S.follow }));
+    localStorage.setItem('ph-view', JSON.stringify({ tiltOn: S.tiltOn, fov: S.fov, mapHidden: S.mapHidden, idleOn: S.idleOn, procW: S.procW, outlines: S.outlines, follow: S.follow, hiRes: S.hiRes }));
   } catch (_) { /* private mode */ }
 }
 try {
@@ -1682,10 +1773,11 @@ try {
   if (v) {
     S.tiltOn = v.tiltOn !== false; S.fov = v.fov || 66; S.mapHidden = !!v.mapHidden;
     S.idleOn = v.idleOn !== false; S.procW = v.procW || 640; S.outlines = !!v.outlines; S.follow = v.follow !== false;
+    S.hiRes = v.hiRes !== false;
   }
 } catch (_) { /* ignore */ }
 $('tiltToggle').checked = S.tiltOn; $('fovRange').value = S.fov; $('fovVal').textContent = S.fov + '°';
-$('idleToggle').checked = S.idleOn;
+$('idleToggle').checked = S.idleOn; $('hiResToggle').checked = S.hiRes;
 $('detail').value = S.procW; $('detailVal').textContent = S.procW;
 // Chrome/Firefox on iOS are WKWebView: no Wake Lock API, so the screen sleeps
 // mid-sweep however long you hold the phone still. Safari (16.4+) has it.
@@ -1906,7 +1998,7 @@ async function finishReport1(workerData, analyzed, boxImg) {
     ui: { filter: S.filter, mapHidden: S.mapHidden, pairs: S.pairs.length, pairsDone: !!S.pairsDone },
     orientation: (screen.orientation && screen.orientation.angle) || window.orientation || 0,
     history: S.history, errors: S.errors,
-    lastFrame: S.last, lastSnap: S.lastSnapResult || null, snapTilt: S.snapTilt || null, selected: S.desc, worker: workerData,
+    lastFrame: S.last, lastSnap: S.lastSnapResult || null, hiResShots: { n: S.shots || 0, last: S.lastShotResult || null, on: !!S.hiRes }, snapTilt: S.snapTilt || null, selected: S.desc, worker: workerData,
   };
   files.push(new File([JSON.stringify(data)], `puzzle-report-${stamp}.json`, { type: 'application/json' }));
   $('toast').hidden = true;

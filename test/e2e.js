@@ -146,6 +146,14 @@ function writePng(file, mat) {
     check('snap adds the rest without duplicating', n2 >= 37 && n2 <= 42, `${n2} pieces (39 loose + an assembled 3x3 block on the table)`);
     check('pieces placed on the box', /(\d+) on box picture/.test(stats2) && parseInt(stats2.match(/(\d+) on box picture/)[1], 10) >= 20, stats2);
 
+    // High-resolution read (owner, 2026-10-11): the camera switches up for a
+    // moment, the sharpest frame is read through the photo path, and back.
+    const shots0 = await page.evaluate(() => window.__phShots().n);
+    await page.evaluate(() => window.__phShot());
+    const shotOk = await page.waitForFunction((n) => window.__phShots().n > n && !window.__phShots().busy, shots0, { timeout: 60000, polling: 300 }).then(() => true).catch(() => false);
+    const shot = await page.evaluate(() => window.__phShots());
+    const camBack = await until(() => { const v = document.querySelector('video'); return v.videoWidth > 0 && v.readyState >= 2; }, null, 15000);
+    check('high-resolution read: shot taken, read, camera back to scanning', shotOk && !!shot.last && camBack, JSON.stringify(shot.last));
     // Tap a piece that has a shape model and check the Find panel.
     // (wait for one in view - the test video loops - rather than look once)
     // (the picture moves between the look and the tap: a tap that misses is aimed again, up to 6 times)
