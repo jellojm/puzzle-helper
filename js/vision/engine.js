@@ -3349,6 +3349,9 @@
      *  put on the box picture as it grows; its open spots are then shown on
      *  the view this frame lined up with. */
     findSpots(dets, seg, proc, still, photo) {
+      // No box picture: no assembled parts (they could not be shown anyway,
+      // asmShown) - and no cost (~15% of a frame on a loose table).
+      if (!this.box) { this.spotView = null; this.asmFar = false; return; }
       // Paced on live frames: on the owner's phone this work ran ~140 ms per
       // frame (up to 1.4 s) and the app fell to 2 frames a second (report
       // 22:58). At most every 0.4 s; the previous result stays meanwhile.
@@ -3632,7 +3635,10 @@
     // With a box picture, an assembled part is shown only once it is placed on
     // it with confidence (v0.20: a butter dish and close-up single pieces
     // became "assembled parts" with 52 open spots); without one, after 3 views.
-    asmShown(A) { return this.box ? !!A.place : A.views >= 3; }
+    // (only an assembled part found on the box picture is shown: without a
+    // box picture any big blob - touching loose pieces, wood grain - passed
+    // as one, with imaginary open spots on the Map; owner, 2026-10-11)
+    asmShown(A) { return !!this.box && !!A.place; }
     /** The main assembly: placed ones first, then the most cells. */
     mainAssembly() {
       let best = null;
