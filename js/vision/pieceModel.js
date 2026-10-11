@@ -626,6 +626,26 @@
     const tm = new cv.Mat();
     cv.resize(rgba, tm, new cv.Size(tw, th), 0, 0, cv.INTER_AREA);
     const thumb = { w: tw, h: th, data: new Uint8ClampedArray(tm.data), ox: ctx.ox || 0, oy: ctx.oy || 0, s: ts };
+    // The piece's detail picture (owner, 2026-10-11: "actual piece views
+    // should be high resolution shots" - the 72 px thumbnail is all the
+    // piece screen, Build view and Map had): up to PH.DETAIL_PX on its long
+    // side, with this read's own corners and full outline (source pixels).
+    // The worker turns its pixels into a JPEG (~20-30 KB) once kept.
+    let detail = null;
+    if (PH.DETAIL_PX) {
+      const dk = Math.min(1, PH.DETAIL_PX / Math.max(w, h)), dw = Math.max(1, Math.round(w * dk)), dh = Math.max(1, Math.round(h * dk));
+      const dm = new cv.Mat();
+      cv.resize(rgba, dm, new cv.Size(dw, dh), 0, 0, cv.INTER_AREA);
+      // (the pixel contour smoothed over 5 points: no staircase when drawn large)
+      const P0 = seg.pts, np = P0.length / 2, step = Math.max(1, Math.ceil(np / 900)), ol = [];
+      for (let i = 0; i < np; i += step) {
+        let sx = 0, sy = 0;
+        for (let k = -2; k <= 2; k++) { const j = (i + k + np) % np; sx += P0[2 * j]; sy += P0[2 * j + 1]; }
+        ol.push(sx / 5 + (ctx.ox || 0), sy / 5 + (ctx.oy || 0));
+      }
+      detail = { w: dw, h: dh, data: new Uint8ClampedArray(dm.data), ox: ctx.ox || 0, oy: ctx.oy || 0, s: dk, outline: Float32Array.from(ol), corners: null, q: 0 };
+      dm.delete();
+    }
     mk('thumb');
 
     // Read quality: how crisp the piece's own outline is (Laplacian spread in
@@ -650,9 +670,10 @@
     [src, dst, M, labMat, sq, sqm, ek, rgba, tm, seg.filled].forEach((m) => m.delete());
 
     const ox = ctx.ox || 0, oy = ctx.oy || 0;
+    if (detail) { detail.corners = corners.map((c) => [c[0] + ox, c[1] + oy]); detail.q = quality.q; }
     return {
       corners: corners.map((c) => [c[0] + ox, c[1] + oy]),
-      edges, code, flats, meanSide, square, sharp, thumb, quality,
+      edges, code, flats, meanSide, square, sharp, thumb, quality, detail,
       cornerScore: cr.score, white, lf, colourOnly,
     };
   }
@@ -758,6 +779,9 @@
    */
   PH.fuseShapes = function (base, obs, r) {
     const n = base.nObs || 1;
+    // the sharper view's detail picture is kept (its corners numbered as the stored shape's)
+    const od = obs.detail;
+    if (od && od.corners && (!base.detail || (od.q || 0) > (base.detail.q || 0) + 0.02)) base.detail = Object.assign({}, od, { corners: [0, 1, 2, 3].map((j) => od.corners[(j - r + 4) % 4]) });
     let retyped = false;
     for (let j = 0; j < 4; j++) {
       const eb = base.edges[j], eo = obs.edges[(j - r + 4) % 4];
@@ -847,6 +871,7 @@
   // (tuned on the owner's video: the sweep passed some pieces only at
   // ~120-155 px; the pale piece's correct reads scored q 0.27-0.29, its
   // misreads 0.15-0.23; two close reads must still agree to check a piece)
+  PH.DETAIL_PX = 360; // a piece's detail picture: long side (px)
   PH.CLOSE_SIDE = 120; // (overview reads in the owner's video: 70-80 px)
   PH.CLOSE_Q = 0.25;
   PH.READ_SIDE = Infinity; // read pieces bigger than this (side, source px) from a scaled-down crop (Engine.detT1) ...

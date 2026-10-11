@@ -3019,7 +3019,8 @@
       const brief = (Q) => ({ id: Q.id, code: Q.t1 ? Q.t1.code : null, thumb: Q.t1 ? Q.t1.thumb : null, corners: Q.t1 ? Q.t1.corners : null, sigs: Q.t1 ? Q.t1.edges.map((e) => e.sig) : null, t2: Q.t2 ? { cands: Q.t2.cands.slice(0, 3), conf: Q.t2.conf, tex: Q.t2.tex } : null, located: !!Q.pos && !Q.gone, gone: !!Q.gone,
         inPuzzle: !!Q.inPuzzle, up: (this.upOf(Q) || {}).k,
         confirmed: shapeConfirmed(Q), views: Q.t1 ? Q.t1.nObs || 1 : 0, quality: Q.t1 && Q.t1.quality ? Q.t1.quality.q : null, unc: Q.t1 ? Q.t1.edges.map((e) => !!e.unc) : null,
-        lens: Q.t1 ? Q.t1.edges.map((e) => +(e.lenRel || 1).toFixed(3)) : null });
+        lens: Q.t1 ? Q.t1.edges.map((e) => +(e.lenRel || 1).toFixed(3)) : null,
+        detail: Q.t1 && Q.t1.detail && (Q.t1.detail.jpeg || Q.t1.detail.data) ? Q.t1.detail : null });
       return {
         piece: brief(P),
         pieceMM: this.pieceMM(),

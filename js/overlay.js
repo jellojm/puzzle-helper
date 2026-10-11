@@ -533,9 +533,12 @@ export function drawPieceShape(canvas, piece, opts) {
     ctx.fillStyle = '#aaa'; ctx.font = `${14 * dpr}px system-ui`; ctx.textAlign = 'center';
     ctx.fillText('Shape not read yet', W / 2, H / 2); return;
   }
-  const C = piece.corners;
+  // (the detail picture's full outline when there is one: every point of
+  // the cut, not the 32 shape points an edge is compared by)
+  const DE = piece.detail ? detailEdges(piece.detail) : null;
+  const C = DE ? piece.detail.corners : piece.corners;
   // the whole outline, to fit it in the view (tabs reach past the corners)
-  const curves = [0, 1, 2, 3].map((k) => edgeCurve(C[k], C[(k + 1) % 4], piece.sigs && piece.sigs[k]));
+  const curves = DE || [0, 1, 2, 3].map((k) => edgeCurve(C[k], C[(k + 1) % 4], piece.sigs && piece.sigs[k]));
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const c of curves) for (const [x, y] of c) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
   const s = (Math.min(W, H) * 0.62) / Math.max(1, x1 - x0, y1 - y0);
@@ -582,4 +585,50 @@ export function drawPieceShape(canvas, piece, opts) {
     label(`${WORD[code[k]] || code[k]}${unc}${len ? ' · ' + len : ''}`, mx + (dx / d) * (Math.min(W, H) * 0.22), my + (dy / d) * (Math.min(W, H) * 0.22), EDGE_COLORS[k], 13);
   }
   label(`corners add up to ${sum.toFixed(0)}°`, W / 2, H - 14 * dpr, 'rgba(255,255,255,0.7)', 11);
+}
+
+// ---------- detail pictures (up to 360 px) ----------
+/** The 4 edges of a detail picture's full outline (source px): the outline
+ *  cut at the read's corners, each edge the stretch between its two corners
+ *  that holds neither of the others. */
+export function detailEdges(d) {
+  const O = d.outline, n = O ? O.length / 2 : 0;
+  if (n < 8 || !d.corners) return null;
+  const near = (c) => { let bi = 0, bd = Infinity; for (let i = 0; i < n; i++) { const e = (O[2 * i] - c[0]) ** 2 + (O[2 * i + 1] - c[1]) ** 2; if (e < bd) { bd = e; bi = i; } } return bi; };
+  const I = d.corners.map(near);
+  const run = (a, b, dir) => { const out = []; for (let i = a, g = 0; g <= n; i = (i + dir + n) % n, g++) { out.push(i); if (i === b) break; } return out; };
+  return [0, 1, 2, 3].map((k) => {
+    const a = I[k], b = I[(k + 1) % 4], others = [I[(k + 2) % 4], I[(k + 3) % 4]];
+    let r = run(a, b, 1);
+    if (others.some((o) => r.includes(o))) r = run(a, b, -1);
+    return r.map((i) => [O[2 * i], O[2 * i + 1]]);
+  });
+}
+async function detailImage(d) {
+  if (typeof Blob !== 'undefined' && d.jpeg instanceof Blob) return createImageBitmap(d.jpeg);
+  if (d.data) { const c = new OffscreenCanvas(d.w, d.h); c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(d.data), d.w, d.h), 0, 0); return c; }
+  return null;
+}
+/** The piece's detail picture with its full outline traced over it (each
+ *  edge in its colour). False when there is no detail picture. */
+export async function drawPieceDetail(canvas, d) {
+  if (!d) return false;
+  const img = await detailImage(d);
+  if (!img) return false;
+  const { ctx, W, H, dpr } = hiDpi(canvas);
+  ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
+  const s = Math.min(W / d.w, H / d.h) * 0.96, ox = (W - d.w * s) / 2, oy = (H - d.h * s) / 2;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, ox, oy, d.w * s, d.h * s);
+  const T = ([x, y]) => [ox + (x - d.ox) * d.s * s, oy + (y - d.oy) * d.s * s];
+  const E = detailEdges(d);
+  ctx.lineCap = ctx.lineJoin = 'round';
+  if (E) E.forEach((pts, k) => {
+    for (const [w, col] of [[5 * dpr, 'rgba(0,0,0,0.55)'], [2.5 * dpr, EDGE_COLORS[k]]]) {
+      ctx.lineWidth = w; ctx.strokeStyle = col;
+      ctx.beginPath(); pts.map(T).forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke();
+    }
+  });
+  for (const c of d.corners || []) { const [x, y] = T(c); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, 4 * dpr, 0, Math.PI * 2); ctx.fill(); }
+  return true;
 }

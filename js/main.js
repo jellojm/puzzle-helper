@@ -1,11 +1,11 @@
 // Page controller: camera, frame pump to the vision worker, overlay, UI.
-import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COLORS, ZONE_COLORS, STATUS, ROLE, drawCheckingMark, drawPiecePhoto, drawPieceShape } from './overlay.js';
+import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COLORS, ZONE_COLORS, STATUS, ROLE, drawCheckingMark, drawPiecePhoto, drawPieceShape, drawPieceDetail } from './overlay.js';
 import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 import { drawGroup } from './buildView.js';
 
-const APP_VERSION = '0.25.0';
+const APP_VERSION = '0.25.1';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -1066,6 +1066,8 @@ function showPieceView(desc) {
   if (!p) { $('pieceFacts').textContent = 'This piece is no longer in the catalog.'; return; }
   $('pieceTitle').textContent = `Piece #${p.id}`;
   drawPiecePhoto($('piecePhoto'), p);
+  // the sharper detail picture when the piece has one (then over the thumbnail)
+  if (p.detail) drawPieceDetail($('piecePhoto'), p.detail).catch((e) => logError('piece detail: ' + e.message));
   drawPieceShape($('pieceShape'), p, { pieceMM: desc.pieceMM });
   const words = { T: 'tab', B: 'blank', F: 'flat', J: 'joined' }, sides = ['red', 'cyan', 'yellow', 'purple'];
   const edges = p.code ? [...p.code].map((c, k) => `<span style="color:${EDGE_COLORS[k]}">●</span> ${sides[k]}: ${words[c] || c}${p.unc && p.unc[k] ? ' (unsure)' : ''}`).join(' · ') : 'not read yet';

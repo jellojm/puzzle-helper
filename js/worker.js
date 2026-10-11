@@ -374,7 +374,27 @@ async function saveSettings() {
   if (db) await tx('meta', 'readwrite', (s) => s.put({ minDE: engine.opts.minDE, taught: engine.taught }, 'settings'));
 }
 
-const testResults = []; // Test mode (PH.testVariants, js/vision/testmode.js)
+const testResults = [];
+// Pieces' detail pictures (js/vision/pieceModel.js: up to 360 px) kept as
+// JPEG (~20-30 KB) instead of raw pixels (~0.5 MB), a few at a time.
+let compressing = false;
+async function compressDetails() {
+  if (compressing || !engine || typeof OffscreenCanvas === 'undefined') return;
+  compressing = true;
+  try {
+    let n = 0;
+    for (const p of engine.pieces.values()) {
+      const d = p.t1 && p.t1.detail;
+      if (!d || !d.data) continue;
+      const c = new OffscreenCanvas(d.w, d.h);
+      c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(d.data), d.w, d.h), 0, 0);
+      const blob = await c.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+      if (p.t1 && p.t1.detail === d) { d.jpeg = blob; d.data = null; engine.touch(p); }
+      if (++n >= 4) break;
+    }
+  } catch (_) { /* tried again next round */ } finally { compressing = false; }
+}
+setInterval(compressDetails, 800); // Test mode (PH.testVariants, js/vision/testmode.js)
 
 const BOX_IN_PX = 2048; // box photo's long side for making the box picture
 
