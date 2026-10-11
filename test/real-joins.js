@@ -28,6 +28,7 @@ globalThis.self = globalThis;
 require('./lib/vision')(); // (the modules the app's worker loads)
 const PH = globalThis.PH;
 if (process.env.NOPEEL) PH.SHADOW_PEEL = null;
+if (process.env.PROFD) PH.SEAM_PROF_DEPTH = +process.env.PROFD;
 if (process.env.COLW) PH.COL_W = +process.env.COLW;
 if (process.env.STRIPW) PH.STRIP_W = +process.env.STRIPW;
 if (process.env.LENW) PH.LEN_W = +process.env.LENW;
@@ -180,6 +181,37 @@ const LOOSE = ['IMG_3599.JPG', 'IMG_3600.JPG', 'IMG_3603.JPG', 'IMG_3604.JPG'];
     rows.push(`  ${j.file} ${j.where.padEnd(12)} ${P.t1.code}[${k}]=${eP.type} -> ${Q.t1.code}[${m}]=${eQ.type}  rank ${rank === Infinity ? 'none' : rank + 1}${iT >= 0 && list[iT].tie ? ' (tie)' : ''}  shape rank ${shapeRank === Infinity ? '-' : shapeRank + 1}  shape ${sh ? sh.shape.toFixed(3) : '-'}${sh ? ` strip ${sh.color.toFixed(1)} len ${(Math.log(eP.lenRel / eQ.lenRel) * 100).toFixed(1)}%` : ''}${iT >= 0 && process.env.SHOW > 1 ? ` | best: ${list.slice(0, 2).map((x) => `#${x.id} sh ${x.shape.toFixed(3)} strip ${x.color.toFixed(1)} sc ${x.score.toFixed(2)}`).join(', ')} | true sc ${list[iT].score.toFixed(2)}` : ''}  colour ${sh ? (sh.colDoubt ? 'untrusted: ' + sh.colDoubt : sh.colShare !== undefined ? (sh.colShare * 100).toFixed(0) + '% agree' : '-') : '-'}`);
   }
   if (process.env.SHOW) console.log(rows.join('\n'));
+  // SEAM=1: does the fine colour profile's pattern across the seam
+  // (PH.seamNcc, idea 7) separate true joins from the matcher's other top
+  // candidates, and does it move true partners up when added to the score?
+  if (process.env.SEAM) {
+    const trueN = [], rivalN = [], sides = [];
+    for (const j of joins) for (const [P, k, Q, m] of [[j.a, j.ka, j.b, j.kb], [j.b, j.kb, j.a, j.ka]]) {
+      const res = PH.findMatches({ id: P.id, t1: P.t1, t2: null }, pool.filter((o) => o !== P).map((o) => ({ id: o.id, t1: o.t1, t2: null })), { topN: 10 });
+      const list = (res.find((r) => r.edge === k) || { matches: [] }).matches;
+      const rival = (x) => { const o = pool.find((q) => q.id === x.id); return o !== Q && !(o.file !== Q.file && PH.samePiece(o.t1, Q.t1).ok); };
+      const nT = PH.seamNcc(P.t1.edges[k], Q.t1.edges[m]);
+      if (nT !== null) trueN.push(nT);
+      const cands = list.map((x) => ({ x, ncc: PH.seamNcc(P.t1.edges[k], pool.find((o) => o.id === x.id).t1.edges[x.edge]), isTrue: x.id === Q.id && x.edge === m, rival: rival(x) }));
+      for (const c of cands) if (c.rival && c.ncc !== null) rivalN.push(c.ncc);
+      sides.push({ cands, weak: !!j.weak });
+    }
+    let auc = 0; for (const t of trueN) for (const r of rivalN) auc += t > r ? 1 : t === r ? 0.5 : 0;
+    auc /= Math.max(1, trueN.length * rivalN.length);
+    const med = (a) => (a.length ? a.slice().sort((x, y) => x - y)[a.length >> 1].toFixed(2) : '-');
+    console.log(`SEAM true joins ${trueN.length}: ncc median ${med(trueN)}; rival candidates ${rivalN.length}: median ${med(rivalN)}; AUC ${auc.toFixed(3)}`);
+    for (const w of [0, 0.5, 1, 2, 4]) {
+      let first = 0, firstW = 0, inList = 0;
+      for (const sd of sides) {
+        const L = sd.cands.filter((c) => c.isTrue || c.rival).map((c) => ({ c, sc: c.x.score - w * (c.ncc === null ? 0 : c.ncc) }));
+        if (!L.some((q) => q.c.isTrue)) continue;
+        inList++;
+        L.sort((a, b) => a.sc - b.sc);
+        if (L[0].c.isTrue) { first++; if (sd.weak) firstW++; }
+      }
+      console.log(`SEAM weight ${w}: true partner first ${first} of ${inList} sides with it in the top 10 (known-weak photos: ${firstW})`);
+    }
+  }
   // GATE=1: the Matches list's own gate (Engine.scanPairs: both ways first,
   // prob >= minProb both ways), with the "partner not scanned yet" odds of
   // Engine.nullOdds for a puzzle of `total` pieces of which the pool is

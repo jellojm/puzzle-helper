@@ -578,7 +578,20 @@
         if (c1[0] >= PH.COL_CLIP_HI) clip++;
       }
       const cc = { clip: clip / NC, busy: PH.median(Array.from(pspread)) };
-      const e1 = { type, sig, gtrim: G.trim, strip, len: L, amp, unc, alt, pcol, pspread, pxy, cc };
+      // A fine colour profile along the edge (owner, 2026-10-11, idea 7): on
+      // a true join print lines and colour changes cross the seam at the same
+      // places on both pieces; the profile's pattern is compared, not just
+      // its average colour (PH.seamNcc).
+      let prof = null;
+      if (PH.SEAM_PROF_N) {
+        const NP = PH.SEAM_PROF_N, pp = PH.arcPoints(pts, NP, C.ends, 1 - C.ends), dP = Math.max(2, PH.SEAM_PROF_DEPTH * L);
+        prof = new Float32Array(NP * 3);
+        for (let s2 = 0; s2 < NP; s2++) {
+          const q = pp[s2], c = sampleLab(lab, w, h, q.x - q.ty * dP, q.y + q.tx * dP, 1);
+          prof[3 * s2] = Math.min(255, c[0] * wkC); prof[3 * s2 + 1] = c[1] - wa; prof[3 * s2 + 2] = c[2] - wb;
+        }
+      }
+      const e1 = { type, sig, gtrim: G.trim, strip, len: L, amp, unc, alt, pcol, pspread, pxy, cc, prof };
       e1.cdoubt = PH.colourDoubt(e1, lf); // null: colour trusted
       edges.push(e1);
     }
@@ -871,6 +884,8 @@
   // (tuned on the owner's video: the sweep passed some pieces only at
   // ~120-155 px; the pale piece's correct reads scored q 0.27-0.29, its
   // misreads 0.15-0.23; two close reads must still agree to check a piece)
+  PH.SEAM_PROF_N = 64; // fine colour profile points along an edge
+  PH.SEAM_PROF_DEPTH = 0.025; // ... this share of the edge length inside the cut
   PH.DETAIL_PX = 360; // a piece's detail picture: long side (px)
   PH.CLOSE_SIDE = 120; // (overview reads in the owner's video: 70-80 px)
   PH.CLOSE_Q = 0.25;

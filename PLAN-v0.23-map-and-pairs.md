@@ -573,3 +573,24 @@ cut splits each piece where its print matches the floor or a shadow; the
 piece size is then learned from the halves, and the one whole piece is
 called a clump of two. Reads tried 3-9 per photo. Next: segmentation on
 these tables, judged with Test mode reports.
+
+## 0.26.0 / 0.26.1 — high-resolution reads; seam pattern measured (2026-10-11)
+
+- **0.26.0 High-resolution reads**: the camera gives 4032x3024 to a page
+  (capabilities in the reports); video stays 1920x1440. When the phone is
+  steady and a piece still to be checked is close, whole in view and in the
+  middle 60%, and the view moved a quarter of a view since the last shot,
+  the camera switches up for a moment, the sharpest of 3 frames goes through
+  the photo path, and back (main.js readShot, worker `shot`). At most every
+  4 s; Settings switch; counted in the report (`hiResShots`). e2e: shot
+  taken, read (11 pieces at the test camera's 1280x720), camera back.
+- **Idea 7, the seam's colour pattern** (`e.prof`: 64 Lab points per edge
+  2.5% of the edge inside the cut; `PH.seamNcc`: normalized correlation of
+  the two profiles end to end, best of +-2 points). The colour points were
+  already sampled from the full-resolution crop, so "sharper pictures" add
+  nothing there - the pattern was the new part. `SEAM=1 node
+  test/real-joins.js`: true joins ncc median 0.23 vs the matcher's other
+  top-10 candidates 0.09, AUC 0.67 (depth 1.2% 0.52, 4% 0.63, 6% 0.69).
+  Added to the score at any weight the true partner is first less often
+  (27 -> 19-25 of 41 sides). Not used for matching; the profile is kept and
+  exported (pieces.json `profile`) for offline methods.

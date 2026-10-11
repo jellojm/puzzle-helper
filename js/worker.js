@@ -432,7 +432,7 @@ async function pieceExport() {
         id: p.id, state: p.state || 'checking', code: t1.code, quality: t1.quality ? t1.quality.q : null, views: t1.nObs || 1, cornerScore: t1.cornerScore, meanSide: r1(t1.meanSide || 0),
         corners: t1.corners.map((q) => q.map(r1)),
         edges: t1.edges.map((e) => ({ type: e.type, unc: !!e.unc, len: r1(e.len || 0), lenRel: r3(e.lenRel || 1), amp: e.amp !== undefined ? r3(e.amp) : null, gtrim: e.gtrim || 0,
-          sig: e.sig ? Array.from(e.sig, r3) : null, colour: e.pcol ? Array.from(e.pcol, (v) => Math.round(v)) : null, colourXY: e.pxy ? Array.from(e.pxy, r3) : null, colourDoubt: e.cdoubt || null })),
+          sig: e.sig ? Array.from(e.sig, r3) : null, colour: e.pcol ? Array.from(e.pcol, (v) => Math.round(v)) : null, colourXY: e.pxy ? Array.from(e.pxy, r3) : null, colourDoubt: e.cdoubt || null, profile: e.prof ? Array.from(e.prof, (v) => Math.round(v)) : null })),
         detail: d ? { q: d.q, w: d.w, h: d.h, ox: d.ox, oy: d.oy, s: r3(d.s), corners: d.corners ? d.corners.map((q) => q.map(r1)) : null, outline: d.outline ? Array.from(d.outline, r1) : null } : null,
         image: rect ? Object.assign({ sheet: sheets.length + 1, source: src === d ? 'detail' : 'thumbnail' }, rect) : null,
         pos: p.pos ? p.pos.map(Math.round) : null, island: p.island, joined: p.joined, wrong: p.wrong, gone: !!p.gone, inPuzzle: !!p.inPuzzle,

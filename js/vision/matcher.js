@@ -349,6 +349,31 @@
     }
     return res;
   };
+  /** How well two edges' fine colour profiles line up across the seam
+   *  (normalized cross-correlation of the pattern, each channel's mean taken
+   *  out so the light doesn't count; best of a small shift for corner
+   *  jitter). eB runs the other way along the seam. -1..1; null if missing. */
+  PH.seamNcc = function (eA, eB, maxShift) {
+    const a = eA && eA.prof, b = eB && eB.prof;
+    if (!a || !b || a.length !== b.length) return null;
+    const n = a.length / 3, S = maxShift === undefined ? 2 : maxShift, wL = 0.5;
+    let best = -1;
+    for (let sh = -S; sh <= S; sh++) {
+      const m = [0, 0, 0, 0, 0, 0];
+      let cnt = 0;
+      for (let i = 0; i < n; i++) { const j = n - 1 - i + sh; if (j < 0 || j >= n) continue; for (let c = 0; c < 3; c++) { m[c] += a[3 * i + c]; m[3 + c] += b[3 * j + c]; } cnt++; }
+      if (cnt < n * 0.7) continue;
+      for (let c = 0; c < 6; c++) m[c] /= cnt;
+      let ab = 0, aa = 0, bb = 0;
+      for (let i = 0; i < n; i++) {
+        const j = n - 1 - i + sh; if (j < 0 || j >= n) continue;
+        for (let c = 0; c < 3; c++) { const k = c === 0 ? wL : 1, x = (a[3 * i + c] - m[c]) * k, y = (b[3 * j + c] - m[3 + c]) * k; ab += x * y; aa += x * x; bb += y * y; }
+      }
+      if (aa < 1e-3 || bb < 1e-3) continue;
+      best = Math.max(best, ab / Math.sqrt(aa * bb));
+    }
+    return best;
+  };
   PH.LOOP_CONF = 0.9;
   // Pockets (Engine.pockets): two edges fitting at once are stronger evidence
   // than either alone, so one may be weak (colour off) as long as the pair
