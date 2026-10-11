@@ -318,6 +318,7 @@
           }
         }
       }
+      if (PH.LINK_ISLANDS && (budgetMs === Infinity || (this.frameNo || 0) % 30 === 15)) st.islandsLinked = (st.islandsLinked || 0) + this.linkIslands();
       if (this.box && now() < end) this.dedupeByCell(Math.max(1, end - now()));
       if (budgetMs === Infinity || (this.frameNo || 0) % 60 === 30) this.groupsAndEdges();
       let nc = 0; for (const p of this.pieces.values()) if (this.isChecked(p)) nc++;
@@ -395,6 +396,67 @@
         }
       }
       return out;
+    }
+    /** Two scan islands showing the same pieces: tracking broke, a new island
+     *  was forked and every piece in view catalogued again (report
+     *  2026-10-11 18:58: 3 loose pieces on a wood floor, 5 islands, 9
+     *  entries). Only the box picture (dedupeByCell) or a still photo
+     *  (mergeIslandsByShape) folded islands back. Here checked pieces are
+     *  paired one-to-one across two islands - by close-read shape, or by
+     *  print and size (on that floor the same piece read BBFB and BFTB) -
+     *  and the islands are joined when the pairs are laid out alike: >= 3
+     *  consistent pairs (RANSAC, scale ~1), or 2 shape pairs whose spacing
+     *  agrees. The newer island moves into the older; the pairs are merged. */
+    linkIslands() {
+      const unitT = this.unitTable();
+      if (!unitT) return 0;
+      const by = new Map();
+      for (const p of this.pieces.values()) {
+        if (!p.pos || p.gone || !this.isChecked(p) || !p.t1 || !PH.isCloseRead(p.t1)) continue;
+        if (!by.has(p.island)) by.set(p.island, []);
+        by.get(p.island).push(p);
+      }
+      const isl = [...by.keys()].sort((a, b) => a - b);
+      let linked = 0;
+      for (let i = 0; i < isl.length; i++) for (let j = i + 1; j < isl.length; j++) {
+        const A = by.get(isl[i]), B = by.get(isl[j]);
+        if (!A || !B || A.length < 2 || B.length < 2) continue;
+        const pairs = [], usedA = new Set();
+        for (const b of B) {
+          const c = [];
+          for (const a of A) {
+            if (usedA.has(a.id)) continue;
+            const ar = (a.t1.meanSide || 1) / (b.t1.meanSide || 1);
+            if (ar < PH.LINK_SIZE[0] || ar > PH.LINK_SIZE[1]) continue;
+            const shape = PH.samePiece(a.t1, b.t1, PH.ANCHOR_SHAPE).ok, fp = a.fp && b.fp ? PH.fpSimilarity(a.fp, b.fp) : 0;
+            if (shape || fp >= PH.LINK_FP) c.push({ a, shape, fp });
+          }
+          if (!c.length) continue;
+          c.sort((x, y) => (y.shape - x.shape) || (y.fp - x.fp));
+          // one clear partner: a shape match beats print; between two of a kind, print decides by a margin
+          if (c[1] && c[1].shape === c[0].shape && c[0].fp - c[1].fp < PH.LINK_FP_MARGIN) continue;
+          usedA.add(c[0].a.id);
+          pairs.push({ src: b.pos, dst: c[0].a.pos, a: c[0].a, b, shape: c[0].shape });
+        }
+        let T = null, inl = null;
+        if (pairs.length >= 3) {
+          const r = PH.simRansac(pairs, unitT * 0.75, 100, this.rnd);
+          if (r && r.inliers.length >= 3) { T = r.T; inl = r.inliers.map((k) => pairs[k]); }
+        } else if (pairs.length === 2 && pairs[0].shape && pairs[1].shape) {
+          T = PH.simFit(pairs.map((q) => q.src), pairs.map((q) => q.dst)); inl = pairs;
+        }
+        if (!T || Math.abs(Math.log(PH.simScale(T))) > PH.LINK_SCALE) continue;
+        if (inl.length === 2 && Math.hypot(inl[0].src[0] - inl[1].src[0], inl[0].src[1] - inl[1].src[1]) < unitT * 1.2) continue; // too close together to fix a turn
+        const ib = isl[j], ia = isl[i];
+        for (const p of this.pieces.values()) if (p.island === ib && p.pos) { this.moveWithGroup(p, T); p.island = ia; this.touch(p); }
+        if (this.island === ib) { this.island = ia; if (this.pose) this.pose = composeSim(T, this.pose); }
+        for (const q of inl) if (this.pieces.has(q.a.id) && this.pieces.has(q.b.id)) this.mergeEntries(q.a, q.b);
+        this.logEvt('linkIslands', ia, ib);
+        by.set(ia, A.concat(B).filter((p) => this.pieces.has(p.id))); by.delete(ib);
+        linked++;
+      }
+      if (linked) { this.version++; this.matchCache.clear(); }
+      return linked;
     }
     /** Fold entry `drop` into `keep` (the same physical piece catalogued
      *  twice): the checked one, else the better-read one, else the older one
@@ -982,13 +1044,19 @@
       // (scored without the live split budget: a photo is analysed once, and
       // with 40 ms the choice depended on the machine's speed - test
       // glass-table pieces-1 flipped to a wrong model and 1 piece)
-      const tried = this.opts.autoBg !== false ? this.bgCandidates(proc).map((c) => this.scoreBg(proc, c, { splitBudgetMs: undefined })) : [];
+      // A high-res shot of the live view (info.liveBg): the same table as the
+      // scan - its background model is used as it is, no search and no fit
+      // (report 2026-10-11 19:15: a shot took 84 s on the phone, the scan
+      // stalled meanwhile; the search and fit are ~2/3 of a photo's time).
+      // (the outline model is tied to the live image size: searched afresh)
+      const live = info.liveBg && this.bgModel && this.bgModel.kind !== 'edges' && !this.opts.snapBg ? this.bgModel : null;
+      const tried = !live && this.opts.autoBg !== false ? this.bgCandidates(proc).map((c) => this.scoreBg(proc, c, { splitBudgetMs: undefined })) : [];
       const snapBest = tried.length ? this.pickBg(tried) : null;
       // (opts.snapBg: a background model forced - Test mode's variants)
-      const snapModel = this.opts.snapBg || (snapBest ? snapBest.c : null);
+      const snapModel = this.opts.snapBg || live || (snapBest ? snapBest.c : null);
       this.snapModelUsed = snapModel;
       let seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel, seamSplit: true } : { bg: this.bg, bgSmooth: 0.5, seamSplit: true }));
-      if (snapModel && !this.opts.snapBg && this.opts.photoFit !== false) seg = this.photoFit(proc, seg, snapModel, tried) || seg; // (a forced model is used as it is)
+      if (snapModel && !this.opts.snapBg && !live && this.opts.photoFit !== false) seg = this.photoFit(proc, seg, snapModel, tried) || seg; // (a forced model is used as it is)
       this.snapSeg = { n: seg.dets.length, unit: seg.unitArea ? Math.round(seg.unitArea) : null };
       if (!this.bg) this.bg = seg.bg;
       if (!this.boardRef && seg.bg && seg.bg.L > 15) { this.boardRef = { L: seg.bg.L, a: seg.bg.a, b: seg.bg.b }; this.boardRefDirty = true; } // (a first photo sets the scan's board)
@@ -1024,7 +1092,10 @@
         const p = d.id && this.pieces.get(d.id);
         if (!p) continue;
         p.sightings = (p.sightings || 0) + 1;
-        if (d.t1 && PH.isCloseRead(d.t1) && p.t1 && PH.isCloseRead(p.t1)) p.photoRead = true;
+        // (a shot of the live view checks only a good read: report 2026-10-11
+        // 19:15, a clump of 3 pieces read at q 0.39 was checked from a shot)
+        const goodEnough = !info.liveBg || (d.t1 && d.t1.quality && d.t1.quality.q >= (PH.ONE_READ_Q || 0.6));
+        if (d.t1 && PH.isCloseRead(d.t1) && p.t1 && PH.isCloseRead(p.t1) && goodEnough) p.photoRead = true;
       }
       // Pieces cut apart along a seam are joined: their 'J' edges, recorded as a
       // confirmed join (as a Fits answer would; pockets use it).

@@ -489,7 +489,7 @@ const handlers = {
   shot(msg) {
     const src = bitmapSource(msg.bitmap);
     let res = null;
-    try { res = engine.processSnap(src, { tilt: msg.tilt }); } finally { msg.bitmap.close(); }
+    try { res = engine.processSnap(src, { tilt: msg.tilt, liveBg: true }); } finally { msg.bitmap.close(); }
     post({ type: 'shotDone', w: src.w, h: src.h, result: res && { found: res.found, added: res.added, shaped: res.shaped, ms: res.ms, counts: res.counts } });
     scheduleSave();
   },

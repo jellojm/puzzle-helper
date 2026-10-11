@@ -612,3 +612,21 @@ each piece. Can take the app's Fits / No answers. Saves -labels.json (kept in
 the browser per report meanwhile). tools/label-score.js scores a pieces.json
 (or two builds' pieces.json) against the labels: edge codes right, corner
 error in piece sides, outline IoU vs trace.
+
+## 0.26.3 - reports 2026-10-11 18:58 and 19:15 (wood floor)
+- 18:58: 3 loose pieces became 9 entries - tracking broke 4 times, each new
+  island catalogued them again, and the reads differed (BBFB vs BFTB) too much
+  for the strict shape join (SAME_SHAPE). Engine.linkIslands (housekeeping,
+  every 30 frames): checked pieces paired one-to-one across two islands by
+  close-read shape (ANCHOR_SHAPE) or print (fp >= 0.9, size within 25%),
+  joined when >= 3 pairs agree in layout (RANSAC, scale ~1) or 2 shape pairs
+  agree; the pairs merged. test/island-link.js.
+- 18:58: hi-res shot failed "before the HTMLVideoElement has data" while the
+  camera switched size: waits for the picture, skips a failed capture.
+- 19:15: a shot took 84 s on the phone (the scan stalled: 18 frames in 3 min).
+  Shots use the live background model (no search, no photoFit: 2.5x faster on
+  PC, same pieces); the next shot waits 3x the last one's time. A shot checks
+  a piece only with a read of q >= ONE_READ_Q (a 3-piece clump at q 0.39 was
+  checked from a shot).
+- 19:15 also: joined pairs of a kids' puzzle read as one long piece (no box
+  picture to tell). Not addressed.

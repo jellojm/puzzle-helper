@@ -380,6 +380,11 @@
   // together stays below twice the "partner not catalogued" level
   // (test/pockets.js: true fillers had one edge at 3.4-5.8 with shapes 0.04-0.07).
   PH.POCKET_EDGE = 6.0;
+  PH.LINK_ISLANDS = true; // Engine.linkIslands: fold islands that show the same pieces
+  PH.LINK_FP = 0.9; // print likeness for an island-linking pair (no shape match)
+  PH.LINK_FP_MARGIN = 0.05; // over the runner-up
+  PH.LINK_SIZE = [0.75, 1.33]; // side length ratio of a linking pair
+  PH.LINK_SCALE = 0.25; // |log scale| of the island-to-island fit
   PH.REREAD_GAIN = 0.08; // how much better (read quality) a fresh read must be to replace a shape turned down in a "No"
   PH.POCKET_SUM = 6.0;
   // "Fill this spot" (Engine.fillSpot): weight of the fit with the pieces

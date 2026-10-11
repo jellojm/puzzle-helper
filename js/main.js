@@ -5,7 +5,7 @@ import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 import { drawGroup } from './buildView.js';
 
-const APP_VERSION = '0.26.2';
+const APP_VERSION = '0.26.3';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -172,7 +172,7 @@ function onWorkerMessage(e) {
     case 'shotDone': {
       S.snapping = false;
       const r = m.result || {};
-      S.shots = (S.shots || 0) + 1; S.lastShotResult = { found: r.found, added: r.added, shaped: r.shaped, ms: Math.round(r.ms || 0), w: m.w, h: m.h, at: new Date().toISOString() };
+      S.shots = (S.shots || 0) + 1; S.lastShotDone = performance.now(); S.lastShotResult = { found: r.found, added: r.added, shaped: r.shaped, ms: Math.round(r.ms || 0), w: m.w, h: m.h, at: new Date().toISOString() };
       if (r.counts) updateStats(r.counts);
       if ($('modeHint').textContent.startsWith('Reading in high resolution')) $('modeHint').textContent = modeHint(S.mode);
       break;
@@ -977,7 +977,10 @@ S.hiRes = true;
 $('hiResToggle').onchange = (e) => { S.hiRes = e.target.checked; saveLocal(); };
 function maybeShot(m) {
   if (!S.hiRes || S.snapping || S.mode !== 'scan' || !S.usingCamera || !S.track || !S.lastStill) return;
-  if (performance.now() - (S.lastShot || 0) < SHOT_GAP) return;
+  // (and three times as long as the last shot took to read: scanning waits
+  // while a shot is read - report 2026-10-11 19:15, an 84 s shot)
+  const lastMs = S.lastShotResult ? S.lastShotResult.ms : 0;
+  if (performance.now() - (S.lastShotDone || S.lastShot || 0) < Math.max(SHOT_GAP, 3 * lastMs)) return;
   // Only when it is worth it (owner, 2026-10-11: "trigger it when there is an
   // object that needs to be read and is in a good position ... reduce
   // repetitive shots"): a piece still to be checked, close enough, whole in
@@ -1023,9 +1026,15 @@ async function readShot(why) {
     const t0 = performance.now();
     while (hi && video.videoWidth * video.videoHeight <= w0 && performance.now() - t0 < 1500) await new Promise((r) => setTimeout(r, 50));
     await new Promise((r) => setTimeout(r, 250));
+    // (the video has no picture for a moment while it switches size: report
+    // 2026-10-11 18:58, "Cannot create ImageBitmap before the HTMLVideoElement
+    // has data" - wait for it, and a capture that still fails is skipped)
+    const t1 = performance.now();
+    while (video.readyState < 2 && performance.now() - t1 < 2000) await new Promise((r) => setTimeout(r, 50));
     let best = null, bestS = -1;
     for (let i = 0; i < 3; i++) {
-      const b = await createImageBitmap(video);
+      let b;
+      try { b = await createImageBitmap(video); } catch (e) { if (i === 2 && !best) throw e; await new Promise((r) => setTimeout(r, 120)); continue; }
       const s = frameSharpness(b);
       if (s > bestS) { if (best) best.close(); best = b; bestS = s; } else b.close();
       if (i < 2) await new Promise((r) => setTimeout(r, 90));
