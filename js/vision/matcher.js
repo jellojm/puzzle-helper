@@ -355,6 +355,7 @@
   // together stays below twice the "partner not catalogued" level
   // (test/pockets.js: true fillers had one edge at 3.4-5.8 with shapes 0.04-0.07).
   PH.POCKET_EDGE = 6.0;
+  PH.REREAD_GAIN = 0.08; // how much better (read quality) a fresh read must be to replace a shape turned down in a "No"
   PH.POCKET_SUM = 6.0;
   // "Fill this spot" (Engine.fillSpot): weight of the fit with the pieces
   // around the spot vs the picture. test/solve-aids.js: right piece first

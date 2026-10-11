@@ -455,6 +455,8 @@ const handlers = {
     const aspect = msg.aspect;
     post({ type: 'boxGrid', grid: PH.chooseGrid(msg.pieces, aspect) });
   },
+  // the Build view: groups of joined pieces laid out, and the join log
+  builds() { post({ type: 'builds', data: engine.buildGroups() }); },
   // the piece view (a tapped piece): its description, without selecting it
   pieceInfo(msg) {
     post({ type: 'pieceInfo', id: msg.id, desc: engine.pieces.has(msg.id) ? engine.describe(msg.id) : null });

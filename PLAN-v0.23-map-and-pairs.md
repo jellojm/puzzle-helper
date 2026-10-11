@@ -522,3 +522,27 @@ re-checks 6-12% with single frames of 0.7-3.6 s.
   a smaller outline image (1.5x: good detections 5.87 -> 4.92).
 - Checks: IMG_3609 auto background 10.10 -> 10.25 good a frame; IMG_3593
   and IMG_3605 identical (phone pace, ab.js); npm test, e2e pass.
+
+## 0.24.0 — the puzzle built from joins; "No" re-reads; full-screen Settings (2026-10-11)
+
+Owner: "log pieces attached and show that they are paired, basically
+building piece by piece of whole puzzle"; "does it need a box picture?" (no);
+"does anything happen when you click doesn't fit? one of the pieces is not
+measured well enough or the actual piece has not been found"; "options menus
+should be full screen as camera is off".
+- **Build view** (More -> Joined pieces): `Engine.buildGroups` lays every
+  group of confirmed joins (Fits, seam pairs from photos) on a grid, joins
+  added oldest first; a join that disagrees with what is laid is a conflict
+  (red tag) and moves nothing. Pieces drawn from their own pictures, cut out
+  along their outlines and turned the way they fit (`js/buildView.js`); the
+  join log, newest first. Camera off while open. `test/build-groups.js`:
+  a 3x3 block from its 12 true joins laid exactly (cells and turns, up to
+  turning the whole group); a wrong join = 1 conflict, nothing moved.
+- **"No"**: both pieces get a fresh close read first when next in view
+  (priority 0.6); agreeing -> kept (the partner isn't scanned yet); a
+  clearly better disagreeing read (quality +0.08) replaces the stored shape
+  - before, a bad shape was never replaced (re-reads that disagreed only
+  counted as conflicts) - unless confirmed joins rely on its edge numbers.
+  `test/no-reread.js`.
+- Settings is full screen. e2e: Fits in Matches -> Build view shows the
+  pair; the open-spot tap retries (a race with the looping test video).

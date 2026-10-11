@@ -206,7 +206,10 @@ function writePng(file, mat) {
       .then((h) => h.jsonValue()).catch(async () => page.evaluate(() => window.__phAsm()));
     check('the assembled block is built up, found on the box and shaded there', !!(asm.info && asm.info.place) && asm.shaded >= 6,
       JSON.stringify({ cells: asm.info && asm.info.cells, place: asm.info && asm.info.place, shaded: asm.shaded }));
-    if (asm.spot && await page.evaluate(() => window.__phOpenSpot())) {
+    // (the spot can pan out of view between the look above and the tap: try
+    // the tap until one is in view, as the piece taps above re-aim)
+    const spotTapped = asm.spot && await page.waitForFunction(() => window.__phOpenSpot(), null, { timeout: 30000, polling: 250 }).then(() => true).catch(() => false);
+    if (spotTapped) {
       const ok = await page.waitForFunction(() => /Spot: column/.test(document.getElementById('selTitle').textContent), null, { timeout: 8000 }).then(() => true).catch(() => false);
       await page.screenshot({ path: path.join(OUT, 'e2e-section.png') });
       check('tapping an open spot of the assembled block lists pieces for it', ok, await page.textContent('#selSub'));
@@ -284,7 +287,19 @@ function writePng(file, mat) {
     const mLabel = mOpen ? await page.textContent('#matchLabel') : '';
     await page.screenshot({ path: path.join(OUT, 'e2e-matches.png') });
     check('Matches: pairs listed with a verdict', mOpen && /(Strong match|Likely|Maybe|Look-alike|Unlikely) \d+%/.test(mLabel), mLabel || 'match bar did not open');
+    // Fits on the shown pair -> the Build view (owner, 2026-10-11) shows it
+    // built as a group of 2, camera off while it is open; Settings is full screen.
+    if (mOpen) { await page.click('#matchFits').catch(() => {}); await page.waitForTimeout(500); }
     if (mOpen) await page.click('#matchClose').catch(() => {});
+    await page.click('#menuBtn');
+    const menuFull = await page.evaluate(() => { const r = document.getElementById('menu').getBoundingClientRect(); return r.top <= 1 && r.height >= window.innerHeight - 2; });
+    check('Settings is full screen', menuFull);
+    await page.click('#buildBtn');
+    await until(() => !document.getElementById('buildModal').hidden && /join/.test(document.getElementById('buildSummary').textContent), null, 10000);
+    const bv = await page.evaluate(() => ({ sum: document.getElementById('buildSummary').textContent, groups: document.querySelectorAll('#buildGroups canvas').length, joins: document.querySelectorAll('#buildJoins li').length, cam: document.querySelector('video').paused || !document.querySelector('video').srcObject }));
+    await page.screenshot({ path: path.join(OUT, 'e2e-build.png') });
+    check('Build view: the confirmed pair built as a group, joins logged, camera off', !mOpen || (bv.groups >= 1 && bv.joins >= 1 && bv.cam), `${bv.groups} group(s), ${bv.joins} join(s); ${bv.sum.slice(0, 60)}`);
+    await page.click('#buildClose');
 
     // Mark the finished border: aim, capture, Use (the default corners are
     // fine here: what matters is that the view is learned and found again).

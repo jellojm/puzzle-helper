@@ -2178,7 +2178,9 @@
           if (!p) continue; // (merged away this frame)
           const sidePx = Math.sqrt(d.area) / scale;
           let pri = 0;
-          if (p.t1) {
+          if (p.t1 && p.reread && sidePx / 1.1 >= PH.CLOSE_SIDE && this.fNo - (p.rereadF === undefined ? -1e9 : p.rereadF) >= 4) {
+            pri = 0.6; // a piece turned down in a "No": its fresh close read comes first
+          } else if (p.t1) {
             const closeNow = sidePx / 1.1 >= PH.CLOSE_SIDE, pc = PH.isCloseRead(p.t1);
             // (a piece with one close read gets its second whatever the blob's
             // size says - the read's own corner-to-corner size decides)
@@ -2278,6 +2280,7 @@
           if (nc && this.isChecked(j.p) && j.p.t1 && PH.isCloseRead(j.p.t1)) {
             j.p.verifyF = this.fNo;
             if (F.offLight) { n1++; continue; } // (a read in odd light proves nothing either way)
+            if (j.p.reread && this.rereadDone(j.p, t1)) { n1++; continue; }
             const m = PH.samePiece(t1, j.p.t1, PH.ANCHOR_SHAPE);
             if (j.p.claim) { // its own spot read while another entry claims it
               if (m.ok) this.settleClaim(j.p, false);
@@ -2725,6 +2728,26 @@
       this.matchCache.set(id, { version: this.version, res, loops: !!(opts && opts.loops) });
       return res;
     }
+    /** A fresh close read of a piece turned down in a "No". Agrees with the
+     *  stored shape: the shape was fine (the true partner isn't scanned yet).
+     *  Disagrees and is clearly better (read quality PH.REREAD_GAIN higher):
+     *  it replaces the stored shape - unless confirmed joins rely on the
+     *  stored edge numbers. Returns true when it settled the re-read. */
+    rereadDone(p, t1) {
+      p.rereadF = this.fNo;
+      const m = PH.samePiece(t1, p.t1);
+      const q0 = p.t1.quality ? p.t1.quality.q : 0, q1 = t1.quality ? t1.quality.q : 0;
+      if (m.ok) { p.reread = 0; this.logEvt('rereadOk', p.id); return false; } // (the usual agreement path fuses it)
+      const joined = (p.joined || []).some(Boolean);
+      if (!joined && q1 >= q0 + PH.REREAD_GAIN && PH.isCloseRead(t1)) {
+        p.t1 = t1; p.t1Frame = this.fNo; p.closeAgree = 1; p.reread = 0; p.replaced = (p.replaced || 0) + 1;
+        if (p.rd) p.rd.stale = true;
+        this.logEvt('rereadReplace', p.id); this.touch(p); this.version++; this.matchCache.clear();
+        return true;
+      }
+      if (--p.reread <= 0) { p.reread = 0; this.logEvt('rereadKept', p.id); } // (a few tries, then the stored shape stays)
+      return false;
+    }
     /** The owner's confirmed joins (Fits): id -> [4] of {id, edge} or null. */
     confirmedJoins() {
       if (this.cjCache && this.cjCache.v === this.version) return this.cjCache.map;
@@ -2738,6 +2761,71 @@
       }
       this.cjCache = { v: this.version, map };
       return map;
+    }
+    /** The puzzle built from the owner's confirmed joins (Fits taps, pairs
+     *  cut along a seam in photos), piece by piece (owner, 2026-10-11: "log
+     *  pieces attached and show that they are paired, building piece by piece
+     *  the whole puzzle"; no box picture needed). Each group of joined pieces
+     *  is laid on a grid: one piece at (0, 0) unturned; a join of A's edge ka
+     *  to B's edge kb puts B in the cell A's edge faces, turned so kb faces
+     *  back. Edges run clockwise from the top: turn r = edge k faces direction
+     *  (k + r) % 4 (0 up, 1 right, 2 down, 3 left). A join that disagrees with
+     *  the layout (a wrong Fits, or a misread edge) counts as a conflict. */
+    buildGroups() {
+      // Joins are added one at a time, oldest first: two groups merge (the
+      // second turned and moved so the join fits); a join that disagrees
+      // with what is already laid - same group, wrong place or turn, or
+      // pieces landing on each other - is a conflict and moves nothing.
+      const D = [[0, -1], [1, 0], [0, 1], [-1, 0]], mod = (x) => ((x % 4) + 4) % 4;
+      const groupOf = new Map(), conflicts = [];
+      const seenK = new Set();
+      for (const e of this.fbLog || []) {
+        if (e.kind !== 'joined') continue;
+        const a = this.finalId(e.a), b = this.finalId(e.b);
+        if (a === b || !this.pieces.has(a) || !this.pieces.has(b)) continue;
+        const key = [a + ':' + e.ka, b + ':' + e.kb].sort().join('|');
+        if (seenK.has(key)) continue;
+        seenK.add(key);
+        for (const id of [a, b]) if (!groupOf.has(id)) { const G = { place: new Map([[id, { col: 0, row: 0, rot: 0 }]]) }; groupOf.set(id, G); }
+        const GA = groupOf.get(a), GB = groupOf.get(b), A = GA.place.get(a);
+        const d = mod(e.ka + A.rot), col = A.col + D[d][0], row = A.row + D[d][1], rot = mod(d + 2 - e.kb);
+        if (GA === GB) { const B = GA.place.get(b); if (B.col !== col || B.row !== row || B.rot !== rot) conflicts.push([a, b]); continue; }
+        // turn group B by t quarter turns about b, then move b onto its cell
+        const B0 = GB.place.get(b), t = mod(rot - B0.rot), moved = new Map();
+        let clash = false;
+        for (const [id, q] of GB.place) {
+          let x = q.col - B0.col, y = q.row - B0.row;
+          for (let k = 0; k < t; k++) [x, y] = [-y, x];
+          const pl = { col: col + x, row: row + y, rot: mod(q.rot + t) };
+          for (const r of GA.place.values()) if (r.col === pl.col && r.row === pl.row) { clash = true; break; }
+          if (clash) break;
+          moved.set(id, pl);
+        }
+        if (clash) { conflicts.push([a, b]); continue; }
+        for (const [id, pl] of moved) { GA.place.set(id, pl); groupOf.set(id, GA); }
+      }
+      const groups = [];
+      for (const G of new Set(groupOf.values())) {
+        if (G.place.size < 2) continue;
+        groups.push({
+          conflicts: conflicts.filter(([x]) => G.place.has(x)),
+          pieces: [...G.place].map(([id, pl]) => {
+            const P = this.pieces.get(id), t1 = P && P.t1;
+            return Object.assign({ id, code: t1 ? t1.code : null, thumb: t1 ? t1.thumb : null, corners: t1 ? t1.corners : null, sigs: t1 ? t1.edges.map((x) => x.sig) : null }, pl);
+          }),
+        });
+      }
+      groups.sort((x, y) => y.pieces.length - x.pieces.length);
+      // the log: each confirmed join once, newest first
+      const seenJ = new Set(), joins = [];
+      for (const e of (this.fbLog || []).slice().reverse()) {
+        if (e.kind !== 'joined') continue;
+        const a = this.finalId(e.a), b = this.finalId(e.b), key = [a + ':' + e.ka, b + ':' + e.kb].sort().join('|');
+        if (seenJ.has(key) || !this.pieces.has(a) || !this.pieces.has(b)) continue;
+        seenJ.add(key);
+        joins.push({ a, ka: e.ka, b, kb: e.kb, source: e.source || 'panel', t: e.t });
+      }
+      return { groups, joins };
     }
     /** Pockets (owner, 2026-10-07: "the last piece in a 4 set would not show a
      *  match - it only looks at one edge, not both"): piece A joined on two
@@ -3233,7 +3321,14 @@
         if (this.fbLog.length > 2000) this.fbLog.shift();
         if (x) this.refitCalib();
       }
-      if (f.kind === 'wrong') { A.wrong.push(B.id); B.wrong.push(A.id); }
+      if (f.kind === 'wrong') {
+        A.wrong.push(B.id); B.wrong.push(A.id);
+        // (owner, 2026-10-11: a "No" means one of the two shapes was read
+        // badly, or the true partner isn't scanned yet) both get a fresh close
+        // read first when next in view; a clearly better one replaces a bad
+        // stored shape (Engine.rereadDone)
+        if (f.source !== 'seam' && f.source !== 'test') { A.reread = (A.reread || 0) + 1; B.reread = (B.reread || 0) + 1; }
+      }
       if (f.kind === 'joined') { A.joined[f.ka] = true; B.joined[f.kb] = true; }
       this.touch(A); this.touch(B);
       this.version++;

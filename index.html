@@ -113,6 +113,7 @@
       <p id="accuracyNote" class="muted small" hidden></p>
       <p id="compatNote" class="warn-note small" hidden></p>
       <div class="menu-actions">
+        <button id="buildBtn">Joined pieces (build the puzzle)</button>
         <button id="snapBtn">Catalog from a photo</button>
         <button id="frameBtn">Mark the finished border</button>
         <button id="frameForget" hidden>Forget the marked border</button>
@@ -249,6 +250,22 @@
       <canvas id="frameBox"></canvas>
       <p class="small">Drag each dot onto the <b>outer corner</b> of the assembled border that matches the same number on the box picture.</p>
       <button id="frameTurn" class="link">Turn numbers ↻</button>
+    </div>
+  </section>
+
+  <!-- The Build view: the puzzle built from confirmed joins, piece by piece
+       (owner, 2026-10-11). Camera off while open. -->
+  <section id="buildModal" class="screen" hidden>
+    <div class="box-head">
+      <button id="buildClose" class="link">Close</button>
+      <strong>Joined pieces</strong>
+      <span></span>
+    </div>
+    <div id="buildBody">
+      <p id="buildSummary" class="small"></p>
+      <div id="buildGroups"></div>
+      <h4 class="small">Joins, newest first</h4>
+      <ol id="buildJoins" class="small"></ol>
     </div>
   </section>
 

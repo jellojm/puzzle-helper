@@ -3,8 +3,9 @@ import { frameMapping, sizeCanvas, drawOverlay, drawThumb, drawUpright, EDGE_COL
 import { BoxSetup } from './boxSetup.js';
 import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
+import { drawGroup } from './buildView.js';
 
-const APP_VERSION = '0.23.10';
+const APP_VERSION = '0.24.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -187,6 +188,7 @@ function onWorkerMessage(e) {
       break;
     case 'selected': showFind(m.desc); mapShowSelection(m.desc); break;
     case 'pieceInfo': if (S.pieceView === m.id) showPieceView(m.desc); break;
+    case 'builds': if (!$('buildModal').hidden) showBuilds(m.data); break;
     case 'mapData': tableView.setData(m.data); mapApplyFilter(); break;
     case 'camTrackFailed': stopWorkerCam(m.why); break;
     case 'library': showLibrary(m); if (m.counts) updateStats(m.counts); if (m.saved) toast(`Saved "${m.saved.name}" (${m.saved.pieces} pieces).`); break;
@@ -372,7 +374,7 @@ function tuneFrameRate() {
 // is released outright (not just paused) so the recording indicator goes out.
 function scanningWanted() {
   return S.running && !document.hidden && !S.pickerOpen && !S.idle && !S.reporting && S.mode !== 'map' &&
-    $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden && $('pieceModal').hidden && $('start').hidden;
+    $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden && $('pieceModal').hidden && $('buildModal').hidden && $('start').hidden;
 }
 // Last real camera view, kept when the camera is switched off (menu, idle)
 // so "Send report" can still include what the camera saw.
@@ -393,7 +395,7 @@ function releaseCamera() {
 }
 function applyPower() {
   const want = scanningWanted();
-  $('resume').hidden = !(S.idle && S.running && !document.hidden && $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden && $('pieceModal').hidden);
+  $('resume').hidden = !(S.idle && S.running && !document.hidden && $('menu').hidden && $('boxModal').hidden && $('frameModal').hidden && $('pieceModal').hidden && $('buildModal').hidden);
   if (want === S.active) return;
   S.active = want;
   if (want) {
@@ -952,6 +954,41 @@ overlay.addEventListener('pointerup', (e) => {
     W.post({ type: 'select', id: null });
   }
 });
+// ---------- build view ----------
+// The puzzle built from confirmed joins (Fits taps, pairs found joined in
+// photos), piece by piece; the camera is off while it is open.
+function openBuildView() {
+  $('menu').hidden = true;
+  $('buildModal').hidden = false;
+  $('buildSummary').textContent = 'Loading…';
+  $('buildGroups').innerHTML = ''; $('buildJoins').innerHTML = '';
+  applyPower();
+  W.post({ type: 'builds' });
+}
+function showBuilds(data) {
+  const G = data.groups || [], J = data.joins || [];
+  const inGroups = G.reduce((s, g) => s + g.pieces.length, 0);
+  $('buildSummary').textContent = J.length
+    ? `${J.length} join${J.length > 1 ? 's' : ''} confirmed — ${G.length} group${G.length === 1 ? '' : 's'}, ${inGroups} pieces. Each piece is drawn turned the way it fits; red tags are joins that don't agree with the others (a wrong Fits, or a misread edge).`
+    : 'No joins yet. In Find, tap Fits on a suggested match (or join pieces and photograph them): joined pieces are built up here, piece by piece. No box picture is needed.';
+  const box = $('buildGroups');
+  box.innerHTML = '';
+  G.forEach((g, i) => {
+    const wrap = document.createElement('div'); wrap.className = 'grp';
+    const c = document.createElement('canvas');
+    wrap.appendChild(c);
+    const cap = document.createElement('p'); cap.className = 'small muted';
+    cap.textContent = `Group ${i + 1}: ${g.pieces.length} pieces${g.conflicts && g.conflicts.length ? ` · ${g.conflicts.length} join${g.conflicts.length > 1 ? 's' : ''} disagree` : ''}`;
+    wrap.appendChild(cap);
+    box.appendChild(wrap);
+    drawGroup(c, g, g.pieces.length > 30 ? 56 : 84);
+  });
+  const names = ['red', 'cyan', 'yellow', 'purple'], how = { panel: 'Fits', pairs: 'Fits in Matches', seam: 'seen joined in a photo', test: 'test' };
+  $('buildJoins').innerHTML = J.map((j) => `<li>#${j.a} <span style="color:${EDGE_COLORS[j.ka]}">${names[j.ka]}</span> ↔ #${j.b} <span style="color:${EDGE_COLORS[j.kb]}">${names[j.kb]}</span> <span class="muted">(${how[j.source] || j.source}${j.t ? ', ' + new Date(j.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''})</span></li>`).join('');
+}
+$('buildBtn').onclick = openBuildView;
+$('buildClose').onclick = () => { $('buildModal').hidden = true; applyPower(); };
+
 // ---------- piece view ----------
 // A tapped piece on its own screen: its picture with the outline traced, and
 // the outline's geometry (corner angles, tab / blank / flat and length per
@@ -1144,7 +1181,7 @@ function showFind(desc) {
       const yes = document.createElement('button'); yes.className = 'yes'; yes.textContent = 'Fits';
       const no = document.createElement('button'); no.textContent = 'No';
       yes.onclick = () => W.post({ type: 'feedback', kind: 'joined', a: p.id, ka: e.edge, b: m.id, kb: m.edgeB });
-      no.onclick = () => W.post({ type: 'feedback', kind: 'wrong', a: p.id, ka: e.edge, b: m.id, kb: m.edgeB });
+      no.onclick = () => { W.post({ type: 'feedback', kind: 'wrong', a: p.id, ka: e.edge, b: m.id, kb: m.edgeB }); toastNo(p.id, m.id); };
       acts.append(yes, no);
       c.append(cv, label, acts);
       list.append(c);
@@ -1316,7 +1353,12 @@ const judgePair = (kind) => {
   if (kind === 'wrong') { S.pairs.splice(S.pairIdx, 1); showMatches(); } else stepMatch(1);
 };
 $('matchFits').onclick = () => judgePair('joined');
-$('matchNo').onclick = () => judgePair('wrong');
+$('matchNo').onclick = () => { const q = S.pairs && S.pairs[S.pairIdx || 0]; judgePair('wrong'); if (q) toastNo(q.a, q.b); };
+// After a "No": one of the two shapes was probably read badly, or the true
+// partner isn't scanned yet - the engine re-reads both when next in view.
+function toastNo(a, b) {
+  toast(`Noted — #${a} and #${b} won't be suggested together again. Both get a fresh close read the next time they're steady in view; a better read replaces a bad one.`, 4500);
+}
 $('matchClose').onclick = () => closeMatches();
 function closeMatches() {
   if ($('matchBar').hidden) return;
