@@ -18,7 +18,7 @@ const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-rel
 const OPENCV_SIMD_URL = '../vendor/opencv-4.10.0-simd-em3174.js';
 // A tiny module using one SIMD instruction: does this browser accept SIMD?
 const simdOk = (() => { try { return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])); } catch (_) { return false; } })();
-const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'border', 'engine', 'testmode'];
+const VISION = ['core', 'segment', 'bgLearn', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'border', 'engine', 'testmode'];
 
 let engine = null;
 const recent = []; // recent frame timings
@@ -205,12 +205,19 @@ async function loadState() {
   const cellVotes = await tx('meta', 'readonly', (s) => s.get('cellVotes'));
   const boardRef = await tx('meta', 'readonly', (s) => s.get('boardRef'));
   const lastPose = await tx('meta', 'readonly', (s) => s.get('lastPose'));
-  return { pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null, asm: asm || [], cellVotes: cellVotes || null, boardRef: boardRef || null, lastPose: lastPose || null };
+  const bgLearn = await tx('meta', 'readonly', (s) => s.get('bgLearn'));
+  return { bgLearn: bgLearn || null, pieces: pieces || [], box: box || null, settings: settings || null, feedback: feedback || [], pframe: pframe || null, asm: asm || [], cellVotes: cellVotes || null, boardRef: boardRef || null, lastPose: lastPose || null };
 }
+let bgLearnSaved = -1, bgLearnSavedAt = 0;
 function scheduleSave() {
   if (saveTimer || !db) return;
   saveTimer = setTimeout(async () => {
     saveTimer = null;
+    // the learned background, at most every 30 s (it changes a little every few frames)
+    if (engine.bgLearner && engine.bgLearner.batches !== bgLearnSaved && Date.now() - bgLearnSavedAt > 30000) {
+      bgLearnSaved = engine.bgLearner.batches; bgLearnSavedAt = Date.now();
+      try { await tx('meta', 'readwrite', (s) => s.put(engine.bgLearner.toJSON(), 'bgLearn')); } catch (_) { /* next time */ }
+    }
     if (engine.asmDirty) { // the assembled part, built up from close views
       engine.asmDirty = false;
       try { await tx('meta', 'readwrite', (s) => s.put(engine.exportAsms(), 'asm')); } catch (e) { post({ type: 'error', message: 'Saving failed: ' + e.message }); }
@@ -343,6 +350,8 @@ async function init(msg) {
       engine.resumed = true;
     }
     if (st.lastPose) await tx('meta', 'readwrite', (s) => s.delete('lastPose'));
+    // the table's learned background: the same table works from the first frame
+    if (st.bgLearn && PH.BgLearner) { engine.bgLearner = PH.BgLearner.fromJSON(st.bgLearn); engine.learnedModel = engine.bgLearner.model(); }
     engine.importAsms(st.asm);
     engine.importCellVotes(st.cellVotes);
     engine.fbLog = Array.isArray(st.feedback) ? st.feedback : [];
@@ -368,6 +377,8 @@ function settingsInfo() { return { minDE: engine.opts.minDE, taught: engine.taug
 function forgetTable() {
   engine.clearBackground();
   engine.bgModel = null; engine.bgEval = null; engine.bgModelAt = 0; engine.poorStreak = 0;
+  if (engine.bgLearner) engine.bgLearner.reset(); engine.learnedModel = null; // (another table)
+  if (db) tx('meta', 'readwrite', (s) => s.delete('bgLearn')).catch(() => {});
 }
 async function saveSettings() {
   if (db) await tx('meta', 'readwrite', (s) => s.put({ minDE: engine.opts.minDE, taught: engine.taught }, 'settings'));
@@ -668,6 +679,7 @@ const handlers = {
       poseScale: engine.pose ? +Math.hypot(engine.pose.a, engine.pose.b).toFixed(3) : null,
       unitLive: engine.unitLive ? Math.round(engine.unitLive) : null, unitTable: engine.unitTable ? Math.round(engine.unitTable() || 0) : null,
       bgModel: bm ? { kind: bm.kind, bg: bm.bg ? [bm.bg.L, bm.bg.a, bm.bg.b].map((v) => Math.round(v)) : undefined, n: bm.list ? bm.list.length : undefined } : null,
+      bgLearn: engine.bgLearner ? { piece: Math.round(engine.bgLearner.nf), table: Math.round(engine.bgLearner.nb), lessons: engine.bgLearner.batches, model: engine.learnedModel ? engine.learnedModel.v : null, inUse: !!(bm && bm.kind === 'learned') } : null,
       bgModelChosenAtFrame: engine.bgModelAt || null, bgEvaluating: !!engine.bgEval, poorStreak: engine.poorStreak || 0,
       catalogVersion: engine.version, matchCache: engine.matchCache ? engine.matchCache.size : null, unsaved: engine.dirty ? engine.dirty.size : null,
       // WebAssembly heap: grows without bound if OpenCV Mats leak.
@@ -850,7 +862,7 @@ async function retire(why, where, err) {
   // instead of starting a new scan group (the owner's oak-table session,
   // 2026-10-08: two restarts, 13 groups, duplicates of pieces already checked)
   try {
-    const bm = engine && engine.bgModel ? JSON.parse(JSON.stringify(engine.bgModel)) : null;
+    const bm = engine && engine.bgModel && engine.bgModel.kind !== 'learned' ? JSON.parse(JSON.stringify(engine.bgModel)) : null; // (the learned one is saved with the table: bgLearn)
     if (db && engine && engine.pose) await tx('meta', 'readwrite', (s) => s.put({ t: Date.now(), pose: { a: engine.pose.a, b: engine.pose.b, tx: engine.pose.tx, ty: engine.pose.ty }, island: engine.island, unitLive: engine.unitLive || null, unitLiveW: engine.unitLiveW || null, bgModel: bm }, 'lastPose'));
   } catch (_) { /* best effort */ }
   post({ type: 'cvDead', why, where, message: String((err && err.message) || err || why),

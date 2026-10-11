@@ -15,6 +15,7 @@
     { name: 'glass mode, outline level 30/80', opts: { snapBg: { kind: 'edges', edgeT: [30, 80] } } },
     { name: 'glass mode, outline level 50/120', opts: { snapBg: { kind: 'edges', edgeT: [50, 120] } } },
     { name: 'colour models only (no glass mode)', opts: { edgeBg: false } },
+    { name: 'no learned background', opts: { learnBg: false } },
     { name: 'no shadow peel', ph: { SHADOW_PEEL: null } },
     { name: 'no corner splitter', ph: { CORNER_MAX_UNITS: 0 } },
     { name: 'no tilt estimate', opts: { autoTilt: false } },

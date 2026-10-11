@@ -107,3 +107,37 @@ colour distance only and can't learn wood grain, glare or a printed cloth.
   score check vetoes a model that gets worse.
 - **Phone time:** features must stay within ~8 ms a frame; measured in step 1
   with the model clock and on the phone through reports.
+
+## Progress
+
+### v0.28.0 (2026-10-11): steps 1-3
+- `js/vision/bgLearn.js`: features (Lab with coarse lightness, texture
+  energy x direction x sharpness), naive-Bayes lookup tables, teaching labels
+  from clean cut-outs (pieceScore >= 0.05, 0.5-2x the piece size) and a ring of
+  table around them. Settings found by `tools/bg-learn-eval.js` on the 42
+  report frames: lightness bins of 32, bias 1 (log-odds toward "table").
+- **Report frames (42):** fixed models 749 piece-shaped cut-outs; as one
+  more candidate (the better of the two) 825 (+10%); taught on half of each
+  picture only, 783 (+4.5%). Big wins on dense white pieces on a dark table
+  (2026-10-03 14:28: 15 -> 36) and the dark wood table (22:05: 10 -> 13; the
+  lamp-lit wood no longer cut as "piece", foreground 50% -> 15%).
+- **Live (step 2):** taught every 15th steady frame; offered as a candidate in
+  the background re-checks (it must win like any other model). Videos with an
+  answer key: IMG_3593 better (0 doubled entries, was 6); IMG_3605 changes
+  come from the longer re-check cycle, not the model (it was never chosen;
+  offering nothing but teaching = the old result exactly); IMG_3609 unchanged.
+- **Photos:** a model learned from the photo itself is OFF
+  (`BGL_SNAP_WIN = Infinity`): on the lamp-lit labelled photos it read 16 of 21
+  pieces instead of 20.
+- **Step 3:** the learner is saved per table (meta `bgLearn`, every 30 s),
+  kept for "New puzzle", cleared by "Forget everything".
+- Reports: `worker.engine.bgLearn` (samples, lessons, model version, in use),
+  `seg_bgLearn` timing; Test mode variant "no learned background".
+- Cost: features + mask ~14 ms a frame on the PC (OpenCV filtering); a full
+  cut with the learned model costs about what a colour model's does.
+
+### Next
+- Phone reports: is "learned" chosen on the wood floor and glass, and its cost.
+- Step 4 ("point at an empty patch" when nothing works).
+- Better table examples away from pieces (lit and shadowed table far from any
+  clean piece is never taught).

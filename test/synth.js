@@ -150,8 +150,11 @@ function scatter(cv, P, opts) {
   const table = new cv.Mat(TH, TW, cv.CV_8UC4);
   const td = table.data;
   const felt = opts.felt || [38, 92, 60];
+  // opts.grain: wood-like stripes of this strength (lightness swing)
+  const grain = opts.grain || 0;
   for (let i = 0; i < td.length; i += 4) {
-    const n = (rnd() - 0.5) * 10;
+    let n = (rnd() - 0.5) * 10;
+    if (grain) { const x = (i >> 2) % TW, y = Math.floor((i >> 2) / TW); n += grain * Math.sin(y * 0.45 + 2.5 * Math.sin(x * 0.012) + 0.6 * Math.sin(y * 0.07)); }
     td[i] = felt[0] + n; td[i + 1] = felt[1] + n; td[i + 2] = felt[2] + n; td[i + 3] = 255;
   }
   const gt = [];

@@ -27,6 +27,10 @@
       // with its square, and those passes are what makes a phone sweat, so it
       // is deliberately well below the camera's own resolution.
       this.opts = Object.assign({ procW: +(typeof process !== 'undefined' && process.env && process.env.PROCW) || 640, snapProcW: 1600, minDE: 8, lightW: 0.5, budgetMs: 45 , minSidePx: 40, confirmSightings: 2, fov: 66}, opts || {});
+      // the learned background (js/vision/bgLearn.js) belongs to the table,
+      // not the puzzle: it outlives reset() ("New puzzle", same table)
+      this.bgLearner = PH.BgLearner ? new PH.BgLearner() : null;
+      this.learnedModel = null;
       this.reset();
     }
 
@@ -835,6 +839,13 @@
       const boardNow = this.measureBoard(seg, proc) || seg.bg;
       this.noteBoard(boardNow, info.still !== false);
       this.updateUnitLive(seg, proc, source);
+      // Learned background: every few steady frames this frame's clean
+      // cut-outs teach it what this table looks like (PLAN-auto-background.md)
+      if (PH.BGL_LIVE && this.bgLearner && info.still !== false && this.fNo % PH.BGL_EVERY === 0) {
+        const tl = now();
+        this.teachBg(seg, proc);
+        segT.bgLearn = now() - tl;
+      }
       this.lastSegUnit = seg.unitArea; // the unit actually used this frame (for tests/reports)
       const t1 = now();
       const wT = {}; // where the time after segmentation goes (reports: work_*)
@@ -1057,6 +1068,18 @@
       this.snapModelUsed = snapModel;
       let seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel, seamSplit: true } : { bg: this.bg, bgSmooth: 0.5, seamSplit: true }));
       if (snapModel && !this.opts.snapBg && !live && this.opts.photoFit !== false) seg = this.photoFit(proc, seg, snapModel, tried) || seg; // (a forced model is used as it is)
+      // A model learned from this very photo (its clean cut-outs teach it) is
+      // tried too: on hard tables (dark wood, glass, dense piles) it separates
+      // pieces the fixed models run together (report frames: +10% piece-shaped
+      // cut-outs over 42 frames as one more candidate; PLAN-auto-background.md)
+      // (a photo's own learner: photos are read larger than live frames, and
+      // texture depends on scale)
+      if (PH.BGL_LIVE && PH.BGL_SNAP_WIN < Infinity && snapBest && !this.opts.snapBg && !live && this.opts.learnBg !== false) {
+        const m = this.teachBg(seg, proc, new PH.BgLearner(), seg.unitArea);
+        const sc = m ? this.scoreBg(proc, m, { splitBudgetMs: undefined }) : null;
+        if (sc) { tried.push(sc); this.bgTried = (this.bgTried || []).concat([{ kind: 'learned', good: sc.good, fg: sc.fg }]); }
+        if (sc && sc.score > snapBest.score * PH.BGL_SNAP_WIN) { seg = PH.segment(proc, this.segOpts({ bgModel: m, seamSplit: true })); this.snapModelUsed = m; }
+      }
       this.snapSeg = { n: seg.dets.length, unit: seg.unitArea ? Math.round(seg.unitArea) : null };
       if (!this.bg) this.bg = seg.bg;
       if (!this.boardRef && seg.bg && seg.bg.L > 15) { this.boardRef = { L: seg.bg.L, a: seg.bg.a, b: seg.bg.b }; this.boardRefDirty = true; } // (a first photo sets the scan's board)
@@ -1270,6 +1293,8 @@
         cands.push({ kind: 'color', bg: { L: t.reduce((s, x) => s + x.L, 0) / k, a: t.reduce((s, x) => s + x.a, 0) / k, b: t.reduce((s, x) => s + x.b, 0) / k } });
       }
       if (this.box && this.box.palette) cands.push({ kind: 'palette' });
+      // the background learned from this table (Engine.teachBg)
+      if (this.learnedModel && this.opts.learnBg !== false && PH.BGL_OFFER !== false) cands.push(this.learnedModel);
       // See-through table (glass over a floor): pieces by their sharp
       // outlines (PH.edgeForeground), at each outline threshold.
       // Only without a dominant table colour (glass frames: the commonest
@@ -1280,6 +1305,24 @@
       if (this.curSource && this.opts.edgeBg !== false && !plainish && !(this.edgeBackoff > 0)) for (const edgeT of PH.EDGE_T) cands.push({ kind: 'edges', edgeT });
       else if (this.edgeBackoff > 0) this.edgeBackoff--;
       return cands;
+    }
+    /** Teach the learned background from one segmented image: inside its
+     *  clean cut-outs = piece, a ring of table around them = background
+     *  (PH.bgLearnLabels). Returns the new model or null. */
+    teachBg(seg, proc, learner, unit) {
+      const L = learner || this.bgLearner;
+      const lb = PH.bgLearnLabels(seg.dets, proc.w, proc.h, unit || this.unitLive || seg.unitArea);
+      if (!lb || lb.pieces < 2) return null;
+      if (proc.invalid) for (let i = 0, j = 3; i < lb.labels.length; i++, j += 4) if (!proc.data[j]) lb.labels[i] = 0; // (outside the straightened camera image)
+      if (learner) { L.add(PH.bgFeatures(seg.lab, proc.w, proc.h), lb.labels, 1); return L.model(); }
+      const self = this.bgModel && this.bgModel.kind === 'learned';
+      // (its own cut-outs teach it at half the rate: less self-reinforcement)
+      L.add(PH.bgFeatures(seg.lab, proc.w, proc.h), lb.labels, self ? 4 : 2);
+      const m = L.model();
+      if (!m) return null;
+      this.learnedModel = m;
+      if (self && !this.bgEval) this.bgModel = m; // the model in use keeps learning
+      return m;
     }
     // How many piece-shaped blobs does this background model produce here?
     scoreBg(proc, c, extra) {

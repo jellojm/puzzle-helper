@@ -635,7 +635,7 @@
     // A plain cloth (one dominant color that isn't a puzzle color) is handled
     // more precisely by the distance model; the palette table is for mixed
     // tables. (Non-plain) taught colours win.
-    let plainCloth = model ? model.kind === 'color' : est.frac >= 0.2 && !taughtActive &&
+    let plainCloth = model ? model.kind === 'color' || model.kind === 'learned' : est.frac >= 0.2 && !taughtActive &&
       (!opts.palette || opts.palette[PH.coarseBin(est.L | 0, est.a | 0, est.b | 0)] * 8 < est.frac);
     let lut = plainCloth ? null : PH.buildBgLut(lab, w * h, taughtActive ? opts : Object.assign({}, opts, { taught: null }));
     // Stale taught colours (the light changed since they were tapped): if they
@@ -696,6 +696,8 @@
     // See-through table: the floor is told apart by focus, not colour
     // (PH.edgeForeground). `opts.edgeSource()` = this view's image source.
     let edgeFg = model && model.kind === 'edges' && opts.edgeSource ? edgeMask(opts.edgeSource(), w, h, lab, model.edgeT, opts.edgeReuse) : null;
+    // A background learned from this table (js/vision/bgLearn.js)
+    if (model && model.kind === 'learned' && model.lc) edgeFg = PH.learnedMask(lab, w, h, model, null, P);
     // live frames: the last few views vote (PH.EdgeVoter)
     if (edgeFg && opts.edgeVote) edgeFg = opts.edgeVote.vote(edgeFg, img, opts.edgeVotePeek);
     if (edgeFg) mask.data.set(edgeFg);
