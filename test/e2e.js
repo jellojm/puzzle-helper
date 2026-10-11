@@ -334,6 +334,15 @@ function writePng(file, mat) {
     await page.click('#frameForget');
     check('Mark border: can be forgotten', forgetShown);
 
+    // Test mode (owner, 2026-10-11): a photo read every way, results in
+    // Settings and in the report (data + the picture).
+    await page.click('#menuBtn');
+    await page.check('#testToggle');
+    await page.setInputFiles('#testInput', path.join(OUT, 'table.jpg'));
+    const tested = await page.waitForFunction(() => /1 picture tested/.test(document.getElementById('testStatus').textContent), null, { timeout: 240000, polling: 500 }).then(() => true).catch(() => false);
+    const tstat = await page.textContent('#testStatus');
+    check('Test mode: a photo read every way, results listed', tested && /app as is: \d+ found/.test(tstat), tstat.replace(/\s+/g, ' ').slice(0, 160));
+    await page.click('#closeMenu').catch(() => {});
     // Send report: in a desktop browser the files are downloaded.
     await page.click('#menuBtn');
     const dls = [];
@@ -346,6 +355,8 @@ function writePng(file, mat) {
     // (wait for the files, not a fixed time: under load the report took > 4 s)
     for (let t = 0; t < 60 && !(reportJson && dls.some((n) => n.endsWith('analyzed.jpg'))); t++) await page.waitForTimeout(500);
     check('send report produces frame + analyzed view + data files', dls.some((n) => n.endsWith('.json')) && dls.some((n) => n.endsWith('frame.jpg')) && dls.some((n) => n.endsWith('analyzed.jpg')), dls.join(', '));
+    const tm = reportJson && reportJson.worker && reportJson.worker.testMode;
+    check('the report carries Test mode results and the tested picture', !!tm && tm.results.length === 1 && tm.results[0].variants.length === tm.variants.length && dls.some((n) => /test1\.jpg$/.test(n)), tm ? `${tm.results.length} picture(s), ${tm.variants.length} variants; files ${dls.filter((n) => /test/.test(n)).join(', ')}` : 'no testMode');
     // the camera stays off once the report's snapshot is taken (owner,
     // 2026-10-08: running behind the share sheet it made the app lag)
     const paused = await page.evaluate(() => !document.getElementById('resume').hidden);

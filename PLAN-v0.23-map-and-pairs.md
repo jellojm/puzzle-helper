@@ -546,3 +546,30 @@ should be full screen as camera is off".
   `test/no-reread.js`.
 - Settings is full screen. e2e: Fits in Matches -> Build view shows the
   pair; the open-spot tap retries (a race with the looping test video).
+
+## 0.25.0 — Test mode (2026-10-11)
+
+Owner: "make test mode which will run when checked in settings. It will try
+multiple things all at the same time and build out detailed report for
+analysis ... can provide multiple pictures".
+- Settings -> Test mode: "Test this view" (the camera image, after 1.5 s
+  to settle) and "Test photos..." (several). Each picture is read every way
+  in `PH.TEST_VARIANTS` (js/vision/testmode.js), each on a throwaway engine
+  with the session's box picture and taught colours: the app as is, glass
+  mode forced at 30/80 and 50/120, colour models only, no shadow peel, no
+  corner splitter, no tilt estimate, no photo fit, 1200 px, the old light
+  window. Per variant: detections / clumps / cut by the edge, found, read,
+  reads ok/tried, piece size, the model, background scores, reject reasons,
+  median read quality, corner angles off 90 deg (median, p90), per piece
+  code/quality/area/angles, ms. Results in Settings; Send report adds
+  `worker.testMode` and the pictures (`-testN.jpg`, 1600 px).
+- `tools/testmode.js photo... [--box b.jpg --grid CxR]`: the same variants on
+  the PC (shared code) - a phone report and a PC run measure the same thing.
+- `opts.snapBg` forces a photo's background model (no photo fit then);
+  `opts.photoFit: false`.
+First look (IMG_3665-3669, the owner's glass and wood tables, 2026-10-11):
+every variant finds 0-4 pieces of 10-15. On the glass (IMG_3665) the colour
+cut splits each piece where its print matches the floor or a shadow; the
+piece size is then learned from the halves, and the one whole piece is
+called a clump of two. Reads tried 3-9 per photo. Next: segmentation on
+these tables, judged with Test mode reports.

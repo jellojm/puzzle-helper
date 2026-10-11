@@ -18,7 +18,7 @@ const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-rel
 const OPENCV_SIMD_URL = '../vendor/opencv-4.10.0-simd-em3174.js';
 // A tiny module using one SIMD instruction: does this browser accept SIMD?
 const simdOk = (() => { try { return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])); } catch (_) { return false; } })();
-const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'border', 'engine'];
+const VISION = ['core', 'segment', 'pieceModel', 'box', 'matcher', 'rectify', 'sections', 'assembly', 'frame', 'border', 'engine', 'testmode'];
 
 let engine = null;
 const recent = []; // recent frame timings
@@ -374,6 +374,8 @@ async function saveSettings() {
   if (db) await tx('meta', 'readwrite', (s) => s.put({ minDE: engine.opts.minDE, taught: engine.taught }, 'settings'));
 }
 
+const testResults = []; // Test mode (PH.testVariants, js/vision/testmode.js)
+
 const BOX_IN_PX = 2048; // box photo's long side for making the box picture
 
 const handlers = {
@@ -455,6 +457,19 @@ const handlers = {
     const aspect = msg.aspect;
     post({ type: 'boxGrid', grid: PH.chooseGrid(msg.pieces, aspect) });
   },
+  // Test mode: one picture through every variant (camera view or photo)
+  testRun(msg) {
+    const src = bitmapSource(msg.bitmap), out = { label: msg.label, w: src.w, h: src.h, tilt: msg.tilt || null, at: new Date().toISOString(), variants: [] };
+    PH.TEST_VARIANTS.forEach((v, i) => {
+      post({ type: 'status', text: `Test mode — ${msg.label}: ${v.name} (${i + 1}/${PH.TEST_VARIANTS.length})…` });
+      out.variants.push(PH.runTestVariant(v, src, engine, { tilt: msg.tilt || undefined }));
+    });
+    msg.bitmap.close();
+    testResults.push(out);
+    const best = out.variants.filter((x) => !x.error).sort((a, b) => b.found - a.found)[0];
+    post({ type: 'testDone', label: msg.label, n: testResults.length, summary: out.variants.map((x) => ({ name: x.name, found: x.found, shaped: x.shaped, error: x.error || null })), best: best ? { name: best.name, found: best.found } : null });
+  },
+  testClear() { testResults.length = 0; post({ type: 'testDone', n: 0, cleared: true }); },
   // the Build view: groups of joined pieces laid out, and the join log
   builds() { post({ type: 'builds', data: engine.buildGroups() }); },
   // the piece view (a tapped piece): its description, without selecting it
@@ -605,6 +620,7 @@ const handlers = {
       housekeeping: Object.assign({}, engine.hk || {}, { mergedInto: engine.mergedInto ? engine.mergedInto.size : 0 }),
       unchecked: engine.whyUnchecked ? engine.whyUnchecked() : null, colTol: PH.colTol, colourHealth: engine.colourHealth ? engine.colourHealth() : null, events: (engine.events || []).slice(-120), overCount: engine.box ? Math.max(0, engine.counts().pieces - PH.boxPieces(engine.box)) : 0,
       cvBuild: PH.cvBuild, cvError: PH.cvError || null, simd: simdOk,
+      testMode: testResults.length ? { variants: PH.TEST_VARIANTS.map((v) => v.name), results: testResults } : null,
       camWorker: { frames: camFrames, reading: !!camReader, error: camError },
       cvInfo: PH.cv && PH.cv.getBuildInformation ? String(PH.cv.getBuildInformation()).slice(0, 3000) : null,
     } });

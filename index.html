@@ -147,6 +147,16 @@
       <p class="muted small">Measures your camera's angle in 6 seconds: tilt the phone back and forth over the table without sliding it. It helps the distance hint and tilt correction.</p>
       <label id="torchRow" class="row" hidden><input id="torchToggle" type="checkbox"> Flashlight</label>
       <label class="row"><input id="debugToggle" type="checkbox"> Show timing / debug info</label>
+      <label class="row"><input id="testToggle" type="checkbox"> Test mode: try several ways of reading each picture, for a detailed report</label>
+      <div id="testBox" hidden>
+        <div class="menu-actions">
+          <button id="testView">Test this view</button>
+          <button id="testPhotos">Test photos…</button>
+          <button id="testClear">Clear test results</button>
+        </div>
+        <input id="testInput" type="file" accept="image/*" multiple hidden>
+        <p id="testStatus" class="muted small">Each picture is read 10 ways (the app as is, glass mode at two levels, colour only, no shadow peel, no corner splitter, no tilt estimate, no photo fit, lower resolution, the old light window). Your catalogue is not changed. Send report includes the results and the pictures.</p>
+      </div>
       <div class="menu-actions">
         <button id="reportBtn">Send report (frame + data)</button>
       </div>

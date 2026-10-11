@@ -984,13 +984,18 @@
       // glass-table pieces-1 flipped to a wrong model and 1 piece)
       const tried = this.opts.autoBg !== false ? this.bgCandidates(proc).map((c) => this.scoreBg(proc, c, { splitBudgetMs: undefined })) : [];
       const snapBest = tried.length ? this.pickBg(tried) : null;
-      const snapModel = snapBest ? snapBest.c : null;
+      // (opts.snapBg: a background model forced - Test mode's variants)
+      const snapModel = this.opts.snapBg || (snapBest ? snapBest.c : null);
+      this.snapModelUsed = snapModel;
       let seg = PH.segment(proc, this.segOpts(snapModel ? { bgModel: snapModel, seamSplit: true } : { bg: this.bg, bgSmooth: 0.5, seamSplit: true }));
-      if (snapModel) seg = this.photoFit(proc, seg, snapModel, tried) || seg;
+      if (snapModel && !this.opts.snapBg && this.opts.photoFit !== false) seg = this.photoFit(proc, seg, snapModel, tried) || seg; // (a forced model is used as it is)
+      this.snapSeg = { n: seg.dets.length, unit: seg.unitArea ? Math.round(seg.unitArea) : null };
       if (!this.bg) this.bg = seg.bg;
       if (!this.boardRef && seg.bg && seg.bg.L > 15) { this.boardRef = { L: seg.bg.L, a: seg.bg.a, b: seg.bg.b }; this.boardRefDirty = true; } // (a first photo sets the scan's board)
       this.frameCtx = { source, scale: proc.scale, bg: seg.bg, thresh: seg.thresh, lut: seg.lut, unitArea: seg.unitArea, still: true, deadline: Infinity, fg: seg.fg, procW: proc.w, procH: proc.h };
       const dets = this.classify(seg.dets, seg.unitArea);
+      // (Test mode: where detections go)
+      this.snapSeg.merged = dets.filter((d) => d.merged).length; this.snapSeg.border = dets.filter((d) => d.border).length;
       const unitF = this.unitFrame(dets);
       const before = this.pieces.size;
       const known = new Set(this.pieces.keys());

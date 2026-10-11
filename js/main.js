@@ -5,7 +5,7 @@ import { FrameSetup } from './frameSetup.js';
 import { TableView } from './tableView.js';
 import { drawGroup } from './buildView.js';
 
-const APP_VERSION = '0.24.0';
+const APP_VERSION = '0.25.0';
 const $ = (id) => document.getElementById(id);
 // Version on the start screen (and under More), so it's clear which build the phone is running.
 document.addEventListener('DOMContentLoaded', () => { const v = $('appVersion'); if (v) v.textContent = `Version ${APP_VERSION}`; });
@@ -83,7 +83,8 @@ const frameSetup = new FrameSetup(W, toast, () => applyPower());
 function onWorkerMessage(e) {
   const m = e.data;
   switch (m.type) {
-    case 'status': setStatus(m.text); break;
+    case 'status': setStatus(m.text); if (S.testing) $('testStatus').textContent = m.text; break;
+    case 'testDone': testDone(m); break;
     case 'ready':
       S.ready = true;
       S.asmCells = null; // a new or reopened catalogue: its assembled part arrives with the next frames
@@ -954,6 +955,65 @@ overlay.addEventListener('pointerup', (e) => {
     W.post({ type: 'select', id: null });
   }
 });
+// ---------- test mode ----------
+// (owner, 2026-10-11) Each tested picture - the camera view or photos - is
+// read several ways at once in the worker (TEST_VARIANTS), on throwaway
+// engines; the numbers and the pictures go into Send report for analysis.
+S.testImages = []; S.testQueue = []; S.testing = false; S.testViews = 0;
+$('testToggle').onchange = (e) => { S.testMode = e.target.checked; $('testBox').hidden = !S.testMode; };
+$('testPhotos').onclick = () => $('testInput').click();
+$('testInput').onchange = (e) => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  for (const f of files) S.testQueue.push({ file: f, label: f.name });
+  if (files.length) $('testStatus').textContent = `${S.testQueue.length} picture${S.testQueue.length > 1 ? 's' : ''} waiting — each takes a few seconds per method…`;
+  pumpTest();
+};
+$('testView').onclick = async () => {
+  $('menu').hidden = true; noteActivity(); applyPower();
+  toast('Hold still over the pieces — the view is captured in a moment and tested (the camera keeps running).', 3500);
+  // a live, settled camera image (exposure and focus need a moment)
+  const t0 = performance.now();
+  while (!(video.videoWidth && video.readyState >= 2) && performance.now() - t0 < 8000) await new Promise((r) => setTimeout(r, 200));
+  await new Promise((r) => setTimeout(r, 1500));
+  if (!video.videoWidth) { toast('Camera not ready — try again.'); return; }
+  let bmp;
+  try { bmp = await createImageBitmap(video); } catch (_) {
+    const c = document.createElement('canvas'); c.width = video.videoWidth; c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0); bmp = await createImageBitmap(c);
+  }
+  S.testQueue.push({ bitmap: bmp, label: `camera view ${++S.testViews}`, tilt: currentTilt() });
+  pumpTest();
+};
+$('testClear').onclick = () => { S.testQueue = []; W.post({ type: 'testClear' }); };
+async function pumpTest() {
+  if (S.testing || !S.testQueue.length) return;
+  S.testing = true;
+  const job = S.testQueue.shift();
+  try {
+    const bmp = job.bitmap || await createImageBitmap(job.file, { imageOrientation: 'from-image' });
+    // a copy of the picture for the report (at most 1600 px)
+    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height)), c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+    if (blob) S.testImages.push({ label: job.label, blob });
+    W.post({ type: 'testRun', bitmap: bmp, label: job.label, tilt: job.tilt || null }, [bmp]);
+  } catch (e) {
+    logError('test mode: ' + e.message);
+    S.testing = false;
+    pumpTest();
+  }
+}
+function testDone(m) {
+  S.testing = false;
+  if (m.cleared) { S.testImages = []; $('testStatus').textContent = 'Test results cleared.'; return; }
+  const lines = (m.summary || []).map((x) => `${x.name}: ${x.error ? 'error' : `${x.found} found, ${x.shaped} read`}`);
+  $('testStatus').innerHTML = `<b>${m.n} picture${m.n > 1 ? 's' : ''} tested.</b> Last, ${m.label}${m.best ? ` — most pieces: ${m.best.name} (${m.best.found})` : ''}:<br>${lines.join('<br>')}${S.testQueue.length ? `<br>${S.testQueue.length} more waiting…` : '<br>Send report to share the results and pictures.'}`;
+  if ($('menu').hidden) toast(`Test done: ${m.label}${m.best ? ` — most pieces with "${m.best.name}" (${m.best.found})` : ''}. Details in Settings; Send report shares them.`, 5000);
+  pumpTest();
+}
+
 // ---------- build view ----------
 // The puzzle built from confirmed joins (Fits taps, pairs found joined in
 // photos), piece by piece; the camera is off while it is open.
@@ -1797,6 +1857,8 @@ async function finishReport1(workerData, analyzed, boxImg) {
   if (analyzed) files.push(new File([analyzed], `puzzle-report-${stamp}-analyzed.jpg`, { type: 'image/jpeg' }));
   if (boxImg) files.push(new File([boxImg], `puzzle-report-${stamp}-box.jpg`, { type: 'image/jpeg' }));
   if (S.lastSnapFile) files.push(new File([S.lastSnapFile], `puzzle-report-${stamp}-snap.jpg`, { type: S.lastSnapFile.type || 'image/jpeg' }));
+  // Test mode's pictures (results are in the data: worker.testMode)
+  (S.testImages || []).forEach((t, i) => files.push(new File([t.blob], `puzzle-report-${stamp}-test${i + 1}.jpg`, { type: 'image/jpeg' })));
   bump('reports');
   const data = {
     app: APP_VERSION, time: new Date().toISOString(), userAgent: navigator.userAgent,
